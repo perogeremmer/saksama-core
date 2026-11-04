@@ -470,7 +470,7 @@ func (a *AdviceInput) assessGhOst() EngineAssessment {
 		x.Steps = []string{
 			"check it will do what you think: add --dry-run to the command above",
 			"then replace --dry-run with --execute",
-			"add --postpone-cutover if your build supports it, so the swap waits for you",
+			"run with --hold-cutover, so the swap waits for you",
 			"verify the ghost table before the cut-over; after the swap there is no data rollback",
 		}
 	}

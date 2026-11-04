@@ -19,7 +19,7 @@ contract, so they are never renumbered or reused for something else.
 | `planned` | specified here, not implemented yet |
 | `moved` | superseded by the engine matrix (`saksama advise`), which reports it as a per-engine requirement instead of a check |
 
-Counts today: **49 implemented check IDs**, plus **12 server settings** in the
+Counts today: **50 implemented check IDs**, plus **12 server settings** in the
 doctor (section S).
 
 ---
@@ -103,8 +103,8 @@ doctor (section S).
 | E2 | the storage engine is not InnoDB | `BLOCKER` | done | the online DDL rules do not apply |
 | E3 | the server version cannot be parsed | `BLOCKER` | done | without a version, no capability can be claimed |
 | E4 | Percona Toolkit is older than 3.0 | `WARN` | planned | no `--resume`, narrower ALTER grammar |
-| E5 | gh-ost is not installed | `BLOCKER` | moved | now `R3`, per engine |
-| E6 | pt-osc is not installed | `BLOCKER` | moved | now `R3`, per engine |
+| E5 | MySQL is older than 5.7 | `BLOCKER` | done | past end of life, and its INFORMATION_SCHEMA lacks the facts a verified plan is built on |
+| E6 | gh-ost is not installed | `BLOCKER` | moved | now `R3`, per engine |
 | E7 | gh-ost is selected for a composite primary key | `BLOCKER` | moved | now a gh-ost requirement in the engine matrix |
 | E8 | a donor or replica exists | `INFO` | planned | relevant to a future multi-instance profile |
 | E9 | the InnoDB row format caps key length | `INFO` | moved | now A5 and A6 |

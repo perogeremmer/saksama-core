@@ -53,6 +53,17 @@ func capabilityFor(op model.Op, srv model.Server, tbl model.Table) Capability {
 		}
 	}
 
+	if v.Major < 5 || (v.Major == 5 && v.Minor < 7) {
+		// The copy engines have their own requirements (E4, E8), but before 5.7
+		// even the facts underwriting the plan are thinner than a verified
+		// migration can rest on. MySQL 5.6 information_schema also predates
+		// everything this tool checks, and 5.6 itself passed end of life in 2021.
+		return Capability{
+			RuleID: "R-MYSQL-56-UNSUPPORTED", Method: MethodUnsupported, Blocked: true,
+			Reason: fmt.Sprintf("MySQL %d.%d is past end of life and its INFORMATION_SCHEMA lacks the reported fact this plan is built on; run MySQL 5.7 or newer", v.Major, v.Minor),
+		}
+	}
+
 	engine := strings.ToLower(tbl.Engine)
 	if engine != "" && engine != "innodb" {
 		return Capability{

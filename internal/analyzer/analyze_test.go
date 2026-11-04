@@ -1253,3 +1253,23 @@ func TestDiskOperatorSuppliedNumbersAreUsed(t *testing.T) {
 		t.Fatalf("operator-supplied numbers must be judged too: %+v", p.Checks)
 	}
 }
+
+// MySQL 5.6 is past end of life, and its information_schema does not carry the
+// facts a verified migration is built on. A plan against it must refuse rather
+// than pretend the rules transfer.
+func TestPlanRefusesMySQL56(t *testing.T) {
+	p := plan(t, baseTable(), "5.6.51", "ADD INDEX ix_c (status)")
+	if !p.Recommendation.Blocked {
+		t.Fatal("a plan against MySQL 5.6 must be blocked, not guessed")
+	}
+	if p.Recommendation.Blockers == 0 {
+		t.Fatal("no blocker was counted for a MySQL 5.6 plan")
+	}
+	if !hasCheck(p, "E5", SeverityBlocker) {
+		t.Fatal("check E5 (server too old) is missing from the plan")
+	}
+	// The boundary matters: 5.7 stays plannable.
+	if p := plan(t, baseTable(), "5.7.44", "ADD INDEX ix_c (status)"); p.Recommendation.Blocked && p.Recommendation.Engine == EngineNative {
+		t.Fatalf("5.7 must not be caught by the 5.6 refusal: %+v", p.Recommendation)
+	}
+}

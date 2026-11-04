@@ -130,6 +130,155 @@ jobs:
           SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
         run: go test -tags=integration -count=1 -v ./test/integration/
 
+
+  # The claims checks: what docs/COMPATIBILITY.md says must hold somewhere.
+  # Refusals are cheap; the 5.7 suite is a full run against a real 5.7 server.
+  claims:
+    name: Claim checks (5.6 refused, 5.7 verified, MariaDB refused)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Start MySQL 5.7 with binlog and gh-ost's metadata instrument
+        run: |
+          docker run -d --name mysql-57 \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
+            -e MYSQL_DATABASE=shop \
+            -p 33308:3306 \
+            mysql:5.7 \
+            --log-bin=mysql-bin --server-id=1 --binlog-format=ROW \
+            --performance-schema-instrument='wait/lock/metadata/sql/mdl=ON'
+          for i in $(seq 1 90); do
+            if docker exec mysql-57 mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
+              echo ready; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL 5.7 did not become ready"; exit 1
+
+      - name: Start MySQL 5.6
+        run: |
+          docker run -d --name mysql-56 \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
+            -e MYSQL_DATABASE=shop \
+            -p 33309:3306 mysql:5.6 \
+            --skip-ssl
+          for i in $(seq 1 60); do
+            if docker exec mysql-56 mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
+              echo ready; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL 5.6 did not become ready"; exit 1
+
+      - name: Start MariaDB 10.11
+        run: |
+          docker run -d --name mariadb-1011 \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
+            -e MYSQL_DATABASE=shop \
+            -p 33310:3306 mariadb:10.11
+          for i in $(seq 1 60); do
+            if docker exec mariadb-1011 mariadb-admin ping -h127.0.0.1 -uroot --silent >/dev/null 2>&1; then
+              echo ready; exit 0
+            fi
+            sleep 2
+          done
+          echo "MariaDB did not become ready"; exit 1
+
+      - name: Create the tables the refusal plans read
+        run: |
+          docker exec mysql-56 mysql -uroot shop \
+            -e "CREATE TABLE kept_table (id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY, a int NOT NULL)"
+          docker exec mariadb-1011 mariadb -uroot shop \
+            -e "CREATE TABLE kept_table (id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY, a int NOT NULL)"
+
+      - name: Install the single pt-osc script
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbi-perl libdbd-mysql-perl
+          sudo curl -fsSL -o /usr/local/bin/pt-online-schema-change \
+            https://raw.githubusercontent.com/percona/percona-toolkit/v3.7.2/bin/pt-online-schema-change
+          sudo chmod +x /usr/local/bin/pt-online-schema-change
+
+      - name: Download gh-ost 1.1.11
+        run: |
+          curl -fsSL -o /tmp/gh-ost.tgz \
+            https://github.com/github/gh-ost/releases/download/v1.1.11/gh-ost-linux-amd64.tar.gz
+          mkdir -p /tmp/ghost && tar xzf /tmp/gh-ost.tgz -C /tmp/ghost
+          chmod +x /tmp/ghost/gh-ost
+          /tmp/ghost/gh-ost --version
+
+      - name: MySQL 5.6 is refused with a clear error, not a crash
+        run: |
+          make build
+          set +e
+          ./bin/saksama plan --live -h 127.0.0.1 -P 33309 -u root -d shop -t kept_table \
+            -a "ADD INDEX ix (a)" --tls false --json > /tmp/56.json
+          code=$?
+          set -e
+          test "$code" -eq 1
+          jq -e '.recommendation.blocked == true' /tmp/56.json
+          jq -e '[.checks[] | select(.id == "E5" and .severity == "BLOCKER")] | length == 1' /tmp/56.json
+
+      - name: MariaDB is refused by E1, not by an introspection crash
+        run: |
+          set +e
+          ./bin/saksama plan --live -h 127.0.0.1 -P 33310 -u root -d shop -t kept_table \
+            -a "ADD INDEX ix (a)" --json > /tmp/mdb.json
+          code=$?
+          set -e
+          test "$code" -eq 1
+          jq -e '[.checks[] | select(.id == "E1" and .severity == "BLOCKER")] | length == 1' /tmp/mdb.json
+
+      - name: MySQL 5.7 runs the full suite with real copy engines
+        env:
+          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33308)/"
+          PATH: /tmp/ghost:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+        run: |
+          go test -tags=integration -count=1 -v ./test/integration/
+
+  # The flag probe: what the wrappers emit must exist in the engine binaries.
+  # A copy engine exits non-zero on one unknown flag, so a wrong spelling is a
+  # whole-run failure at production time; here it is a whole-run failure at CI
+  # time instead. The stubs used elsewhere accept anything, which is exactly how
+  # a wrong flag once shipped, so this job runs against real binaries.
+  flag-matrix:
+    name: Engine flag matrix (flags emitted are flags known)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Download gh-ost 1.1.11
+        run: |
+          curl -fsSL -o /tmp/gh-ost.tgz \
+            https://github.com/github/gh-ost/releases/download/v1.1.11/gh-ost-linux-amd64.tar.gz
+          mkdir -p /tmp/ghost && tar xzf /tmp/gh-ost.tgz -C /tmp/ghost
+          chmod +x /tmp/ghost/gh-ost
+
+      - name: Install perl, DBD::mysql, and the single pt-osc script
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbi-perl libdbd-mysql-perl
+          sudo curl -fsSL -o /usr/local/bin/pt-online-schema-change \
+            https://raw.githubusercontent.com/percona/percona-toolkit/v3.7.2/bin/pt-online-schema-change
+          sudo chmod +x /usr/local/bin/pt-online-schema-change
+
+      - name: Every flag the wrappers emit must be known to the binaries
+        env:
+          SAKSAMA_GH_OST_BIN: /tmp/ghost/gh-ost
+          SAKSAMA_PT_OSC_BIN: /usr/local/bin/pt-online-schema-change
+        run: go test -tags=probe -count=1 -v ./internal/engine/copyeng/
+
   offline-demo:
     name: Offline plan demo
     runs-on: ubuntu-latest
