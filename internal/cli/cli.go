@@ -1,0 +1,375 @@
+// Package cli wires the commands. Every command is a thin frontend over the
+// analyzer (and, in later phases, the core daemon).
+package cli
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/perogeremmer/saksama-core/internal/analyzer"
+	"github.com/perogeremmer/saksama-core/internal/model"
+	"github.com/perogeremmer/saksama-core/internal/parser"
+	"github.com/perogeremmer/saksama-core/internal/render"
+)
+
+// Version is the build version, injected with -ldflags.
+var Version = "dev"
+
+// Exit codes are part of the contract with CI.
+const (
+	ExitOK       = 0
+	ExitBlocked  = 1
+	ExitUsage    = 2
+	ExitInternal = 3
+)
+
+// Run dispatches a command line and returns the process exit code.
+func Run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		usage(stderr)
+		return ExitUsage
+	}
+
+	switch args[0] {
+	case "plan":
+		if hasFlag(args[1:], "--live") {
+			return cmdPlanLive(removeFlag(args[1:], "--live"), stdout, stderr)
+		}
+		return cmdPlan(args[1:], stdout, stderr)
+	case "apply":
+		return cmdApply(args[1:], stdout, stderr)
+	case "status":
+		return cmdStatus(args[1:], stdout, stderr)
+	case "events":
+		return cmdEvents(args[1:], stdout, stderr)
+	case "export":
+		return cmdExport(args[1:], stdout, stderr)
+	case "cleanup":
+		return cmdCleanup(args[1:], stdout, stderr)
+	case "schema":
+		return cmdSchema(args[1:], stdout, stderr)
+	case "version", "--version", "-V":
+		fmt.Fprintf(stdout, "saksama %s (Saksama Core, contract v%d)\n", Version, analyzer.ContractVersion)
+		return ExitOK
+	case "help", "--help", "-help":
+		usage(stdout)
+		return ExitOK
+	case "daemon", "cutover", "cancel", "recover", "attach":
+		fmt.Fprintf(stderr, "saksama %s: not implemented in this build\n", args[0])
+		fmt.Fprintf(stderr, "this build provides: plan, plan --live, apply, status, events, export, cleanup, schema\n")
+		return ExitUsage
+	default:
+		fmt.Fprintf(stderr, "saksama: unknown command %q\n\n", args[0])
+		usage(stderr)
+		return ExitUsage
+	}
+}
+
+func usage(w io.Writer) {
+	fmt.Fprint(w, `Saksama - examine before you alter.
+
+Usage:
+  saksama plan   --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
+  saksama plan --live -h <host> -d <db> -t <table> -a "<ALTER>" [options]
+  saksama apply  -h <host> -d <db> -t <table> -a "<ALTER>" [options]
+  saksama status [<session>] [--json]
+  saksama events <session>
+  saksama export <session>
+  saksama cleanup <session>
+  saksama schema
+  saksama version
+
+Offline planning takes the table definition from SHOW CREATE TABLE output, so it
+can run in CI without touching the database. --live plans against the server and
+records a session; apply executes a native migration.
+
+Connection options (plan --live, apply):
+  -h, --host <name>        MySQL host
+  -P, --port <n>           MySQL port
+  -u, --user <name>        MySQL user
+  -d, --database <name>    database
+  -t, --table <name>       table
+  -a, --alter <sql>        the ALTER TABLE body
+  --defaults-extra-file <path>   read credentials from an option file
+  --ask-pass               prompt for the password (never pass it in argv)
+  --no-defaults            ignore ~/.my.cnf
+  --tls <mode>             preferred|true|false|skip-verify
+
+Apply options:
+  --production             require --confirm <host> before any mutation
+  --confirm <host>         must equal the target host name when --production
+  --dry-run                build statements and stop
+  --engine <name>          native|gh-ost|pt-osc (only native executes today)
+  --force                  downgrade selected preflight aborts
+  --lock-wait-timeout <n>  session lock_wait_timeout in seconds (default 10)
+  --json                   machine-readable output
+
+Plan options:
+  --ddl <path|->         SHOW CREATE TABLE output, or - for stdin
+  --schema <path>        table JSON produced by: saksama plan --dump-schema
+  --dump-schema          write the parsed table JSON instead of planning
+  --alter <sql>          the ALTER TABLE body, for example "ADD INDEX ix (a)"
+  --mysql-version <v>    server version, for example 8.0.36 (required)
+  --host <name>          target host label, used for reporting and confirmation
+  --engine <name>        force native|gh-ost|pt-osc (still subject to blockers)
+  --production           mark the target as production
+  --free-disk <bytes>    free space on the data volume, for the disk check
+  --rows <n>             estimated row count (improves the duration range)
+  --data-bytes <n>       table data size in bytes
+  --index-bytes <n>      table index size in bytes
+  --json                 emit the machine-readable plan instead of the card
+  --no-color             accepted for compatibility; output is always plain text
+
+Exit codes:
+  0  plan produced, no blockers
+  1  plan produced with blockers (safe to use as a CI gate)
+  2  usage error
+  3  internal error
+`)
+}
+
+type planOpts struct {
+	ddlPath    string
+	schemaPath string
+	dumpSchema bool
+	alter      string
+	mysqlVer   string
+	host       string
+	engine     string
+	production bool
+	freeDisk   int64
+	rows       int64
+	dataBytes  int64
+	indexBytes int64
+	jsonOut    bool
+}
+
+func cmdPlan(args []string, stdout, stderr io.Writer) int {
+	var o planOpts
+
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&o.ddlPath, "ddl", "", "SHOW CREATE TABLE output file, or - for stdin")
+	fs.StringVar(&o.schemaPath, "schema", "", "table JSON file")
+	fs.BoolVar(&o.dumpSchema, "dump-schema", false, "emit parsed table JSON")
+	fs.StringVar(&o.alter, "alter", "", "ALTER TABLE body")
+	fs.StringVar(&o.mysqlVer, "mysql-version", "", "server version")
+	fs.StringVar(&o.host, "h", "", "target host label")
+	fs.StringVar(&o.host, "host", "", "target host label")
+	fs.StringVar(&o.engine, "engine", "", "force engine")
+	fs.BoolVar(&o.production, "production", false, "mark target as production")
+	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free disk bytes")
+	fs.Int64Var(&o.rows, "rows", 0, "estimated row count (informs duration)")
+	fs.Int64Var(&o.dataBytes, "data-bytes", 0, "table data size in bytes")
+	fs.Int64Var(&o.indexBytes, "index-bytes", 0, "table index size in bytes")
+	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
+	fs.Bool("no-color", false, "accepted for compatibility")
+
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+
+	// --- Load schema -------------------------------------------------------
+	var (
+		tbl     model.Table
+		src     string
+		ignored []string
+		srv     model.Server
+	)
+
+	switch {
+	case o.schemaPath != "":
+		data, err := os.ReadFile(o.schemaPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama plan: %v\n", err)
+			return ExitUsage
+		}
+		var payload schemaFile
+		if err := json.Unmarshal(data, &payload); err != nil {
+			fmt.Fprintf(stderr, "saksama plan: %s is not a valid schema file: %v\n", o.schemaPath, err)
+			return ExitUsage
+		}
+		tbl = payload.Table
+		srv = payload.Server
+		src = "json"
+
+	case o.ddlPath != "":
+		ddl, err := readInput(o.ddlPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama plan: %v\n", err)
+			return ExitUsage
+		}
+		parsed, ign, err := parser.ParseCreateTable(ddl)
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama plan: cannot parse table definition: %v\n", err)
+			return ExitUsage
+		}
+		tbl, ignored, src = parsed, ign, "ddl"
+
+	default:
+		fmt.Fprintf(stderr, "saksama plan: provide --ddl <file|-> or --schema <file>\n")
+		return ExitUsage
+	}
+
+	if o.mysqlVer != "" {
+		srv.Version = o.mysqlVer
+	}
+	if o.rows > 0 {
+		tbl.Rows = o.rows
+	}
+	if o.dataBytes > 0 {
+		tbl.DataLength = o.dataBytes
+	}
+	if o.indexBytes > 0 {
+		tbl.IndexLength = o.indexBytes
+	}
+	if srv.Vendor == "" {
+		srv.Vendor = "mysql"
+	}
+
+	if o.dumpSchema {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(schemaFile{Server: srv, Table: tbl}); err != nil {
+			fmt.Fprintf(stderr, "saksama plan: %v\n", err)
+			return ExitInternal
+		}
+		return ExitOK
+	}
+
+	// --- Parse the ALTER ---------------------------------------------------
+	if strings.TrimSpace(o.alter) == "" {
+		fmt.Fprintf(stderr, "saksama plan: --alter is required\n")
+		return ExitUsage
+	}
+	alter, err := parser.ParseAlter("ALTER TABLE `" + tbl.Name + "` " + alterStatementBody(o.alter))
+	if err == nil && alter.Table == "" {
+		alter.Table = tbl.Name
+	}
+	if err == nil {
+		alterSchema := tbl.Schema
+		if alterSchema != "" {
+			alter.Schema = alterSchema
+		}
+	}
+	if err != nil {
+		// Fail closed: an unparseable ALTER is reported through the plan rather
+		// than crashing, so CI still receives a machine-readable blocker.
+		// The synthetic unknown operation guarantees the plan can never be
+		// reported as ready when nothing was actually understood.
+		alter = parser.Alter{Ops: []model.Op{{Kind: model.OpUnknown, Raw: strings.TrimSpace(o.alter)}}}
+		ignored = append(ignored, "ALTER statement could not be parsed: "+err.Error())
+	}
+
+	in := analyzer.Input{
+		Server:       srv,
+		Table:        tbl,
+		Ops:          alter.Ops,
+		RawAlter:     strings.TrimSpace(o.alter),
+		Algorithm:    alter.Algorithm,
+		Lock:         alter.Lock,
+		Host:         o.host,
+		Production:   o.production,
+		SchemaSource: src,
+		Ignored:      ignored,
+		FreeDisk:     o.freeDisk,
+	}
+	if o.engine != "" {
+		switch strings.ToLower(o.engine) {
+		case "native", "gh-ost", "pt-osc":
+			in.EngineHint = analyzer.Engine(strings.ToLower(o.engine))
+		default:
+			fmt.Fprintf(stderr, "saksama plan: unknown engine %q (want native, gh-ost, or pt-osc)\n", o.engine)
+			return ExitUsage
+		}
+	}
+
+	plan := analyzer.Analyze(in)
+
+	if o.jsonOut {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(plan); err != nil {
+			fmt.Fprintf(stderr, "saksama plan: %v\n", err)
+			return ExitInternal
+		}
+	} else {
+		if err := render.PlanCard(stdout, plan); err != nil {
+			fmt.Fprintf(stderr, "saksama plan: %v\n", err)
+			return ExitInternal
+		}
+	}
+
+	if plan.Recommendation.Blockers > 0 {
+		return ExitBlocked
+	}
+	return ExitOK
+}
+
+// alterStatementBody accepts either a full ALTER TABLE statement or just the
+// operation list, because both are natural to type.
+func alterStatementBody(s string) string {
+	l := strings.ToLower(strings.TrimSpace(s))
+	if strings.HasPrefix(l, "alter table") {
+		return strings.TrimSpace(s)[len("alter table"):]
+	}
+	return s
+}
+
+func readInput(path string) (string, error) {
+	if path == "-" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", fmt.Errorf("reading stdin: %w", err)
+		}
+		return string(data), nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+type schemaFile struct {
+	Server model.Server `json:"server"`
+	Table  model.Table  `json:"table"`
+}
+
+func cmdSchema(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("schema", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if _, err := io.WriteString(stdout, planJSONSchema); err != nil {
+		return ExitInternal
+	}
+	return ExitOK
+}
+
+// hasFlag reports whether an exact flag token is present.
+func hasFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// removeFlag strips an exact bare flag token.
+func removeFlag(args []string, name string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == name {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}

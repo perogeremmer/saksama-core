@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Build static binary
+        run: make build
+
+      - name: Binary is static
+        run: |
+          make build
+          file bin/saksama
+          ./bin/saksama version
+
+  integration:
+    name: Integration (MySQL ${{ matrix.mysql }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ["8.0", "8.4"]
+    services:
+      mysql:
+        image: mysql:${{ matrix.mysql }}
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: shop
+        ports:
+          - 33306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -uroot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Wait for MySQL
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec "$(docker ps -qf ancestor=mysql:${{ matrix.mysql }})" mysqladmin ping -uroot --silent 2>/dev/null; then
+              echo "ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready"; exit 1
+
+      - name: Integration tests
+        env:
+          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
+        run: go test -tags=integration -count=1 ./test/integration/ -v
+
+  offline-demo:
+    name: Offline plan demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Native plan must succeed
+        run: |
+          make build
+          ./bin/saksama plan --ddl testdata/orders.sql \
+            --alter "ADD INDEX ix_created (created_at)" \
+            --mysql-version 8.0.36 --json | jq -e '.recommendation.blockers == 0'
+
+      - name: Rebuild with foreign keys must be refused
+        run: |
+          set +e
+          ./bin/saksama plan --ddl testdata/orders.sql \
+            --alter "MODIFY COLUMN status varchar(64) NOT NULL" \
+            --mysql-version 8.0.36 --json > /tmp/blocked.json
+          code=$?
+          set -e
+          test "$code" -eq 1
+          jq -e '.recommendation.blocked == true' /tmp/blocked.json
+          jq -e '[.checks[] | select(.severity == "BLOCKER")] | length > 0' /tmp/blocked.json

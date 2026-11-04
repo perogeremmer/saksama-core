@@ -1,0 +1,273 @@
+<div align="center">
+
+# Saksama Core
+
+**Examine before you alter.**
+
+Safe MySQL schema migrations for teams with one database, no DBA, and no budget for blue-green.
+
+[![CI](https://github.com/perogeremmer/saksama-core/actions/workflows/ci.yml/badge.svg)](https://github.com/perogeremmer/saksama-core/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](go.mod)
+
+`Periksa saksama, baru ubah.`
+
+</div>
+
+---
+
+**Saksama** (KBBI: *teliti, cermat, hati-hati*) is an Indonesian word meaning "meticulous". The standard spelling *seksama* is equally correct. The tool is called **Saksama Core** because the analyzer and session engine are meant to be embedded in other frontends — a TUI today, a web control plane later.
+
+## Why this exists
+
+You have one MySQL instance. No replica. No DBA. A 59-million-row table, and a change you have postponed for three months because you do not know whether `ALTER TABLE` will lock it for two minutes or two hours.
+
+Blue-green would solve it. Blue-green is expensive in *engineering time*: dual writes, two deployment cycles, traffic switching, a rollback plan. That is the part small teams cannot afford — not the server.
+
+So the real need is narrower than blue-green: **an online schema change on one instance, done correctly.**
+
+The copy engines already exist and they are good. What is missing is the layer above them:
+
+| Missing layer | What goes wrong without it |
+|---|---|
+| **Analysis** | The migration fails halfway: FK charset mismatch (3780), key too long for `utf8mb4` (1071), column used in a foreign key (1832), TEXT indexed without a prefix (1170), or a metadata-lock queue that turns one slow query into a total outage |
+| **Routing** | A 59M-row table gets fully copied for a secondary index that MySQL can build in place with `LOCK=NONE` |
+| **Guardrails** | The tool does something destructive that it cannot undo |
+| **Honest recovery** | Someone promises "just roll back" for a phase where that silently discards writes |
+
+Saksama Core is **not** a new copy engine and **not** a thin gh-ost wrapper. It owns the decision layer; engines stay interchangeable workers.
+
+## See it work
+
+```
+$ saksama plan --live -h db.prod -d shop -t orders \
+               -a "ADD INDEX ix_paid (paid_at)"
+
+ALTER      ADD INDEX ix_paid (paid_at)
+TARGET     shop.orders @ db.prod
+ENGINE     native [INPLACE, LOCK=NONE] (8.0.46)
+DURATION   3m29s - 17m29s | confidence medium
+TABLE      ~59.0M rows, 20.5 GB, 8 cols, 3 indexes, 2 out / 0 in FK
+FINGERPRINT sha256:0a208c2b6f7cc6bb...
+
+WHY
+  - every operation is supported by a verified native DDL rule; no table copy is needed
+  - the operation is in-place and permits concurrent DML
+
+OPERATIONS
+  INPLACE, LOCK=NONE R-ADD-INDEX-INPLACE    ADD INDEX ix_paid (paid_at)
+
+FINDINGS
+  INFO    [A1] foreign key charset and collation agree
+          constraint "fk_orders_spot" (outgoing spots) is compatible
+  INFO    [D2] session lock_wait_timeout is bounded
+
+RECOVERY
+  Before execution: nothing has been mutated
+  During execution: the server owns the DDL; cancellation may not be immediate
+  After success:    forward migration only; schema changes are not data-rollback safe
+
+RECOMMEND  native
+BLOCKERS   0
+RESULT     ready (nothing has been changed)
+```
+
+The same table, with a change that needs a rebuild:
+
+```
+$ saksama plan --live ... -a "MODIFY COLUMN status varchar(64) NOT NULL"
+
+  BLOCKER [R3] copy-based migration is blocked for tables with foreign keys
+          orders has 2 foreign key constraint(s) in or out
+          action: use a verified native operation, or run a reviewed maintenance
+                  procedure; Saksama Core v1 will not drop and recreate
+                  constraints automatically
+RECOMMEND  none
+BLOCKERS   1
+RESULT     refused
+```
+
+**That refusal is the product.** Most wrappers would happily drop both constraints, copy the table, and recreate them — silently losing `ON DELETE CASCADE`.
+
+## Install
+
+```bash
+go install github.com/perogeremmer/saksama-core/cmd/saksama@latest
+```
+
+Or build a static binary:
+
+```bash
+git clone git@github.com:perogeremmer/saksama-core.git
+cd saksama-core
+make build          # -> bin/saksama
+./bin/saksama version
+```
+
+Single static binary, no CGO, no runtime dependencies. Linux/macOS amd64/arm64.
+
+## Usage
+
+```
+saksama plan     --ddl <file|-> ...        offline plan (CI gate, no database)
+saksama plan --live ...                    plan against a server, records a session
+saksama apply    ...                       execute a native migration
+saksama status   [session]                 list or inspect sessions
+saksama events   <session>                 append-only JSONL event log
+saksama export   <session>                 full audit export
+saksama cleanup  <session>                 refuses to guess ownership
+saksama schema                             JSON Schema of the plan contract
+saksama version
+```
+
+### 1. Offline plan — safe in CI, no database access
+
+```bash
+mysql -N -e "SHOW CREATE TABLE shop.orders\G" > orders.sql
+
+saksama plan --ddl orders.sql \
+             --alter "ADD INDEX ix_created (created_at)" \
+             --mysql-version 8.0.36 --host db.prod --production \
+             --rows 59000000 --data-bytes 18000000000 --index-bytes 4000000000
+
+# Machine-readable gate
+saksama plan --ddl orders.sql --alter "..." --mysql-version 8.0.36 --json \
+  | jq '.recommendation.engine, .recommendation.blockers'
+```
+
+Exit codes are part of the contract: **`0`** plan produced with no blockers, **`1`** plan produced **with** blockers, **`2`** usage error, **`3`** execution or internal failure. Exit `1` is a usable CI gate.
+
+### 2. Live plan and apply
+
+```bash
+saksama plan --live -h db.prod -u deployer -d shop -t orders \
+             -a "ADD INDEX ix_paid (paid_at)"
+
+saksama apply -h db.prod -u deployer -d shop -t orders \
+              -a "ADD INDEX ix_paid (paid_at)" \
+              --production --confirm db.prod
+```
+
+Every execution is recorded: plan, exact statements with `ALGORITHM`/`LOCK`, timings, approvals, and verification results.
+
+### 3. Audit
+
+```bash
+saksama status                      # all sessions
+saksama status s3 --json            # one session, machine-readable
+saksama events s3                   # JSONL, seq-numbered
+saksama export s3                   # session + events + completeness marker
+```
+
+### Credentials
+
+Never in argv. Resolution order:
+
+1. `--defaults-extra-file <path>`
+2. `~/.my.cnf` / `$MYSQL_HOME/my.cnf` (`[client]` and `[mysql]` sections)
+3. environment (`MYSQL_HOST`, `MYSQL_TCP_PORT`, `MYSQL_USER`, `MYSQL_PWD`, `MYSQL_UNIX_PORT`, `MYSQL_DATABASE`)
+4. flags
+5. `--ask-pass` interactive prompt
+
+A credential file readable by other users is **refused**, not warned about:
+
+```
+$ saksama plan --live ...
+~/.my.cnf contains a password but is readable by others (mode 0o644).
+Fix it first: chmod 600 /home/you/.my.cnf
+```
+
+## What it will not do
+
+Stated plainly, because a safety tool that overpromises is worse than no tool:
+
+- **No silent algorithm downgrade.** Every statement carries explicit `ALGORITHM`/`LOCK`. If MySQL would have to pick something more expensive, the run fails instead.
+- **No foreign key automation.** Dropping and recreating constraints opens an integrity window this version cannot make deterministic. It refuses.
+- **No rollback claim after cutover.** After a swap, new writes live in the new table. The tool says "forward migration", not "just roll back".
+- **No guessing.** An `ALTER` the parser does not fully understand becomes a blocker, never a "probably fine".
+- **No cleanup by name pattern.** Objects are only dropped when the session records ownership of them.
+
+## Design commitments
+
+1. **Analyzer is a pure function.** `(schema, ops, server, liveState) → Plan`. No database handle, so it is unit-testable and usable offline.
+2. **Unknown is blocked.** Including the degenerate case: a plan with zero recognised operations can never report "ready".
+3. **Native first.** `ADD INDEX` is `INPLACE, LOCK=NONE`; `ADD COLUMN` can be `INSTANT`. Copying a table for a secondary index is the expensive mistake this tool exists to prevent.
+4. **Referential actions come from structured metadata**, never a regex over `SHOW CREATE TABLE`. Losing `CASCADE` changes data semantics silently.
+5. **Never parse engine output for progress.** Poll the database; engine stderr is for diagnosis only.
+6. **No single duration number.** Always a range, a confidence label, and the basis.
+7. **Secrets never become events.** Redaction is enforced in the event layer, not at each call site.
+8. **Fail closed on every path.** A refusal is a feature.
+
+## Engine ladder
+
+```
+1. native    MySQL DDL with verified capability for the target version   [implemented]
+2. gh-ost    rebuild, single-column key, no foreign keys (MIT)           [planned]
+3. pt-osc    composite keys / legacy servers (GPL-2, never bundled)      [planned]
+4. refuse    no engine satisfies the safety policy                       [implemented]
+```
+
+MySQL Clone Plugin is deliberately **not** in the ladder: it clones an instance, not a table.
+
+## Supported today
+
+| Area | State |
+|---|---|
+| `ALTER` parser (fail-closed subset, 19 ops) | ✅ |
+| `SHOW CREATE TABLE` parser incl. FK actions | ✅ |
+| Version-gated capability matrix | ✅ |
+| Checks catalog (A/B/C/D/E/R, 34 rules) | ✅ |
+| Offline plan, plan card, `--json`, exit codes | ✅ |
+| Live introspection (`information_schema`, `performance_schema`) | ✅ |
+| Native execution with explicit `ALGORITHM`/`LOCK` | ✅ |
+| Session state, table lock, atomic persistence | ✅ |
+| Event contract, redaction, audit export | ✅ |
+| Verified post-execution checks via `information_schema` | ✅ |
+| gh-ost supervision, hold-cutover, cancel | 🚧 phase 3 |
+| TUI (Bubble Tea) | 🚧 phase 4 |
+| pt-osc adapter | 🚧 phase 5 |
+
+Commands that are not implemented yet (`apply --engine gh-ost`, `cutover`, `cancel`, `recover`, `daemon`, `attach`) exit `2` with an explicit message. They are never stubbed into something that looks like it works.
+
+## Documentation
+
+- [`PRD.md`](PRD.md) — requirements, personas, acceptance criteria, non-goals
+- [`DESIGN.md`](DESIGN.md) — architecture, engine comparison, roadmap
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — decision log with the alternatives that were rejected
+- [`docs/CHECKS.md`](docs/CHECKS.md) — every check: ID, severity, SQL source, MySQL error code
+- [`docs/EVENTS.md`](docs/EVENTS.md) — daemon event contract
+- [`docs/RESULTS.md`](docs/RESULTS.md) — what was built, what the tests proved, which bugs they caught
+- [`docs/STATUS.md`](docs/STATUS.md) — implementation ledger
+- [`SECURITY.md`](SECURITY.md) — threat model and reporting policy
+
+## Development
+
+```bash
+make test               # 99 unit tests
+make lint               # go vet + gofmt check
+make cover              # per-package coverage
+make demo               # two plan cards side by side, no database needed
+
+make integration-up     # disposable MySQL 8.0 in docker on :33306
+make test-integration   # 20 tests against a real server
+make integration-down
+```
+
+Integration tests run against a real MySQL because a claim like "`ADD COLUMN` is INSTANT on 8.0.12+" is either verified or it is marketing. They have already caught five real bugs, including one that made every apply on a foreign-key table report a false verification failure.
+
+### Contribution rules
+
+1. **Every check needs a positive test and a negative test.** A rule that fires on healthy schemas is worse than no rule.
+2. **No behaviour that is not tested against real MySQL** if it claims a capability.
+3. **Never widen an engine capability without a versioned integration fixture.**
+4. **The analyzer stays pure.** Database access belongs in `internal/introspect`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+gh-ost may be embedded (MIT, keep its license). `pt-online-schema-change` is GPL-2 and is **never** bundled; it will only ever be invoked as an external binary, which keeps this project MIT.
+
+## Origin
+
+Built from a hand-written `migrate.sh` wrapper that did the FK dance by hand — and quietly dropped `ON DELETE CASCADE` while doing it. The audit of that script is in [`DESIGN.md` §14](DESIGN.md); every item in it became a rule in this tool.
