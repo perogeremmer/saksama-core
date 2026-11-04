@@ -19,7 +19,7 @@ contract, so they are never renumbered or reused for something else.
 | `planned` | specified here, not implemented yet |
 | `moved` | superseded by the engine matrix (`saksama advise`), which reports it as a per-engine requirement instead of a check |
 
-Counts today: **48 implemented check IDs**, plus **12 server settings** in the
+Counts today: **49 implemented check IDs**, plus **12 server settings** in the
 doctor (section S).
 
 ---
@@ -134,6 +134,7 @@ The engine matrix decides these. Each names the engine so a fix is obvious.
 | R7 | a copy engine was chosen although native would suffice | `WARN` | done | the expensive mistake |
 | R8 | the server is not configured for the chosen engine | `BLOCKER` | done | names the setting, and how to change it |
 | R9 | gh-ost was passed over because the server cannot start it | `WARN` | done | explains the automatic fallback to pt-osc |
+| R10 | the engine may rename foreign key constraints during the copy | `INFO` | done | some pt-osc builds keep an underscore prefix; verification matches structure, not names |
 
 ---
 

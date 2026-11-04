@@ -121,4 +121,7 @@ type Options struct {
 	// AllowArgvPassword permits passing a password in argv for engines that
 	// cannot read an option file. Off by default.
 	AllowArgvPassword bool
+	// BinaryPath is the executable the plan said was available. Empty means the
+	// engine falls back to a PATH lookup.
+	BinaryPath string
 }

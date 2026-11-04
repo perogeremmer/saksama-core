@@ -182,6 +182,20 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 		return nil
 	}
 
+	if rec.Engine == EnginePtOSC && len(in.Table.ForeignKeys) > 0 {
+		var names []string
+		for _, fk := range in.Table.ForeignKeys {
+			names = append(names, fk.Name)
+		}
+		out = append(out, Check{
+			ID: "R10", Severity: SeverityWarn,
+			Title: "pt-osc will rename this table's foreign key constraints",
+			Detail: fmt.Sprintf("%s will keep its foreign keys, but with an underscore prefix: %s",
+				strings.Join(names, ", "), "_"+strings.Join(names, ", _")),
+			Remediation: "rename them back in a separate, reviewed change if other tooling refers to the constraint names; Saksama does not edit foreign keys in v1",
+		})
+	}
+
 	if rec.Engine == EnginePtOSC && len(in.Table.ReferencedBy) > 0 {
 		out = append(out, Check{
 			ID: "R4", Severity: SeverityWarn,

@@ -581,8 +581,10 @@ func (r *Runner) buildEngine(name analyzer.Engine, req Request, opts engine.Opti
 	case analyzer.EngineNative:
 		return native.New(r.DB, opts), nil
 	case analyzer.EngineGhOst:
+		opts.BinaryPath = binaryPath(req.Binaries, "gh-ost")
 		return copyeng.New(copyeng.GhOst(), r.DB, conn, opts, nil), nil
 	case analyzer.EnginePtOSC:
+		opts.BinaryPath = binaryPath(req.Binaries, "pt-online-schema-change")
 		return copyeng.New(copyeng.PtOSC(), r.DB, conn, opts, nil), nil
 	}
 	return nil, fmt.Errorf("%w: no adapter for engine %q", ErrBlocked, name)
@@ -608,4 +610,16 @@ func diskFacts(snap introspect.Snapshot, req Request) analyzer.DiskFacts {
 		}
 	}
 	return analyzer.DiskFacts{Reason: snap.Runtime.Disk.Reason}
+}
+
+// binaryPath is the executable the plan verified, when it verified one.
+func binaryPath(bins map[string]analyzer.EngineBinary, name string) string {
+	if bins == nil {
+		return ""
+	}
+	b, ok := bins[name]
+	if !ok || !b.Available {
+		return ""
+	}
+	return b.Path
 }

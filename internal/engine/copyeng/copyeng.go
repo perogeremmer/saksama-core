@@ -105,6 +105,17 @@ func (e *Engine) Name() engine.Name {
 	return engine.PtOSC
 }
 
+// binary is the executable to run: the one the plan verified, or a PATH lookup.
+//
+// Using the plan's path matters, because the plan told the operator which version
+// was found. Looking the name up again could silently run a different one.
+func (e *Engine) binary() string {
+	if e.opts.BinaryPath != "" {
+		return e.opts.BinaryPath
+	}
+	return e.spec.Binary
+}
+
 func (e *Engine) port() string {
 	if e.conn.Port != "" {
 		return e.conn.Port
@@ -143,7 +154,7 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 	switch e.spec.Kind {
 	case KindGhOst:
 		argv = []string{
-			e.spec.Binary,
+			e.binary(),
 			"--host=" + e.conn.Host,
 			"--port=" + e.port(),
 			"--user=" + e.user(),
@@ -195,20 +206,29 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 				return nil, "", err
 			}
 			cleanupFile = path
-			argv = append(argv, e.spec.Binary, "--defaults-file="+path)
+			argv = append(argv, e.binary(), "--defaults-file="+path)
 		} else {
-			argv = append(argv, e.spec.Binary)
+			argv = append(argv, e.binary())
 		}
 		argv = append(argv,
 			"--alter", alter,
 			"--chunk-size", fmt.Sprint(chunkSize(e.opts)),
 			"--max-load", "Threads_running=50",
 			"--critical-load", "Threads_running=100",
-			"--max-flow-control-on", "replicas_lag_total=30",
-			"--print",
+			// pt-osc throttles on replica lag with --max-lag, in seconds.
+			"--max-lag", "5",
+			// Never let the tool reach out to check for a newer version: a CI run
+			// must not depend on percona.com being reachable.
+			"--no-version-check",
 		)
 		if len(e.opts.TableModel.ReferencedBy) > 0 {
 			argv = append(argv, "--alter-foreign-keys-method=auto")
+		}
+		// --print only describes the work; --execute is what performs it.
+		if e.opts.DryRun {
+			argv = append(argv, "--print")
+		} else {
+			argv = append(argv, "--execute")
 		}
 		dsn := fmt.Sprintf("D=%s,t=%s,h=%s,P=%s,u=%s",
 			e.opts.Schema, e.opts.Table, e.conn.Host, e.port(), e.user())
@@ -270,8 +290,8 @@ func (e *Engine) Preflight(ctx context.Context) error {
 
 	// The engine binary must exist before anything else: failing here gives a
 	// usable message instead of an exec error hours into a migration plan.
-	if _, err := exec.LookPath(e.spec.Binary); err != nil {
-		return fmt.Errorf("%s is not installed or not on PATH; %s", e.spec.Binary, e.installHint())
+	if _, err := exec.LookPath(e.binary()); err != nil {
+		return fmt.Errorf("%s is not installed at %s; %s", e.spec.Binary, e.binary(), e.installHint())
 	}
 
 	var pending int

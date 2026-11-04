@@ -33,7 +33,8 @@ statement can queue the whole server.
 | native | 8.0.46, 8.4.13 | yes | ADD INDEX, DROP INDEX, ADD COLUMN, DROP COLUMN executed with explicit ALGORITHM and LOCK, then verified through information_schema |
 | gh-ost | 1.1.11 | yes | real migration: ADD COLUMN on a table with rows, --allow-on-master, copy plus cut-over plus verification |
 | gh-ost | 1.1.x (older) | claimed | the wrapper only uses flags that exist across 1.1.x, but older builds have not been run here |
-| pt-osc | 3.x | not yet | adapter is unit tested against a fake binary (argv, defaults-file, defaults to --print); no real pt-online-schema-change has been run by this repository |
+| pt-osc | 3.7.2 | yes | real migrations: ADD COLUMN on a plain table, a table with a foreign key (ON DELETE CASCADE preserved), and a composite primary key that gh-ost cannot chunk. Rows and constraints verified afterwards |
+| pt-osc | 3.0.13 | yes | same suite; behavioural difference worth knowing: some builds keep an underscore prefix on foreign key constraint names, so Saksama verifies constraints by columns and referenced table rather than by name |
 | pt-osc | 2.x | no | no --resume, narrower ALTER grammar; percona-toolkit 3.x is required |
 
 ## Server settings `advise` reads
@@ -59,8 +60,11 @@ Facts that cost someone an afternoon. They are here so the next person does not 
 - gh-ost validates the connection port against @@port and refuses to start when they differ. Any proxy, port mapping, or NAT triggers this. Saksama reads @@port and adds --skip-port-validation automatically when it sees the mismatch.
 - gh-ost needs log_bin=ON, binlog_format=ROW, and binlog_row_image=FULL. Without them it stops at startup, not halfway through a copy.
 - gh-ost has no option-file support, so a password can only reach it through argv, which is visible in ps. Saksama refuses that by default; --allow-argv-password is the explicit opt-in.
-- pt-online-schema-change needs Perl plus DBI and DBD::mysql. A container without those cannot run it, which is why the pt-osc row above is unverified here.
+- pt-online-schema-change is a single Perl file. The toolkit package is not needed: install perl with DBI and DBD::mysql, then fetch bin/pt-online-schema-change from the Percona Toolkit repository.
 - pt-online-schema-change swaps as soon as the copy finishes. There is no built-in gate to verify first, unlike gh-ost's cut-over pause.
+- pt-online-schema-change has no --max-flow-control-on option; it throttles on replica lag with --max-lag. That flag belongs to gh-ost, and passing it makes pt-osc exit with an options error before doing anything.
+- pt-online-schema-change writes the copy into _table_new and removes it afterwards, along with its triggers. gh-ost keeps the pre-migration table as _table_del, which is real disk usage some time later.
+- Constraint names are not guaranteed to survive a copy. Saksama verifies a foreign key by its columns, referenced table, and actions, and reports the name it actually found.
 - Algolia's ALTER is rejected by MySQL when ALGORITHM=INSTANT is combined with LOCK=... (error 1221). INSTANT is metadata-only, so Saksama emits it without a LOCK clause.
 - ALTER TABLE ... SET foreign_key_checks=0 is not available on Aurora, so a fast constraint recreate is not portable there.
 - information_schema.TABLE_ROWS is an estimate on InnoDB and is used only for progress and sizing, never for a correctness decision.

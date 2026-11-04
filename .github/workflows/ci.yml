@@ -88,6 +88,48 @@ jobs:
           SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
         run: go test -tags=integration -count=1 ./test/integration/ -v
 
+  ptosc:
+    name: pt-osc against a real binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      # The toolkit is not needed. pt-online-schema-change is one Perl file, and
+      # installing the whole percona-toolkit package pulls a large tree of tools
+      # this project never calls.
+      - name: Install perl, DBD::mysql, and the single pt-osc script
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbi-perl libdbd-mysql-perl
+          sudo curl -fsSL -o /usr/local/bin/pt-online-schema-change \
+            https://raw.githubusercontent.com/percona/percona-toolkit/v3.7.2/bin/pt-online-schema-change
+          sudo chmod +x /usr/local/bin/pt-online-schema-change
+          pt-online-schema-change --version
+
+      - name: Start MySQL
+        run: |
+          docker run -d --name mysql-ptosc \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
+            -e MYSQL_DATABASE=shop \
+            -p 33306:3306 mysql:8.4 --max-connections=200
+          for i in $(seq 1 90); do
+            if docker exec mysql-ptosc mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
+              echo ready; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready"; exit 1
+
+      - name: Integration tests, including the copy engines
+        env:
+          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
+        run: go test -tags=integration -count=1 -v ./test/integration/
+
   offline-demo:
     name: Offline plan demo
     runs-on: ubuntu-latest

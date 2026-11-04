@@ -138,6 +138,10 @@ type Verification struct {
 	Kind  string `json:"kind"` // index_exists | column_exists | index_absent | foreign_key_present
 	Name  string `json:"name"`
 	Table string `json:"table,omitempty"`
+	// RefTable and Columns describe a foreign key, so it can be verified by
+	// structure. Constraint names are not stable: engines rename them.
+	RefTable string   `json:"ref_table,omitempty"`
+	Columns  []string `json:"columns,omitempty"`
 }
 
 // Plan is the complete analyzer output, and the product API: every frontend

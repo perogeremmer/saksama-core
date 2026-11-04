@@ -173,12 +173,12 @@ The MySQL Clone Plugin is deliberately absent: it clones an instance, not a tabl
 | `ALTER` parser, 19 operations, fail closed | done |
 | `SHOW CREATE TABLE` parser including FK actions | done |
 | Version gated capability matrix | done |
-| Checks catalogue, 48 checks plus a 12-setting server doctor | done |
+| Checks catalogue, 49 checks plus a 12-setting server doctor | done |
 | Offline plan, plan card, JSON, exit codes | done |
 | Live introspection and the server-settings doctor | done |
 | Native execution with explicit algorithm and lock | done |
 | gh-ost adapter, verified against 1.1.11 | done |
-| pt-osc adapter, unit tested, not yet run against a real binary | partial |
+| pt-osc adapter, verified against 3.0.13 and 3.7.2 | done |
 | Engine choice with table, database, and global scope | done |
 | Session state, table lock, event log, audit export | done |
 | Cutover pause, cancel, cleanup, daemon, TUI | not built |
@@ -195,7 +195,7 @@ claim something this repository does not do.
 |---|---|
 | MySQL 8.0.46 and 8.4.13 | 25 integration tests each |
 | gh-ost 1.1.11 | a real migration: copy, cutover, verification |
-| pt-online-schema-change 3.x | **not yet**, no Perl stack in the build environment |
+| pt-online-schema-change 3.0.13 and 3.7.2 | real migrations, including a table with `ON DELETE CASCADE` and a composite key |
 | MySQL 5.6 and 5.7 | claimed by the rules, not run by the suite |
 | MariaDB | refused on purpose |
 
@@ -217,7 +217,7 @@ make cover              # per-package coverage
 make demo               # two plan cards, no database needed
 
 make integration-up     # disposable MySQL 8.0 in docker on :33306
-make test-integration   # 28 tests against a real server
+make test-integration   # 32 tests against a real server, or 28 when no copy engine is installed
 make integration-down
 
 make compat-doc         # regenerate docs/COMPATIBILITY.md

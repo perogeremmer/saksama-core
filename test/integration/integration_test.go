@@ -111,9 +111,30 @@ func newRunner(t *testing.T) (*core.Runner, *state.Store) {
 	return &core.Runner{Store: store, Now: time.Now}, store
 }
 
+// testConn is the connection the tools under test must be told about. It follows
+// SAKSAMA_TEST_DSN so a non-default port does not silently point the engine at the
+// wrong server.
+func testConn() cred.Conn {
+	c := cred.Conn{User: "root", Host: "127.0.0.1", Port: "33306"}
+	dsn := baseDSN()
+	if i := strings.Index(dsn, "@tcp("); i >= 0 {
+		rest := dsn[i+len("@tcp("):]
+		if j := strings.Index(rest, ")"); j > 0 {
+			hostPort := rest[:j]
+			if k := strings.LastIndex(hostPort, ":"); k > 0 {
+				c.Host = hostPort[:k]
+				c.Port = hostPort[k+1:]
+			} else {
+				c.Host = hostPort
+			}
+		}
+	}
+	return c
+}
+
 func applyRequest(schema, table, alter string) core.Request {
 	return core.Request{
-		Conn:     cred.Conn{User: "root", Host: "127.0.0.1", Port: "33306"},
+		Conn:     testConn(),
 		Database: schema,
 		Table:    table,
 		Alter:    alter,
@@ -934,7 +955,7 @@ func TestApplyRunsTheChosenCopyEngineAndStillVerifies(t *testing.T) {
 		t.Fatalf("the engine was never invoked: %v", readErr)
 	}
 	argv := string(data)
-	for _, want := range []string{"--alter", "--print", "D=" + schema, "t=t"} {
+	for _, want := range []string{"--alter", "--execute", "D=" + schema, "t=t"} {
 		if !strings.Contains(argv, want) {
 			t.Errorf("engine did not receive %q; argv:\n%s", want, argv)
 		}

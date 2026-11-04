@@ -314,6 +314,24 @@ saksama 1.2.3 (Saksama Core, contract v1)
 
 ---
 
+## Installing the copy engines
+
+`gh-ost` is a single static binary; take it from its releases page.
+
+`pt-online-schema-change` is a single Perl file. The toolkit package is **not**
+needed, and pulling it in installs dozens of tools this project never calls:
+
+```bash
+apt-get install -y --no-install-recommends libdbi-perl libdbd-mysql-perl
+curl -fsSL -o /usr/local/bin/pt-online-schema-change \
+  https://raw.githubusercontent.com/percona/percona-toolkit/v3.7.2/bin/pt-online-schema-change
+chmod +x /usr/local/bin/pt-online-schema-change
+pt-online-schema-change --version
+```
+
+That is exactly what the CI job does, so the verified combination is the one you
+can reproduce locally.
+
 ## Not implemented yet
 
 These commands exit `2` with an explicit message rather than pretending to work:

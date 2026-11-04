@@ -126,8 +126,18 @@ func TestPtOSCUsesDefaultsFileNotArgvPassword(t *testing.T) {
 	if !strings.Contains(got, "--defaults-file=") {
 		t.Fatalf("expected an option file: %s", got)
 	}
-	if !strings.Contains(got, "--print") {
-		t.Fatalf("default must be the printing mode: %s", got)
+	// An execution must actually execute: --print would only describe the work.
+	if !strings.Contains(got, "--execute") {
+		t.Fatalf("expected --execute: %s", got)
+	}
+	if strings.Contains(got, "--print") {
+		t.Fatalf("--print must not be sent when executing: %s", got)
+	}
+	if strings.Contains(got, "--max-flow-control-on") {
+		t.Fatalf("--max-flow-control-on is not a pt-osc option: %s", got)
+	}
+	if !strings.Contains(got, "--no-version-check") {
+		t.Fatalf("a CI run must not depend on percona.com: %s", got)
 	}
 
 	// The temporary file must be 0600 and contain the password.
