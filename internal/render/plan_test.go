@@ -304,7 +304,6 @@ func TestSchemaReportDoesNotPromiseNativeOnAnOldServer(t *testing.T) {
 		{Version: "5.4.4", Vendor: "mysql"},
 		{Version: "5.6.51", Vendor: "mysql"},
 		{Version: "10.11.6-MariaDB-log", Vendor: "mariadb"},
-		{Version: "", Vendor: "mysql"},
 	}
 	for _, srv := range servers {
 		var buf bytes.Buffer
@@ -318,6 +317,19 @@ func TestSchemaReportDoesNotPromiseNativeOnAnOldServer(t *testing.T) {
 		if strings.Contains(out, "no engine, no copy") {
 			t.Errorf("server %q: claimed native DDL without matrix support:\n%s", srv.Version, out)
 		}
+	}
+
+	// No server at all is not a server that supports native DDL.
+	var buf bytes.Buffer
+	if err := SchemaReport(&buf, "shop", rows, nil, model.Server{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "unknown: no server version") {
+		t.Errorf("expected the unknown-version verdict:\n%s", out)
+	}
+	if strings.Contains(out, "no engine, no copy") || strings.Contains(out, "cannot parse server version") {
+		t.Errorf("an absent version must be reported plainly, not parsed:\n%s", out)
 	}
 }
 

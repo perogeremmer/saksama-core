@@ -117,9 +117,15 @@ func verdictBlock(b *strings.Builder, schema string, rows []analyzer.TableAssess
 	}
 
 	native, detail := analyzer.NativeIndexPath(srv)
-	if native {
+	switch {
+	case native:
 		fmt.Fprintf(b, "  index-only change   no engine, no copy: %s\n", detail)
-	} else {
+	case srv.Version == "":
+		// Offline reports may have no server at all. Say that, rather than
+		// quoting a parse error at a server that was never named.
+		b.WriteString("  index-only change   unknown: no server version, so no DDL capability is claimed\n")
+		b.WriteString("                      pass --mysql-version to get an answer here\n")
+	default:
 		fmt.Fprintf(b, "  index-only change   not native on this server: %s\n", detail)
 	}
 
