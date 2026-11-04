@@ -16,13 +16,13 @@ Safe MySQL schema migrations for teams with one database, no DBA, and no budget 
 
 ---
 
-**Saksama** (KBBI: *teliti, cermat, hati-hati*) is an Indonesian word meaning "meticulous". The standard spelling *seksama* is equally correct. The tool is called **Saksama Core** because the analyzer and session engine are meant to be embedded in other frontends — a TUI today, a web control plane later.
+**Saksama** (KBBI: *teliti, cermat, hati-hati*) is an Indonesian word meaning "meticulous". The standard spelling *seksama* is equally correct. The tool is called **Saksama Core** because the analyzer and session engine are meant to be embedded in other frontends: a TUI today, a web control plane later.
 
 ## Why this exists
 
 You have one MySQL instance. No replica. No DBA. A 59-million-row table, and a change you have postponed for three months because you do not know whether `ALTER TABLE` will lock it for two minutes or two hours.
 
-Blue-green would solve it. Blue-green is expensive in *engineering time*: dual writes, two deployment cycles, traffic switching, a rollback plan. That is the part small teams cannot afford — not the server.
+Blue-green would solve it. Blue-green is expensive in *engineering time*: dual writes, two deployment cycles, traffic switching, a rollback plan. That is the part small teams cannot afford, not the server.
 
 So the real need is narrower than blue-green: **an online schema change on one instance, done correctly.**
 
@@ -39,7 +39,7 @@ Saksama Core is **not** a new copy engine and **not** a thin gh-ost wrapper. It 
 
 ## You decide, we execute: `saksama engine`
 
-Saksama is a wrapper. It recommends, you choose, and then **it runs the engine for you** — with the exact argv shown to you first, progress polled from the database, and the result verified against `information_schema`.
+Saksama is a wrapper. It recommends, you choose, and then **it runs the engine for you**, with the exact argv shown to you first, progress polled from the database, and the result verified against `information_schema`.
 
 ```
 $ saksama advise --live -h db.prod -d shop -t orders -a "MODIFY COLUMN status varchar(64) NOT NULL"
@@ -102,7 +102,7 @@ NEXT
   inspect one table in detail:     saksama advise --live -d <db> -t <table>
 ```
 
-Before the tables, `advise` reports the server settings the engines need — the
+Before the tables, `advise` reports the server settings the engines need, the
 `flutter doctor` part. An engine can suit a table perfectly and still refuse to
 start because binary logging is off:
 
@@ -126,8 +126,8 @@ FIX FIRST
   - log_bin: enable binary logging in your my.cnf (log_bin=ON) and restart the server
 ```
 
-With `log_bin` off the recommendation quietly moves to `pt-osc` — the engine this
-server *can* start — and a note says why gh-ost was passed over. If you recorded
+With `log_bin` off the recommendation quietly moves to `pt-osc`, the engine this
+server *can* start, and a note says why gh-ost was passed over. If you recorded
 `gh-ost` yourself, that choice is honoured and the plan refuses with `R8` naming
 the setting to fix, instead of swapping engines behind your back.
 
@@ -189,7 +189,7 @@ saksama engine set gh-ost -d shop -t sessions
 
 ## Which tool fits? `saksama advise`
 
-The most common question is not "run this" — it is *"is this a gh-ost table or a Percona Toolkit table?"* That question deserves its own command, and it deserves an answer even when this build cannot execute the engine.
+The most common question is not "run this", it is *"is this a gh-ost table or a Percona Toolkit table?"* That question deserves its own command, and it deserves an answer even when this build cannot execute the engine.
 
 ```
 $ saksama advise --live -h db.prod -d shop -t orders \
@@ -308,7 +308,7 @@ BLOCKERS   1
 RESULT     refused
 ```
 
-**That refusal is the product.** Most wrappers would happily drop both constraints, copy the table, and recreate them — silently losing `ON DELETE CASCADE`.
+**That refusal is the product.** Most wrappers would happily drop both constraints, copy the table, and recreate them, silently losing `ON DELETE CASCADE`.
 
 ## Install
 
@@ -342,7 +342,7 @@ saksama schema                             JSON Schema of the plan contract
 saksama version
 ```
 
-### 1. Offline plan — safe in CI, no database access
+### 1. Offline plan, safe in CI, no database access
 
 ```bash
 mysql -N -e "SHOW CREATE TABLE shop.orders\G" > orders.sql
@@ -458,7 +458,7 @@ MySQL Clone Plugin is deliberately **not** in the ladder: it clones an instance,
 
 Commands that are not implemented yet (`cutover`, `cancel`, `recover`, `daemon`, `attach`) exit `2` with an explicit message. They are never stubbed into something that looks like it works.
 
-Engine credentials: pt-osc reads a temporary `0600` option file, so its password never reaches argv. gh-ost has no option-file support, so a password must go in argv — that is refused unless you pass `--allow-argv-password`, because a password in argv is visible in `ps`.
+Engine credentials: pt-osc reads a temporary `0600` option file, so its password never reaches argv. gh-ost has no option-file support, so a password must go in argv, that is refused unless you pass `--allow-argv-password`, because a password in argv is visible in `ps`.
 
 ## Compatibility: what is verified, and how
 
@@ -502,15 +502,11 @@ is stale.
 
 ## Documentation
 
-- [`PRD.md`](PRD.md) — requirements, personas, acceptance criteria, non-goals
-- [`DESIGN.md`](DESIGN.md) — architecture, engine comparison, roadmap
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — decision log with the alternatives that were rejected
-- [`docs/CHECKS.md`](docs/CHECKS.md) — every check: ID, severity, SQL source, MySQL error code
-- [`docs/EVENTS.md`](docs/EVENTS.md) — daemon event contract
-- [`docs/RESULTS.md`](docs/RESULTS.md) — what was built, what the tests proved, which bugs they caught
-- [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — which MySQL and engine versions are verified, and how
-- [`docs/STATUS.md`](docs/STATUS.md) — implementation ledger
-- [`SECURITY.md`](SECURITY.md) — threat model and reporting policy
+- [`PRD.md`](PRD.md), requirements, personas, acceptance criteria, non-goals
+- [`DESIGN.md`](DESIGN.md), architecture, engine comparison, roadmap
+- [`docs/CHECKS.md`](docs/CHECKS.md), every check: ID, severity, SQL source, MySQL error code
+- [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md), which MySQL and engine versions are verified, and how
+- [`SECURITY.md`](SECURITY.md), threat model and reporting policy
 
 ## Development
 
@@ -521,11 +517,28 @@ make cover              # per-package coverage
 make demo               # two plan cards side by side, no database needed
 
 make integration-up     # disposable MySQL 8.0 in docker on :33306
-make test-integration   # 24 tests against a real server
+make test-integration   # 25 tests against a real server
 make integration-down
 ```
 
-Integration tests run against a real MySQL because a claim like "`ADD COLUMN` is INSTANT on 8.0.12+" is either verified or it is marketing. They have already caught six real bugs, including one that made every apply on a foreign-key table report a false verification failure, and one where the plan card read "ready" for an engine this build cannot run.
+Integration tests run against a real MySQL because a claim like "`ADD COLUMN` is INSTANT on 8.0.12+" is either verified or it is marketing.
+
+What the suite has caught so far, all in shipped code:
+
+| Bug | What it would have caused |
+|---|---|
+| `ALGORITHM=INSTANT` sent with `LOCK=NONE` | every `ADD COLUMN` and `DROP COLUMN` failed with error 1221 while the plan said it was safe |
+| foreign-key verification query with three arguments for two placeholders | every apply on an FK table reported a false failure after a successful DDL |
+| preflight threshold hardcoded, ignoring the configured value | the metadata-lock hazard went undetected in a shortened window |
+| `status --json` ignored after a positional argument | CI pipelines received human text instead of JSON, silently |
+| an empty operation list produced a "ready" plan | a green CI gate for a change nothing had understood |
+| `RESULT ready` printed for an engine this build cannot run | the card promised something `apply` then refused |
+| the Makefile health check waited on the unix socket while tests use TCP | the whole integration suite skipped without failing, so CI was green while nothing was tested |
+| `engine set gh-ost -d shop -t orders` ignored `-d`, `-t`, and `--note` | the choice was stored at the wrong scope with no warning |
+| gh-ost refused to start because the connection port differed from `@@port` | every proxy or port mapping failed at startup, with no explanation |
+| gh-ost given `--ask-pass` with an empty password | the run blocked waiting on a terminal |
+
+Three of those share a theme: a green result for something that was never checked. That is the failure mode this project exists to prevent, so each has a dedicated test.
 
 ### Contribution rules
 
@@ -536,10 +549,10 @@ Integration tests run against a real MySQL because a claim like "`ADD COLUMN` is
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
 
 gh-ost may be embedded (MIT, keep its license). `pt-online-schema-change` is GPL-2 and is **never** bundled; it will only ever be invoked as an external binary, which keeps this project MIT.
 
 ## Origin
 
-Built from a hand-written `migrate.sh` wrapper that did the FK dance by hand — and quietly dropped `ON DELETE CASCADE` while doing it. The audit of that script is in [`DESIGN.md` §14](DESIGN.md); every item in it became a rule in this tool.
+Built from a hand-written `migrate.sh` wrapper that did the FK dance by hand, and quietly dropped `ON DELETE CASCADE` while doing it. The audit of that script is in [`DESIGN.md` §14](DESIGN.md); every item in it became a rule in this tool.

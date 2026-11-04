@@ -24,7 +24,7 @@ make test-integration  # spins MySQL 8.0 in docker, runs 20 tests
 
 1. Add the rule ID and logic in `internal/analyzer` (`checks.go` or `live.go` for anything needing a connection).
 2. Document it in `docs/CHECKS.md`: ID, severity, SQL source, the MySQL error it prevents, and the remediation text.
-3. Write the negative test first — prove it does not fire on a healthy schema.
+3. Write the negative test first, prove it does not fire on a healthy schema.
 4. Write the positive test with a fixture that actually triggers it.
 5. If it needs live data, extend `internal/introspect` and add an integration test.
 
@@ -57,4 +57,4 @@ ADD COLUMN failed at execution while the plan reported it as safe.
 
 - One concern per PR.
 - Include the output of `make test` and, if you touched execution, `make test-integration`.
-- Update `docs/STATUS.md` if you move something from "not built" to "done".
+- Update `README.md` and `PRD.md` when something moves from "not built" to "done".

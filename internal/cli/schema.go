@@ -2,9 +2,9 @@ package cli
 
 // planJSONSchema documents the machine-readable plan contract.
 //
-// This is the "for app builders" surface described in docs/EVENTS.md: a stable
-// schema another tool can code against. It is maintained by hand alongside
-// internal/analyzer/analyze.go and is validated by a test.
+// This is the "for app builders" surface: a stable schema another tool can code
+// against. It is maintained by hand alongside internal/analyzer/analyze.go and is
+// validated by a test.
 const planJSONSchema = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://saksama.dev/schema/plan-v1.json",

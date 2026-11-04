@@ -19,7 +19,7 @@ Saksama Core mutates database schema. A bug here can cause downtime or data loss
 ### Known limits
 
 - The state directory is protected by filesystem permissions, not encryption. Anyone who is already that user on that host can read session metadata.
-- The remote TCP transport for a future daemon is disabled by default until authentication and TLS exist (see `docs/EVENTS.md`).
+- The remote TCP transport for a future daemon is disabled by default until authentication and TLS exist (see the event contract in `internal/events`).
 - The tool does not "phone home". There is no telemetry and no network access other than the MySQL connection you configure.
 
 ## Reporting a vulnerability

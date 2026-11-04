@@ -1,5 +1,5 @@
-// Package events implements the daemon event contract described in
-// docs/EVENTS.md.
+// Package events implements the event contract between the core and every
+// frontend.
 //
 // The contract is the product API: the TUI, the CLI, the future web UI, and any
 // third-party app builder all consume the same JSONL stream. That only stays
@@ -125,7 +125,7 @@ func RedactString(s string) string {
 // Writer emits sequenced, redacted events as JSONL.
 //
 // It is safe for concurrent use. Progress events are rate limited to at most one
-// per second per session (docs/EVENTS.md rule 7).
+// per second per session.
 type Writer struct {
 	mu           sync.Mutex
 	w            io.Writer

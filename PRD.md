@@ -1,1206 +1,773 @@
-# Product Requirements Document — Saksama
+# Product Requirements Document: Saksama Core
 
-> **Produk:** **Saksama** — MySQL online schema migration router & supervisor  
-> **Binary:** `saksama` · **Domain:** `saksama.dev` · **Lisensi:** MIT  
-> **Status:** Draft  
-> **Versi dokumen:** 0.1  
-> **Tanggal:** 2026-11-04  
-> **Target rilis:** MVP / v1  
-> **Dokumen terkait:** [`DESIGN.md`](DESIGN.md), [`docs/DECISIONS.md`](docs/DECISIONS.md), [`docs/CHECKS.md`](docs/CHECKS.md), [`docs/EVENTS.md`](docs/EVENTS.md)
+> **Product:** Saksama Core, a MySQL online schema migration router and supervisor
+> **Binary:** `saksama` | **Domain:** `saksama.dev` | **License:** MIT
+> **Status:** draft, v0.1
+> **Date:** 2026-11-04
+> **Release target:** MVP, v1
+> **Related:** [`DESIGN.md`](DESIGN.md), [`docs/CHECKS.md`](docs/CHECKS.md), [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)
 
 ---
 
-## 1. Ringkasan eksekutif
+## 1. Executive summary
 
-**Saksama** adalah tool open source untuk merencanakan dan menjalankan perubahan schema MySQL secara aman pada tim kecil yang hanya memiliki satu database instance, tidak memiliki DBA, dan tidak mampu menerapkan blue-green deployment penuh.
+Saksama Core is an open source tool for planning and running MySQL schema changes safely, for small teams that have exactly one database instance, no DBA, and no ability to run a full blue-green deployment.
 
-Produk ini bukan copy engine baru dan bukan wrapper tipis untuk gh-ost atau pt-online-schema-change. Nilai utamanya adalah:
+It is not a new copy engine and not a thin wrapper around gh-ost or pt-online-schema-change. Its value is:
 
-1. **Menganalisis ALTER sebelum dijalankan** dan menjelaskan risiko secara actionable.
-2. **Memilih execution path termurah dan teraman**, terutama native MySQL DDL jika capability-nya terverifikasi.
-3. **Menolak operasi yang tidak dipahami atau tidak dapat dipulihkan secara deterministik.**
-4. **Mengawasi migrasi sebagai session yang durable**, sehingga putusnya SSH atau client tidak menghentikan proses.
-5. **Memberikan gerbang verifikasi sebelum cutover** untuk migrasi gh-ost.
-6. **Menjelaskan batas recovery secara jujur**, terutama bahwa tabel lama bukan replika dan rollback data pasca-cutover tidak otomatis aman.
+1. **Analyzing the ALTER before it runs**, with risks stated in actionable terms.
+2. **Choosing the cheapest and safest execution path**, especially native MySQL DDL when the capability is verified.
+3. **Refusing operations that are not understood or not recoverable with certainty.**
+4. **Supervising the migration as a durable session**, so a dropped SSH connection does not stop it.
+5. **Providing a verification gate before a cutover** for gh-ost migrations.
+6. **Stating the limits of recovery honestly**, in particular that the old table is not a replica and that rolling back data after a cutover is not automatically safe.
 
-Prinsip produk:
+Product principle:
 
 > **Refuse aggressively, explain precisely, automate only what has deterministic recovery.**
 
 ---
 
-## 2. Latar belakang
+## 2. Background
 
-### 2.1 Masalah pengguna
+### 2.1 The user's problem
 
-Tim kecil sering menjalankan MySQL pada satu VPS, RDS single-AZ, atau instance managed database tanpa replica. Mereka tetap perlu menjalankan operasi seperti:
+Small teams run MySQL on one VPS, on RDS single-AZ, or on a managed instance without a replica. They still need to run:
 
-- `ADD INDEX` pada tabel besar;
-- `ADD COLUMN`;
-- `DROP INDEX`;
-- perubahan tipe atau struktur kolom;
-- perubahan schema pada tabel dengan puluhan juta row.
+- `ADD INDEX` on a large table,
+- `ADD COLUMN`,
+- `DROP INDEX`,
+- a column type or structure change,
+- a schema change on a table with tens of millions of rows.
 
-Saat ini mereka harus memilih di antara:
+Today they choose between:
 
-- menjalankan `ALTER TABLE` secara langsung tanpa memahami algorithm dan lock behavior;
-- menggunakan gh-ost atau pt-online-schema-change dengan opsi yang kompleks;
-- menunda migrasi karena takut downtime;
-- membuat script wrapper sendiri yang rawan kehilangan FK action, credential leak, state hilang, atau timeout MDL yang terlalu panjang.
+- running `ALTER TABLE` directly without understanding the algorithm and lock behaviour,
+- using gh-ost or pt-online-schema-change with complex options,
+- postponing the migration out of fear of downtime,
+- writing their own wrapper script, which tends to lose foreign key actions, leak credentials, lose state, or sit in a metadata lock timeout for hours.
 
-Masalah utamanya bukan tidak adanya copy engine. Masalah utamanya adalah tidak adanya lapisan yang:
+The missing piece is not a copy engine. It is a layer that:
 
-- memahami schema dan server;
-- mengklasifikasikan ALTER;
-- memilih engine;
-- menjelaskan risiko;
-- menerapkan guardrail;
-- menyimpan state;
-- mengawasi execution dan recovery.
+- understands the schema and the server,
+- classifies the ALTER,
+- chooses an engine,
+- explains the risk,
+- enforces guardrails,
+- persists state,
+- supervises execution and recovery.
 
-### 2.2 Mengapa solusi yang ada belum cukup
+### 2.2 Why existing solutions are not enough
 
-| Solusi | Kekuatan | Kekurangan bagi target user |
+| Solution | Strength | Gap for this user |
 |---|---|---|
-| Native MySQL DDL | Cepat dan tidak selalu menyalin tabel | Sulit menentukan capability; tetap punya risiko MDL; fallback algorithm dapat mengejutkan |
-| gh-ost | Single binary, throttling, hold-cutover | Tidak mendukung FK; konfigurasi kompleks; bukan analyzer |
-| pt-online-schema-change | Matang dan mendukung lebih banyak schema legacy | Dependency Perl, GPL-2, output kompleks, tidak memiliki hold-cutover |
-| Flyway/Liquibase | Versioning migration | Bukan online copy engine atau migration safety supervisor |
-| Script internal | Cocok untuk satu kasus | Rapuh, sulit diaudit, sering tidak punya recovery dan test matrix |
+| Native MySQL DDL | fast, and often no table copy | hard to determine capability, still carries MDL risk, and the fallback algorithm can surprise you |
+| gh-ost | one binary, throttling, cutover pause | no foreign key support, complex options, and it is not an analyzer |
+| pt-online-schema-change | mature, handles more legacy schemas | Perl dependency, GPL-2, noisy output, no cutover pause |
+| Flyway, Liquibase | versioned migrations | not an online copy engine and not a migration safety supervisor |
+| An in-house script | fits one case exactly | brittle, hard to audit, usually no recovery path and no test matrix |
 
 ---
 
-## 3. Visi produk
+## 3. Product vision
 
-Membuat online schema change pada MySQL single-instance terasa seperti prosedur operasional yang dapat dipahami dan diaudit, bukan eksperimen berisiko dengan command panjang.
+Online schema change on a single MySQL instance should feel like a documented operational procedure that can be understood and audited, not a risky experiment with a long command.
 
-Dalam kondisi ideal, pengguna cukup memberikan target dan ALTER:
+Ideally the user supplies a target and an ALTER:
 
 ```bash
-saksama plan -h db.prod -d shop -t orders \
-  --alter "ADD INDEX ix_created (created_at)"
+saksama advise -h db.prod -d shop -t orders \
+  -a "ADD INDEX ix_created (created_at)"
 ```
 
-Lalu `saksama` menjawab:
+And `saksama` answers:
 
-- apakah ALTER dipahami;
-- apakah dapat menggunakan `INSTANT` atau `INPLACE, LOCK=NONE`;
-- risiko MDL, disk, FK, key length, privilege, dan server load;
-- engine yang direkomendasikan dan alasannya;
-- estimasi durasi berbentuk range dan confidence;
-- apakah tool mengizinkan execution;
-- recovery apa yang tersedia di setiap fase.
+- is the ALTER understood,
+- can it use `INSTANT` or `INPLACE, LOCK=NONE`,
+- what are the MDL, disk, foreign key, key length, privilege, and server load risks,
+- which engine is recommended and why,
+- what is the duration range and its confidence,
+- will the tool allow execution,
+- what recovery is available at each phase.
 
-### 3.1 Identitas produk
+### 3.1 Product identity
 
-| Item | Nilai |
+| Item | Value |
 |---|---|
-| Nama | **Saksama** — KBBI: *teliti; cermat; hati-hati* |
-| Varian ejaan baku | *seksama* → domain redirect, bukan nama utama |
-| Binary | `saksama` (alias shell: `skm`) |
-| Daemon | `saksama daemon start\|stop\|status` — satu binary, subcommand |
-| Domain | `saksama.dev` · `saksama.app` · `saksama.id` · `seksama.dev` (redirect) |
-| Repo & modul | `github.com/perogeremmer/saksama-core` |
-| State & socket | `~/.local/state/saksama/` · `saksama.sock` |
-| Tagline ID | "Periksa saksama, baru ubah." |
-| Tagline EN | "Examine before you alter." |
+| Name | **Saksama**, from KBBI: *teliti; cermat; hati-hati* (meticulous, careful) |
+| Standard variant spelling | *seksama*, used for a redirect domain, not as the primary name |
+| Binary | `saksama`, shell alias `skm` |
+| Daemon | `saksama daemon start\|stop\|status`, one binary, a subcommand |
+| Domains | `saksama.dev`, `saksama.app`, `saksama.id`, `seksama.dev` as a redirect |
+| Repo and module | `github.com/perogeremmer/saksama-core` |
+| State and socket | `~/.local/state/saksama/`, `saksama.sock` |
+| Tagline | "Examine before you alter." |
 
-**Hubungan nama dengan produk:** *saksama* bukan metafora — ia nama harfiah dari fungsi inti (analyzer memeriksa sebelum mengubah) sekaligus prinsip produk (fail-closed, explain precisely). Dokumen ini memakai "Saksama" untuk produk dan `saksama` untuk binary/command.
+**Name and product:** saksama is not a metaphor. It names the core function, inspecting before changing, and the product principle, fail closed and explain precisely. This document uses "Saksama Core" for the product and `saksama` for the binary and command.
 
-**Konsekuensi penamaan yang harus dijaga produk & dokumentasi:**
+**Naming consequences the product and docs must respect:**
 
-1. Nama adalah kata umum Indonesia → selalu tulis dengan huruf kapital sebagai brand dan sertakan tagline; jangan andalkan nama saja untuk discoverability.
-2. Penutur Inggris tidak akan menebak artinya → tagline EN wajib di baris pertama README.
-3. Varian ejaan `seksama` akan dicari orang → sediakan `seksama.dev` yang redirect dan sebut sekali di README.
-4. Nama panjang untuk CLI → sediakan alias `skm` untuk pemakaian manual; skrip dan CI tetap memakai `saksama` eksplisit.
-
----
-
-## 4. Sasaran dan non-sasaran
-
-### 4.1 Sasaran v1
-
-1. Menghasilkan plan yang akurat, konservatif, dan dapat dibaca manusia maupun mesin.
-2. Menjalankan subset native MySQL DDL yang capability-nya telah diverifikasi.
-3. Menjalankan gh-ost pada tabel tanpa FK masuk/keluar.
-4. Mengawasi proses melalui core daemon yang tidak bergantung pada lifetime client.
-5. Menyediakan preflight check untuk risiko schema dan operasional utama.
-6. Menolak syntax, capability, atau recovery path yang tidak dipahami.
-7. Menyediakan session state, event log, status, cancel, cleanup, dan recovery guidance.
-8. Mendukung headless CLI dan integrasi CI.
-9. Menahan cutover gh-ost sampai pengguna memberikan approval.
-10. Mencegah credential tampil di argv, event, atau log.
-
-### 4.2 Non-sasaran v1
-
-- Menulis copy engine baru.
-- Mendukung otomatisasi drop/recreate FK pada copy engine.
-- Menjamin rollback data setelah cutover.
-- Menyediakan blue-green deployment aplikasi.
-- Menyediakan dual-write, CDC, atau traffic switching.
-- Menyediakan data backfill umum.
-- Mendukung MySQL Clone Plugin sebagai table migration engine.
-- Mendukung database selain MySQL.
-- Menyediakan hosted SaaS atau web UI.
-- Menjamin zero downtime untuk setiap ALTER.
-- Mendukung seluruh grammar MySQL ALTER TABLE.
-
-### 4.3 Sasaran jangka lanjut
-
-- Adapter pt-online-schema-change yang capability-nya diuji.
-- MySQL 5.6/5.7 dan varian managed service yang lebih luas.
-- TUI interaktif.
-- Web UI, approval workflow, RBAC, dan audit export.
-- Expand-contract advisor dan index hygiene.
-- Riset strategi multi-instance.
+1. It is an ordinary Indonesian word, so always capitalise it as a brand and always carry the tagline. Do not rely on the name alone for discoverability.
+2. An English speaker will not guess the meaning, so the tagline must be on the first line of the README.
+3. People will search for the variant spelling, so keep `seksama.dev` as a redirect and mention it once.
+4. It is long to type, so ship the `skm` alias for manual use while scripts and CI use `saksama` explicitly.
 
 ---
 
-## 5. Target pengguna
+## 4. Goals and non-goals
 
-### 5.1 Persona utama — backend developer pada startup kecil
+### 4.1 Goals for v1
 
-**Karakteristik:**
+1. Produce a plan that is accurate, conservative, and readable by both a human and a machine.
+2. Run the subset of native MySQL DDL whose capability has been verified.
+3. Run gh-ost on tables with no foreign keys, and pt-osc where gh-ost does not fit.
+4. Let the operator choose the engine, record that choice, and execute it.
+5. Supervise the process through a core that does not depend on the client's lifetime.
+6. Check the schema, the operation, and the server settings before execution.
+7. Refuse syntax, capability, or recovery paths that are not understood.
+8. Provide session state, an event log, status, cancel, cleanup, and recovery guidance.
+9. Support headless CLI use and CI integration.
+10. Prevent credentials from appearing in argv, events, or logs.
+11. Report which MySQL and engine versions are verified, with evidence.
 
-- mengelola aplikasi dan database sekaligus;
-- tidak memiliki DBA;
-- database produksi berisi tabel besar;
-- hanya memiliki satu primary instance;
-- menjalankan deployment melalui SSH atau CI sederhana;
-- mengetahui SQL tetapi tidak mendalami MySQL internals.
+### 4.2 Non-goals for v1
 
-**Kebutuhan:**
+- writing a new copy engine,
+- automating foreign key drop and recreate,
+- promising data rollback after a cutover,
+- blue-green deployment of an application,
+- dual writes, CDC, or traffic switching,
+- general purpose data backfill,
+- the MySQL Clone Plugin as a table migration primitive,
+- database engines other than MySQL, with MariaDB explicitly refused,
+- a hosted SaaS or web UI,
+- guaranteeing zero downtime for every ALTER,
+- understanding the entire MySQL `ALTER TABLE` grammar.
 
-- mengetahui apakah ALTER akan lock atau rebuild;
-- mengetahui command yang aman;
-- mendapat penjelasan yang actionable;
-- yakin bahwa SSH disconnect tidak mematikan migration;
-- dapat memeriksa progress dan membatalkan sebelum cutover.
+### 4.3 Later goals
 
-### 5.2 Persona kedua — technical founder
+- a daemon with a socket so clients can attach and detach,
+- a cutover pause and a cancel that truly stop an engine and clean up its artifacts,
+- a TUI,
+- a web UI, approval workflow, RBAC, and audit export,
+- expand-contract advice and index hygiene,
+- PostgreSQL, treated as a separate engine family with its own capability rules.
 
-**Karakteristik:**
+---
 
-- sensitif terhadap biaya dan waktu engineering;
-- tidak mampu membangun platform database internal;
-- memerlukan safety default yang kuat;
-- lebih memilih tool yang menolak daripada diam-diam mengambil risiko.
+## 5. Target users
 
-### 5.3 Persona ketiga — platform/DevOps generalist
+### 5.1 Primary persona: backend developer at a small startup
 
-**Karakteristik:**
+**Characteristics:** manages the application and the database, no DBA, large production tables, one primary instance, deploys over SSH or a simple CI, knows SQL but not MySQL internals.
 
-- mengelola beberapa service tanpa DBA khusus;
-- membutuhkan output JSON, exit code, audit trail, dan repeatability;
-- ingin memasukkan schema safety check ke CI.
+**Needs:** to know whether an ALTER locks or rebuilds, to know the safe command, to get an actionable explanation, to be sure a dropped SSH session does not kill the migration, and to be able to inspect and cancel before a cutover.
+
+### 5.2 Second persona: technical founder
+
+**Characteristics:** sensitive to cost and engineering time, cannot build an internal platform, needs strong defaults, prefers a tool that refuses over one that quietly takes a risk.
+
+### 5.3 Third persona: platform or DevOps generalist
+
+**Characteristics:** runs several services without a DBA, needs JSON output, exit codes, an audit trail, and repeatability, and wants schema safety checks in CI.
 
 ---
 
 ## 6. Jobs to be done
 
-1. **Ketika saya akan menjalankan ALTER pada tabel produksi,** saya ingin mengetahui execution path dan risikonya sebelum database berubah.
-2. **Ketika ALTER dapat dilakukan secara native,** saya ingin tool memilih native DDL daripada menyalin seluruh tabel.
-3. **Ketika ALTER membutuhkan copy engine,** saya ingin tool memverifikasi bahwa schema dan server kompatibel.
-4. **Ketika tool tidak memahami ALTER,** saya ingin tool menolak, bukan menebak.
-5. **Ketika migration berjalan lama,** saya ingin dapat disconnect dan reconnect tanpa menghentikan proses.
-6. **Ketika copy selesai,** saya ingin memverifikasi shadow table sebelum cutover.
-7. **Ketika migration bermasalah,** saya ingin mengetahui tindakan recovery yang benar-benar aman untuk fase saat ini.
-8. **Ketika menjalankan plan di CI,** saya ingin output JSON dan exit code yang stabil.
+1. When I am about to run an ALTER on a production table, I want to know the execution path and its risks before anything changes.
+2. When the ALTER can be done natively, I want the tool to choose native DDL instead of copying the table.
+3. When the ALTER needs a copy engine, I want the tool to verify that my table and my server support it.
+4. When the tool does not understand the ALTER, I want it to refuse rather than guess.
+5. When the migration is long, I want to disconnect and reconnect without stopping it.
+6. When the copy is finished, I want to verify the shadow table before the swap.
+7. When something goes wrong, I want to know which recovery action is actually safe at this phase.
+8. When I run a plan in CI, I want stable JSON and a stable exit code.
+9. When I am unsure which engine suits my table, I want the tool to inspect it and tell me, with the trade-offs.
 
 ---
 
-## 7. Prinsip pengalaman pengguna
+## 7. User experience principles
 
-1. **Plan before mutation** — setiap execution harus didahului plan yang tersimpan.
-2. **No silent fallback** — MySQL tidak boleh diam-diam memilih algorithm atau lock mode yang lebih mahal.
-3. **Unknown means blocked** — syntax atau capability tidak dikenal harus ditolak.
-4. **Risk must be actionable** — setiap blocker/warning harus menjelaskan alasan dan remediation.
-5. **Recovery is phase-aware** — UI tidak menampilkan “rollback available” tanpa menjelaskan consistency boundary.
-6. **Production requires friction** — hostname confirmation dan audit untuk override disengaja.
-7. **Headless is first-class** — seluruh fungsi inti tersedia tanpa TUI.
-8. **Secrets never become events** — credential tidak boleh muncul dalam output atau audit trail.
+1. **Plan before mutation.** Every execution is preceded by a recorded plan.
+2. **No silent fallback.** MySQL must never quietly pick a more expensive algorithm or lock mode.
+3. **Unknown means blocked.** Unrecognised syntax or capability is refused.
+4. **Risk must be actionable.** Every blocker and warning states the reason and the remediation.
+5. **Recovery is phase aware.** The UI never offers "rollback" without naming the consistency boundary.
+6. **Production requires friction.** A hostname confirmation and an audited override are deliberate.
+7. **Headless is first class.** Every core function works without a TUI.
+8. **Secrets never become events.** No credential appears in output or in the audit trail.
+9. **The recommendation is not the decision.** The analyzer suggests, the operator chooses, the tool executes.
 
 ---
 
-## 8. Ruang lingkup MVP
+## 8. MVP scope
 
-### 8.1 Platform target awal
+### 8.1 Initial platform targets
 
-- MySQL 8.0.
-- Linux amd64 dan arm64.
-- Self-hosted MySQL terlebih dahulu.
-- RDS/Aurora dideteksi, tetapi operasi yang belum terbukti aman dapat diblokir.
-- Tabel InnoDB.
+- MySQL 8.0 and 8.4, verified. MySQL 5.6 and 5.7 are claimed by the capability rules but not verified by the test suite.
+- Linux amd64 and arm64.
+- Self-hosted MySQL first, with RDS and Aurora detected and their extra restrictions reported.
+- InnoDB tables only.
 
-### 8.2 ALTER yang ditargetkan
+### 8.2 Targeted ALTER operations
 
-Subset awal harus berbasis capability matrix dan integration fixture:
+The first subset is defined by the capability matrix and integration fixtures:
 
-- `ADD INDEX`;
-- `DROP INDEX`;
-- subset `ADD COLUMN` yang benar-benar `INSTANT` pada versi target;
-- subset `DROP COLUMN` yang benar-benar `INSTANT` pada versi target;
-- operasi lain dapat dianalisis sebagai unsupported dan tidak dieksekusi.
+- `ADD INDEX`, `DROP INDEX`,
+- `ADD COLUMN` where the version genuinely supports `INSTANT`,
+- `DROP COLUMN` where the version genuinely supports `INSTANT`,
+- `SET DEFAULT`, `DROP DEFAULT`, `RENAME COLUMN`, `RENAME TABLE`,
+- anything else is analysed and reported as unsupported, not executed.
 
-Dukungan tidak boleh diberikan hanya berdasarkan tokenizer. Setiap operasi yang executable membutuhkan:
+Support is never granted on the strength of the tokenizer alone. Every executable operation needs a grammar fixture, a capability rule per version, a positive test, a negative test, and an explicit `ALGORITHM` and `LOCK` behaviour.
 
-- grammar/parser fixture;
-- capability rule per versi;
-- positive integration test;
-- negative/fallback test;
-- explicit `ALGORITHM` dan `LOCK` behavior.
+### 8.3 Engines in v1
 
-### 8.3 Engine v1
-
-| Engine | Status v1 | Batasan |
+| Engine | Status | Constraint |
 |---|---|---|
-| Native MySQL DDL | Wajib | Hanya capability yang terverifikasi; explicit algorithm/lock |
-| gh-ost | Wajib setelah native | Hanya tabel tanpa FK masuk/keluar; versi minimum diverifikasi |
-| pt-online-schema-change | Setelah MVP / opsional v1.x | Tidak dibundle; capability harus diuji |
-| MySQL Clone Plugin | Tidak didukung | Clone instance, bukan table migration primitive |
+| Native MySQL DDL | required | verified capability only, explicit algorithm and lock |
+| gh-ost | required | no foreign keys in either direction, single-column key, binlog configured |
+| pt-online-schema-change | required | never bundled, needs the Perl stack, no cutover pause |
+| MySQL Clone Plugin | not supported | it clones an instance, not a table |
 
 ---
 
-## 9. Alur pengguna utama
+## 9. Main user flows
 
-### 9.1 Plan tanpa perubahan
+### 9.1 Inspect the server and the schema
 
 ```bash
-saksama plan -h db.prod -d shop -t orders \
-  --alter "ADD INDEX ix_created (created_at)"
+saksama advise --live -h db.prod -d shop
 ```
 
-Alur:
+1. The CLI connects and reads the server settings the engines need.
+2. It reads every table in the schema in a handful of bulk queries.
+3. The analyzer judges each table against each engine.
+4. The output shows a settings doctor, then a table of tables with the engine to use for a rebuild.
+5. Nothing changes.
 
-1. CLI mengirim command ke core.
-2. Core memvalidasi request dan mengambil metadata server/table.
-3. Parser mengubah ALTER menjadi operasi terstruktur.
-4. Analyzer menjalankan capability rules dan checks.
-5. Core menyimpan plan dan mengirim plan card.
-6. Tidak ada perubahan ke schema.
-7. Jika ada blocker, exit code non-zero.
+### 9.2 Plan without mutation
 
-### 9.2 Apply native DDL
+```bash
+saksama plan --live -h db.prod -d shop -t orders \
+  -a "ADD INDEX ix_created (created_at)"
+```
+
+1. The CLI sends the request to the core.
+2. The core introspects the server and the table.
+3. The parser turns the ALTER into operations.
+4. The analyzer applies capability rules and checks.
+5. The core saves the plan and emits a plan card.
+6. Nothing changes.
+7. Blockers produce a non-zero exit code.
+
+### 9.3 Apply native DDL
 
 ```bash
 saksama apply -h db.prod -d shop -t orders \
-  --alter "ADD INDEX ix_created (created_at)" \
-  --no-tui
+  -a "ADD INDEX ix_created (created_at)" \
+  --production --confirm db.prod
 ```
 
-Alur:
+1. Build or reload the plan.
+2. Revalidate the schema fingerprint and the server capability.
+3. Run the preflight operational checks immediately before execution.
+4. Require the production confirmation.
+5. Set a conservative `lock_wait_timeout` on the session.
+6. Run the ALTER with explicit `ALGORITHM` and `LOCK`.
+7. Monitor the state.
+8. Verify the result through `information_schema`.
+9. Emit a completion event and an audit summary.
 
-1. Buat atau muat plan terbaru.
-2. Revalidate schema fingerprint dan server capability.
-3. Jalankan preflight operasional tepat sebelum execution.
-4. Minta approval production.
-5. Set session `lock_wait_timeout` konservatif.
-6. Jalankan ALTER dengan `ALGORITHM` dan `LOCK` eksplisit.
-7. Monitor state dan error.
-8. Verify hasil schema.
-9. Emit completion event dan audit summary.
+### 9.4 Choose the engine, then apply
 
-### 9.3 Apply gh-ost dengan hold-cutover
+```bash
+saksama engine set pt-osc -d shop -t orders --note "foreign keys must be copied"
+saksama apply -h db.prod -d shop -t orders -a "MODIFY COLUMN status varchar(64) NOT NULL"
+```
+
+1. The recorded choice is resolved for this table, falling back to the database and then the global choice.
+2. The chosen engine is judged on its own requirements.
+3. If it cannot run, the plan refuses and names what to change.
+4. Otherwise the argv is built, shown, and executed.
+5. Progress is polled from the database, never parsed from engine output.
+6. The result is verified through `information_schema`.
+
+### 9.5 Hold the cutover
 
 ```bash
 saksama apply ... --engine=gh-ost --hold-cutover
-saksama status <session>
-saksama cutover <session>
+saksama status s3
+saksama cutover s3
 ```
 
-Alur:
+Planned for phase 3. The copy finishes, the swap is held, the operator inspects the shadow table, then releases the cutover. This is a verification gate, not blue-green.
 
-1. Pastikan tabel tidak memiliki FK masuk/keluar.
-2. Pastikan engine/version/capability cocok.
-3. Jalankan gh-ost di bawah core.
-4. Monitor database dan proses engine.
-5. Saat copy selesai, state menjadi `holding_cutover`.
-6. Pengguna memverifikasi shadow table.
-7. Pengguna memilih `cutover` atau `cancel`.
-8. Setelah cutover, tool menjalankan verification.
-9. Recovery pasca-cutover tidak dipresentasikan sebagai rollback otomatis.
+### 9.6 Reconnect after a dropped SSH session
 
-### 9.4 Reconnect setelah SSH putus
+Planned for phase 3, together with the daemon. Today a copy engine runs as a child of `apply`, so a dropped session ends it, which is stated plainly in the docs.
+
+### 9.7 Cancel before the cutover
+
+Planned for phase 3. Cancelling stops the engine and cleans up only the artifacts recorded as owned by that session.
+
+### 9.8 Recovery after a cutover
 
 ```bash
-saksama status <session>
-saksama attach <session> # TUI pada fase berikutnya
+saksama recover s3 --mode forward-fix
 ```
 
-Core tetap berjalan, menyimpan state, dan mengawasi engine. Client meminta snapshot terbaru dan event setelah `since_seq`.
-
-### 9.5 Cancel sebelum cutover
-
-```bash
-saksama cancel <session>
-saksama cleanup <session>
-```
-
-Tool menghentikan engine secara graceful, memverifikasi tabel produksi belum ditukar, lalu membersihkan artefak yang aman untuk dihapus.
-
-### 9.6 Recovery setelah cutover
-
-```bash
-saksama recover <session> --mode forward-fix
-```
-
-Tool:
-
-- tidak otomatis melakukan rename balik;
-- menjelaskan bahwa write baru mungkin hanya ada di tabel baru;
-- menampilkan recovery mode yang tersedia;
-- membutuhkan approval eksplisit;
-- dapat mensyaratkan write freeze;
-- merekam seluruh keputusan ke audit trail.
+Planned. The tool does not rename back automatically, explains that new writes may exist only in the new table, shows the available recovery modes, requires explicit approval, may require a write freeze, and records the decision.
 
 ---
 
-## 10. Persyaratan fungsional
+## 10. Functional requirements
 
-### FR-1 — Parsing dan normalisasi ALTER
+### FR-1: parse and normalise the ALTER
 
-**Deskripsi:** sistem harus mengubah input ALTER menjadi operasi terstruktur.
+- Support an explicit grammar subset.
+- Handle backtick identifiers, nested parentheses, comments, and commas inside expressions.
+- Reject multi-statement input.
+- Reject ambiguous or unsupported syntax.
+- Store both the original SQL and the normalised form.
+- Never rely on a plain regex to understand a whole ALTER.
 
-**Persyaratan:**
+**Acceptance:** every supported fixture produces the right operations; every unsupported fixture produces a stable blocker rather than a panic or a fallback execution; input with an injected second statement is rejected.
 
-- Mendukung subset grammar eksplisit.
-- Menangani backtick identifier, nested parentheses, comment, dan comma pada expression untuk subset yang didukung.
-- Menolak multi-statement.
-- Menolak syntax ambigu atau unsupported.
-- Menyimpan SQL asli dan representasi normalisasi.
-- Parser tidak boleh mengandalkan regex sederhana untuk memahami seluruh ALTER.
+### FR-2: database introspection
 
-**Acceptance criteria:**
+Read the vendor and version, storage engine, column type, charset, collation, nullability, default, and generated status, indexes and their parts, primary and unique keys, foreign keys in both directions with their actions, triggers, size and row count, row format, partitioning, active queries and transactions, metadata locks, replica state, grants, the relevant server settings, and leftovers from previous migrations.
 
-- Semua fixture supported menghasilkan AST/operation yang benar.
-- Semua fixture unsupported menghasilkan blocker stabil, bukan panic atau fallback execution.
-- Input dengan statement injection atau statement kedua ditolak.
+Introspection is separate from the analyzer so the analyzer can be tested without a database.
 
-### FR-2 — Introspeksi database
+### FR-3: capability matrix
 
-Sistem harus mengambil:
+Determine capability from the vendor and version, the engine version, the storage engine, table features, the operation, and managed-service constraints. Every decision yields a rule ID, a supported or blocked verdict, the expected algorithm and lock, the reason, the permitted fallbacks, and a reference. Unknown capability is a blocker.
 
-- server vendor dan version;
-- storage engine;
-- column type, charset, collation, nullability, default, generated status;
-- index dan key part;
-- PK/unique key;
-- FK masuk dan keluar beserta action;
-- trigger;
-- table size dan estimated rows;
-- row format;
-- active query dan transaction;
-- metadata lock jika tersedia;
-- replica state bila relevan;
-- grants/privilege;
-- managed service fingerprint bila dapat dideteksi.
+### FR-4: check catalog
 
-Introspeksi harus terpisah dari analyzer agar analyzer dapat diuji tanpa database.
-
-### FR-3 — Capability matrix
-
-Sistem harus menentukan capability berdasarkan:
-
-- MySQL vendor/version;
-- engine version;
-- storage engine;
-- table feature;
-- operasi ALTER;
-- managed service constraints.
-
-Setiap keputusan harus menghasilkan:
-
-- rule ID;
-- keputusan supported/blocked;
-- algorithm dan lock yang diharapkan;
-- alasan;
-- fallback yang diizinkan;
-- confidence/reference internal.
-
-Unknown capability harus menghasilkan blocker.
-
-### FR-4 — Checks catalog
-
-Sistem harus mengimplementasikan check dengan ID stabil dari `docs/CHECKS.md`.
-
-Setiap check menghasilkan:
+Implement the checks with stable IDs from [`docs/CHECKS.md`](docs/CHECKS.md). Each check yields:
 
 ```json
 {
   "id": "D1",
   "severity": "WARN",
-  "title": "long-running query may hold MDL",
-  "detail": "1 query has been running for 127s",
-  "remediation": "wait for the query or terminate it before retrying",
+  "title": "long-running statement may hold the metadata lock",
+  "detail": "1 statement has been running for 127s",
+  "remediation": "wait for it, or terminate it deliberately",
   "mysql_error": 1205
 }
 ```
 
-Severity:
+Severity: `BLOCKER` refuses execution, `WARN` allows it with awareness, `INFO` is supporting detail.
 
-- `BLOCKER`: execution ditolak;
-- `WARN`: execution dapat dilanjutkan dengan awareness/approval;
-- `INFO`: informasi pendukung.
+`--force` may not bypass a blocker that protects a core invariant: an unparsed ALTER, a copy engine with foreign keys it cannot handle, an incompatible engine capability, clearly insufficient disk, a changed schema fingerprint, or unsafe credential handling. Overridable blockers need an explicit allowlist, never a global rule.
 
-Untuk v1, `--force` tidak boleh melewati blocker yang melindungi invariant inti seperti:
+### FR-5: plan
 
-- parser tidak memahami ALTER;
-- copy engine pada tabel dengan FK;
-- capability engine tidak kompatibel;
-- disk jelas tidak cukup;
-- schema fingerprint berubah;
-- credential handling tidak aman.
+The plan contains the host, database, and table, the original and normalised ALTER, a schema fingerprint, server information, the engine recommendation and its source, the fallbacks, the reasons, the checks, a sanitised preview of the SQL or argv, a duration range with confidence, a disk estimate, the recovery mode per phase, an assessment of every engine, the server setting report, and a timestamp.
 
-Blocker yang boleh di-override harus memiliki allowlist eksplisit, bukan aturan global.
+The plan is available as a human-readable card, as stable JSON, and as a persisted session artifact.
 
-### FR-5 — Plan
+### FR-6: engine routing
 
-Plan harus berisi:
+1. Native when every operation's capability is verified.
+2. gh-ost when a rebuild is needed, the table qualifies, and the server can start it.
+3. pt-osc when gh-ost does not qualify or the server cannot start it.
+4. Refuse when no engine qualifies.
 
-- target host/database/table;
-- ALTER asli dan operasi normalisasi;
-- schema fingerprint;
-- server information;
-- engine recommendation;
-- fallback yang valid;
-- alasan pemilihan;
-- checks;
-- preview operasi SQL/engine yang sudah disensor;
-- estimasi durasi range + confidence;
-- disk requirement estimate;
-- recovery mode per fase;
-- timestamp dan expiry/revalidation requirement.
+A manual override never bypasses capability or safety checks; it selects a path and is then judged on it.
 
-Plan tersedia sebagai:
+### FR-7: native execution
 
-- human-readable plan card;
-- JSON stabil;
-- persisted session artifact.
+- Use an explicit `ALGORITHM` when the target supports the syntax.
+- Use an explicit `LOCK`.
+- Never allow a silent fallback to a more expensive algorithm.
+- Set `lock_wait_timeout` on the migration session.
+- Recheck transactions and metadata locks immediately before the ALTER.
+- Verify the result by introspection, not by exit code.
+- Emit progress and state even when a percentage is not meaningful.
 
-### FR-6 — Engine routing
+### FR-8: copy engine execution
 
-Default policy:
+- Detect the engine version and validate it against the declared matrix.
+- Refuse credentials in argv unless the operator opted in explicitly.
+- Block tables with foreign keys for gh-ost, and report the reason.
+- Support `--allow-on-master` on a single server, with a warning and conservative throttling.
+- Support a cutover pause where the engine offers one.
+- Supervise the process from the core.
+- Use stdout and stderr for diagnosis only: progress must not depend on parsing an unstable log format.
+- Quote the engine's own final output lines when it fails, because an exit code alone is not a diagnosis.
 
-1. Native jika seluruh operasi capability-nya terverifikasi.
-2. gh-ost jika rebuild dibutuhkan, table memenuhi prasyarat, dan tidak ada FK masuk/keluar.
-3. pt-osc hanya bila adapter dan capability terkait telah diaktifkan/diuji.
-4. Block jika tidak ada engine yang memenuhi safety policy.
+### FR-9: session lifecycle
 
-Manual override `--engine=` harus tetap melewati capability dan safety check.
+States: `planned`, `analyzing`, `approved`, `running`, `verifying`, `done`, `failed`, `cancelled`, `blocked`. Transitions are validated, and a command that is invalid for the current state is rejected idempotently.
 
-### FR-7 — Native execution
+### FR-10: approval
 
-- Gunakan `ALGORITHM=` eksplisit jika didukung syntax target.
-- Gunakan `LOCK=` eksplisit.
-- Jangan izinkan silent fallback ke algorithm yang lebih mahal.
-- Set `lock_wait_timeout` pada session migration.
-- Recheck active transaction/MDL sesaat sebelum ALTER.
-- Verify hasil melalui introspeksi, bukan hanya exit code.
-- Emit progress/state walaupun progress persentase native tidak selalu tersedia.
+Approval is required for execution against a production host, for a cutover, for overriding a warning, for recovery after a cutover, and for any action that needs a write freeze. Each approval records the action, the actor, the timestamp, the plan or schema fingerprint, a risk note, and a correlation ID.
 
-### FR-8 — gh-ost execution
+### FR-11: cutover pause
 
-- Detect versi gh-ost.
-- Validate supported version/capability.
-- Credential tidak boleh ditaruh secara terbuka di argv.
-- Tabel dengan FK masuk/keluar diblokir di v1.
-- Mendukung `--allow-on-master` untuk single instance dengan warning dan throttle konservatif.
-- Mendukung postpone cutover flag.
-- Core menjadi supervisor proses.
-- stderr/stdout hanya digunakan untuk diagnosis; progress utama tidak boleh bergantung pada parsing format log yang tidak stabil.
+Available only for engines that support it. The state must make clear whether the production table has been swapped. The tool shows the verification instructions, accepts `cutover` or `cancel`, and never claims this is application blue-green.
 
-### FR-9 — Session lifecycle
+### FR-12: cancel and cleanup
 
-State minimum:
+Cancel stops the engine gracefully. Cleanup removes only artifacts it can prove belong to the session, and refuses while an artifact is still needed for recovery. Artifact names and ownership are recorded in the session state rather than guessed from a prefix. Every drop is written to the audit log.
 
-- `planned`;
-- `analyzing`;
-- `awaiting_approval`;
-- `running`;
-- `holding_cutover`;
-- `cutting_over`;
-- `verifying`;
-- `done`;
-- `failed`;
-- `cancelled`;
-- `recovering`;
-- `recovered`;
-- `cleaned_up`.
+### FR-13: recovery
 
-Transition harus divalidasi. Command yang tidak valid untuk state saat ini ditolak secara idempoten.
-
-### FR-10 — Approval
-
-Approval diperlukan untuk:
-
-- execution pada host production;
-- cutover;
-- override warning tertentu;
-- recovery pasca-cutover;
-- tindakan yang memerlukan write freeze.
-
-Approval harus mencatat:
-
-- action;
-- actor;
-- timestamp;
-- plan/schema fingerprint;
-- risk note;
-- command/correlation ID.
-
-### FR-11 — Hold-cutover
-
-- Hanya tersedia untuk engine yang mendukung.
-- State harus jelas menunjukkan tabel produksi belum ditukar atau sudah ditukar.
-- Tampilkan instruksi verifikasi.
-- Pengguna dapat memilih `cutover` atau `cancel`.
-- Hold-cutover tidak boleh diklaim sebagai application blue-green.
-
-### FR-12 — Cancel dan cleanup
-
-- Cancel berusaha menghentikan engine secara graceful.
-- Cleanup hanya menghapus artefak yang dapat dibuktikan milik session.
-- Cleanup menolak jika artefak masih diperlukan untuk recovery.
-- Nama artefak dan ownership harus disimpan dalam state, bukan ditebak hanya dari prefix.
-- Setiap drop dicatat di audit log.
-
-### FR-13 — Recovery
-
-Recovery mode minimum:
-
-| Fase | Recovery mode | Jaminan |
+| Phase | Recovery | Guarantee |
 |---|---|---|
-| Sebelum cutover | cancel + cleanup | Tabel produksi belum ditukar |
-| Holding cutover | cancel + cleanup | Shadow table dibuang; produksi tetap asli |
-| Saat cutover ambigu/crash | reconcile | Observasi DB diperlukan sebelum tindakan |
-| Setelah cutover | forward-fix / prosedur dengan write freeze | Tidak ada rollback data otomatis |
+| Before a cutover | cancel, cleanup | the production table has not been swapped |
+| Cutover held | cancel, cleanup | the shadow table is discarded, production is untouched |
+| Cutover ambiguous or crashed | reconcile | the database must be observed before acting |
+| After a cutover | forward fix, or a procedure with a write freeze | no automatic data rollback |
 
-Tool tidak boleh menawarkan rename-back tanpa:
+The tool never offers a rename back without detecting the write boundary, explaining the risk of losing writes, requiring approval and a write freeze where relevant, and following a tested procedure.
 
-- mendeteksi write boundary;
-- menjelaskan risiko kehilangan write;
-- mensyaratkan approval dan write freeze bila relevan;
-- memiliki prosedur yang telah diuji.
+### FR-14: status and progress
 
-### FR-14 — Status dan progress
+Status shows the session, its state and phase, the engine and version, elapsed time, progress where available, current load and throttling, replica lag where relevant, the active checks, the next action, the recovery mode, the last error, and the last event sequence number.
 
-Status harus menampilkan:
+### FR-15: event contract
 
-- session/state/phase;
-- engine dan version;
-- elapsed time;
-- progress bila tersedia;
-- current load/throttle;
-- replica lag bila relevan;
-- checks aktif;
-- next action;
-- recovery mode;
-- last error;
-- last event sequence.
-
-### FR-15 — Event contract
-
-Semua frontend menggunakan event contract di `docs/EVENTS.md`.
-
-Envelope wajib:
+Every frontend uses one event contract, defined in `internal/events` and described here. The envelope is:
 
 ```json
-{
-  "contract_version": 1,
-  "seq": 142,
-  "ts": 1756930000.123,
-  "type": "phase.progress",
-  "session": "m3",
-  "data": {}
-}
+{"contract_version": 1, "seq": 142, "ts": 1756930000.123, "type": "phase.progress", "session": "s3", "data": {}}
 ```
 
-Persyaratan:
+Requirements: monotonic sequence per session, an append-only audit log, a JSON Schema per event type, a snapshot for reconnects, redaction before emission, at most one progress event per second per phase, and command idempotency with correlation IDs.
 
-- sequence monotonik per session;
-- append-only audit log;
-- JSON Schema per event type;
-- snapshot untuk reconnect;
-- redaction sebelum emit;
-- progress maksimum satu event per detik per session;
-- command idempotency dan correlation ID.
+### FR-16: daemon and core
 
-### FR-16 — Daemon/core
+The core runs separately from the CLI and the TUI, uses a unix socket by default, persists state durably, survives a client disconnect, reconciles orphaned sessions at startup, supports one writer and many readers, and prevents two conflicting executions on the same table.
 
-Core harus:
-
-- berjalan terpisah dari CLI/TUI;
-- menggunakan unix socket secara default;
-- menyimpan state durable;
-- tetap hidup ketika SSH/client disconnect;
-- melakukan startup reconciliation untuk orphan session;
-- mendukung satu writer dan banyak viewer per session;
-- mencegah dua execution pada target table yang sama jika saling konflik.
-
-### FR-17 — CLI dan JSON
-
-Command minimum:
+### FR-17: CLI and JSON
 
 ```text
-saksama plan
-saksama plan --live
 saksama advise
+saksama plan
 saksama apply
 saksama status
-saksama cutover
-saksama cancel
-saksama recover
-saksama cleanup
 saksama events
 saksama export
+saksama cleanup
+saksama engine list|set|show|clear
+saksama compat
 saksama schema
+saksama version
 saksama daemon start|stop|status
+saksama cutover | cancel | recover
 ```
 
-Semua command penting mendukung `--json`. Output machine-readable tidak boleh tercampur progress dekoratif di stdout.
+Every command that matters supports `--json`, and machine-readable output never mixes in decorative progress on stdout.
 
-### FR-18 — Credential handling
+### FR-18: credentials
 
-Credential diperoleh melalui salah satu mekanisme aman:
+Credentials come from `~/.my.cnf`, from `--defaults-extra-file` with safe permissions, from a secret provider that is never printed, or from an interactive prompt when a TTY exists.
 
-- `~/.my.cnf`;
-- `--defaults-extra-file` dengan permission aman;
-- environment/secret provider yang tidak dicetak;
-- interactive prompt jika TTY tersedia.
+Forbidden: a password in argv, a password in an event or a log, an unsanitised DSN, an audit export containing a secret, and a credential file that other users can read.
 
-Larangan:
+### FR-19: audit export
 
-- password di argv;
-- password di event/log;
-- DSN penuh yang tidak disensor;
-- export audit yang mengandung secret.
-
-### FR-19 — Audit export
-
-Export harus mencakup:
-
-- plan;
-- checks;
-- approvals;
-- engine/version;
-- phase transitions;
-- redacted command;
-- hasil verification;
-- recovery decision;
-- event completeness marker.
-
-Format awal: JSONL dan JSON summary.
+The export covers the plan, the checks, the approvals, the engine and version, the phase transitions, the redacted command, the verification results, the recovery decision, and a completeness marker. Initial formats are JSONL and a JSON summary.
 
 ---
 
-## 11. Persyaratan nonfungsional
+## 11. Non-functional requirements
 
-### NFR-1 — Safety
+### NFR-1: safety
 
-- Default fail-closed.
-- Tidak ada silent capability fallback.
-- Tidak ada automatic FK manipulation di v1.
-- Semua destructive action harus scoped ke session artifact.
-- Schema fingerprint diverifikasi sebelum execution dan cutover.
+Fail closed by default. No silent capability fallback. No automatic foreign key manipulation. Every destructive action is scoped to a session artifact. The schema fingerprint is verified before execution and before a cutover.
 
-### NFR-2 — Reliability
+### NFR-2: reliability
 
-- Core crash tidak boleh otomatis mengasumsikan migration gagal atau sukses.
-- Startup melakukan reconciliation terhadap database dan process state.
-- Command retry harus idempoten.
-- State transition dan event append harus memiliki durability semantics yang terdokumentasi.
+A core crash must not assume the migration failed or succeeded. Startup reconciles against the database and the process state. Commands are idempotent on retry.
 
-### NFR-3 — Performance
+### NFR-3: performance
 
-- Analyzer offline: target p95 < 100 ms untuk schema fixture normal.
-- Live plan: target p95 < 5 detik di luar latency jaringan dan query server yang diblokir.
-- Event progress tidak lebih dari satu kali/detik/session.
-- Tool overhead tidak boleh menjadi bottleneck utama dibanding engine/database.
+The offline analyzer targets a p95 under 100 ms for a normal schema fixture. A live plan targets a p95 under 5 seconds excluding network and blocked queries. Progress emits at most once per second per session. The tool must never be the bottleneck compared with the engine.
 
-### NFR-4 — Compatibility
+### NFR-4: compatibility
 
-- Binary statis untuk Linux amd64/arm64 bila dependency memungkinkan.
-- `TERM=dumb` dan `NO_COLOR` menghasilkan plain output.
-- CLI tetap usable pada terminal 80×24.
-- Headless mode tidak membutuhkan TTY.
+A static binary for Linux amd64 and arm64 where dependencies allow. `TERM=dumb` and `NO_COLOR` produce plain output. The CLI stays usable at 80x24. Headless mode needs no TTY. Tables use ASCII borders rather than box-drawing characters.
 
-### NFR-5 — Security
+### NFR-5: security
 
-- Socket default hanya dapat diakses user pemilik.
-- State directory dan credential file memerlukan permission ketat.
-- Semua log melalui redaction layer.
-- SQL yang ditampilkan harus mempertimbangkan literal sensitif.
-- Remote TCP dinonaktifkan secara default sampai autentikasi dan TLS tersedia.
+The socket is owner-only by default. The state directory and credential files require strict permissions. All logs pass through redaction. SQL shown to the user considers sensitive literals. Remote TCP is disabled until authentication and TLS exist.
 
-### NFR-6 — Testability
+### NFR-6: testability
 
-- Analyzer adalah pure library tanpa dependency database.
-- Introspection query diuji melalui fixture/integration container.
-- Setiap check memiliki positive dan negative test.
-- Setiap capability executable memiliki versioned integration fixture.
-- Crash/reconnect/reconcile diuji dengan fault injection.
+The analyzer is a pure library with no database dependency. Introspection queries are tested against a container. Every check has a positive and a negative test. Every executable capability has a versioned integration fixture. Crash, reconnect, and reconcile are tested with fault injection.
 
-### NFR-7 — Observability
+### NFR-7: observability
 
-Core menghasilkan:
-
-- structured event;
-- structured internal log;
-- session summary;
-- engine exit metadata;
-- redaction metrics/error;
-- incomplete audit marker setelah crash yang belum direkonsiliasi.
+The core produces structured events, a structured internal log, a session summary, engine exit metadata, redaction metrics, and an incomplete-audit marker after an unreconciled crash.
 
 ---
 
-## 12. UX dan output
+## 12. UX and output
 
-### 12.1 Plan card
+### 12.1 The settings doctor
 
-```text
+Before judging any table, `advise` shows what the server reports against what the engines need:
+
+```
+SETTING            CURRENT    REQUIRED    STATUS  NEEDED BY   WHY
+log_bin            OFF        ON          FAIL    gh-ost      gh-ost follows writes through it
+binlog_format      ROW        ROW         ok      gh-ost      statement format loses row data
+binlog_row_image   FULL       FULL        ok      gh-ost      MINIMAL omits needed columns
+server_id          1          non-zero    ok      gh-ost      gh-ost refuses server_id=0
+```
+
+### 12.2 The engine matrix
+
+Every engine is judged, including the ones that do not fit, with the evidence and the trade-offs:
+
+```
+NATIVE    UNSUITABLE
+  [FAIL] no table rebuild required     these operations rebuild the table: modify_column
+GH-OST    UNSUITABLE
+  [FAIL] no foreign keys in or out     2 constraint(s) involve this table
+PT-OSC    SUITABLE  (ready)
+  [  ok] primary or unique key         the table can be chunked
+```
+
+### 12.3 Plan card
+
+```
 ALTER      ADD INDEX ix_created (created_at)
 TARGET     shop.orders @ db.prod
-ENGINE     native INPLACE, LOCK=NONE (MySQL 8.0.36)
-DURATION   35–60s · confidence medium · no table copy
+ENGINE     native [INPLACE, LOCK=NONE] (8.0.36)
+DURATION   35s - 60m | confidence medium
+WHY        every operation has a verified native DDL rule
 
-WHY
-  Secondary index creation is supported by the verified native rule.
-  gh-ost would copy the table and consume additional disk.
-
-WARN  [D1] One query has run for 127s and may delay MDL acquisition.
-      Action: wait for it or terminate it before execution.
-INFO  [A5] Estimated key length is 48 bytes; limit is 3072 bytes.
-
-RECOVERY
-  Before execution: no mutation.
-  During native DDL: cancel behavior depends on server phase.
-  After success: use forward migration; no automatic data rollback.
+RECOVERY   before execution: nothing has been mutated
+           after success: forward migration only
 
 RECOMMEND  native
 BLOCKERS   0
+RESULT     ready (nothing has been changed)
 ```
 
-### 12.2 Blocked plan
+### 12.4 Blocked plan
 
-```text
-BLOCK [C4] Copy-based migration is not supported for tables with foreign keys in v1.
-
-Why:
-  orders has 2 outgoing and 1 incoming foreign key.
-  Dropping and recreating them would open an integrity window.
-
-Action:
-  Use a verified native operation, schedule a maintenance procedure,
-  or redesign the change using expand-contract.
+```
+BLOCK [R3] gh-ost is not installed on this machine
+  detail:  the engine fits this change, but Saksama cannot start it
+  action:  install it from the gh-ost releases page
 ```
 
-### 12.3 Production confirmation
+### 12.5 Production confirmation
 
-Sebelum mutasi:
-
-```text
+```
 Target is marked as production: db.prod
-Type the hostname to continue: db.prod
+Re-run with: --confirm db.prod
 ```
 
-Pada non-interactive mode, approval harus menggunakan flag/token yang eksplisit dan tercatat, bukan otomatis dianggap setuju.
+In non-interactive mode, approval needs an explicit flag or token that is recorded, never an assumed yes.
 
 ---
 
-## 13. Data model konseptual
+## 13. Conceptual data model
 
-### 13.1 Session
+**Session:** id, created and updated timestamps, state, phase, target, original and normalised ALTER, schema fingerprint, server version, engine, blockers and warnings, the plan, the statements, the approvals, the verification records, the last event sequence, the actor, the error.
 
-```text
-Session
-- id
-- created_at
-- updated_at
-- state
-- phase
-- target
-- alter_original
-- alter_normalized
-- schema_fingerprint
-- server_fingerprint
-- engine
-- engine_version
-- hold_cutover
-- recovery_mode
-- last_seq
-- owner
-```
+**Plan:** operations, recommendation, fallbacks, reasons, checks, engine assessments, table facts, environment report, duration estimate, disk estimate, required approvals, expiry.
 
-### 13.2 Plan
+**Artifact:** session id, kind, database, name, ownership marker, creation time, whether it is safe to delete.
 
-```text
-Plan
-- session_id
-- operations[]
-- recommendation
-- fallbacks[]
-- reasons[]
-- checks[]
-- duration_estimate
-- disk_estimate
-- required_approvals[]
-- expires_at
-```
+**Approval:** command id, action, actor, decision, risk note, plan fingerprint, timestamp.
 
-### 13.3 Artifact
-
-```text
-Artifact
-- session_id
-- kind
-- database
-- name
-- ownership_marker
-- created_at
-- safe_to_delete
-```
-
-### 13.4 Approval
-
-```text
-Approval
-- command_id
-- action
-- actor
-- decision
-- risk_note
-- plan_fingerprint
-- created_at
-```
+**Engine choice:** engine, scope, database, table, actor, note, timestamp.
 
 ---
 
-## 14. Estimasi durasi
+## 14. Duration estimates
 
-Estimasi tidak boleh berupa angka palsu yang terlalu presisi.
+The estimate must not be a spuriously precise number. Sources, in order of preference:
 
-Sumber:
+1. A local historical profile per engine and table shape.
+2. A bounded read-only benchmark with an explicit query budget.
+3. A heuristic fallback with low confidence.
 
-1. Profil historis lokal per engine/table profile.
-2. Benchmark read-only yang aman dan dibatasi.
-3. Fallback heuristic dengan confidence rendah.
-
-Output selalu:
-
-- range;
-- confidence (`low`, `medium`, `high`);
-- basis estimasi;
-- faktor yang dapat memperpanjang waktu.
-
-Benchmark tidak boleh melakukan scan besar tanpa budget/query limit yang jelas.
+Output always contains a range, a confidence level, the basis for the estimate, and the factors that could extend it.
 
 ---
 
-## 15. Metrik keberhasilan
+## 15. Success metrics
 
-### 15.1 North-star metric
+### 15.1 North star
 
-**Persentase migration plan yang menghasilkan keputusan aman dan dapat ditindaklanjuti tanpa pengguna harus memahami opsi engine secara manual.**
+The percentage of migration plans that produce a safe, actionable decision without the user having to understand engine options manually.
 
-### 15.2 Metrik produk
+### 15.2 Product metrics
 
-- Persentase plan yang memilih native daripada copy engine.
-- Persentase execution selesai tanpa manual incident.
-- Jumlah blocker yang mencegah operasi berbahaya.
-- False-positive rate check.
-- False-negative incident rate.
-- Plan-to-apply conversion.
-- Median waktu dari plan ke keputusan.
-- Reconnect success rate.
-- Recovery guidance completion rate.
-- Jumlah credential leak: target **0**.
-- Jumlah silent FK semantic change: target **0**.
+- the share of plans that choose native rather than a copy engine,
+- the share of executions that finish without a manual incident,
+- the number of blockers that prevented a dangerous operation,
+- the false positive rate per check,
+- incidents caused by a missed check (target: zero),
+- plan to apply conversion,
+- median time from plan to decision,
+- reconnect success rate,
+- guidance completion rate,
+- credential leaks (target: zero),
+- silent foreign key semantic changes (target: zero).
 
-### 15.3 Kriteria go/no-go MVP
+### 15.3 Go/no-go for the MVP
 
-MVP tidak boleh dirilis sebagai “safe for production” sebelum:
+The MVP is not released as "safe for production" until every executable capability has an integration test, the foreign key copy path is genuinely handled or blocked, the secret redaction tests pass, the crash and restart reconcile tests pass, the native fallback behaviour is tested, the hold, cancel, and cutover state machine is tested, and there is no severity-1 data loss bug from a staging soak test.
 
-- seluruh executable capability memiliki integration test;
-- FK copy path benar-benar diblokir;
-- secret redaction test lulus;
-- crash/restart reconciliation test lulus;
-- native fallback behavior test lulus;
-- hold/cancel/cutover state machine test lulus;
-- tidak ada severity-1 data loss bug pada staging soak test.
+Current state: the integration suite passes on MySQL 8.0.46 and 8.4.13, gh-ost 1.1.11 has run a real migration, and pt-osc is **not** verified against a real binary. The staging soak test has not been run.
 
 ---
 
-## 16. Acceptance criteria tingkat produk
+## 16. Product-level acceptance criteria
 
-### Plan
+**Plan:** a user can run `plan` without changing the database; unsupported ALTERs are always refused with a reason; the JSON schema is stable; a blocker produces a non-zero exit code.
 
-- Pengguna dapat menjalankan `saksama plan` tanpa perubahan database.
-- Unsupported ALTER selalu ditolak dengan alasan.
-- Output JSON memiliki schema stabil.
-- Blocker menghasilkan exit code non-zero.
+**Native execution:** the tool never lets MySQL silently fall back; it revalidates the schema before execution; it checks for long transactions and metadata locks immediately before the ALTER; it verifies the resulting schema.
 
-### Native execution
+**Copy engines:** a table with foreign keys is refused for gh-ost; the argv is shown before it runs; progress comes from the database; the result is verified; an engine that exits 0 without doing the work is still reported as a failure.
 
-- Tool tidak membiarkan MySQL melakukan silent algorithm fallback.
-- Tool revalidasi schema sebelum execution.
-- MDL/long transaction check dijalankan tepat sebelum ALTER.
-- Schema hasil diverifikasi.
+**Engine choice:** an unrecorded table follows the recommendation; a recorded choice wins; a choice that cannot run is refused with the reason; the analyzer's own pick stays visible.
 
-### gh-ost
+**Recovery:** before a cutover, cancel does not change the production table; after a cutover, the UI never claims an automatic rollback is available; an ambiguous crash triggers reconciliation rather than automatic cleanup.
 
-- Tabel dengan FK masuk/keluar ditolak.
-- Disconnect client tidak mematikan engine.
-- Hold-cutover dapat dilanjutkan atau dibatalkan.
-- Cutover memerlukan approval eksplisit.
-
-### Recovery
-
-- Sebelum cutover, cancel tidak mengubah tabel produksi.
-- Setelah cutover, UI tidak mengklaim automatic rollback tersedia.
-- Crash pada state ambigu memicu reconcile, bukan cleanup otomatis.
-
-### Security
-
-- Password tidak terlihat pada process list, event, log, atau export.
-- Unix socket dan state directory memiliki permission aman.
+**Security:** no password appears in the process list, in an event, in a log, or in an export; the socket and the state directory have safe permissions; a world-readable credential file is rejected.
 
 ---
 
-## 17. Strategi pengujian
+## 17. Testing strategy
 
-### 17.1 Unit test
+### 17.1 Unit tests
 
-- ALTER parser dan normalizer.
-- Analyzer capability rules.
-- Check evaluator.
-- Engine argv builder dan redaction.
-- State transition.
-- Recovery mode selection.
-- Event schema validation.
+The ALTER parser and normaliser, the capability rules, the check evaluator, the engine argv builder and redaction, the state transitions, the recovery mode selection, the event schema, the table renderer, and the compatibility document generator.
 
-### 17.2 Integration test MySQL
+### 17.2 Integration tests against MySQL
 
-Fixture minimum:
+Fixtures cover: no primary key, auto-increment primary key, UUID primary key, composite primary key, incoming and outgoing foreign keys, foreign keys with `ON DELETE CASCADE` and `ON UPDATE SET NULL`, utf8mb3 and utf8mb4 mismatches, key length overflow, TEXT and BLOB indexes, generated columns, partitioned tables, an active long transaction, a metadata lock blocker, low disk, an existing trigger, leftover artifacts, a check constraint violation, a schema that changes between plan and apply, and a server with binary logging disabled.
 
-- tabel tanpa PK;
-- PK auto-increment;
-- UUID PK;
-- composite PK;
-- incoming/outgoing FK;
-- FK dengan `ON DELETE CASCADE` dan `ON UPDATE SET NULL`;
-- utf8mb3/utf8mb4 mismatch;
-- key length overflow;
-- TEXT/BLOB index;
-- generated column;
-- partitioned table;
-- active long transaction;
-- MDL blocker;
-- low disk simulation;
-- existing trigger;
-- leftover artifact;
-- CHECK constraint violation;
-- schema berubah antara plan dan apply.
+### 17.3 End to end
 
-### 17.3 End-to-end test
+Native plan to execution to verification; copy engine plan to copy to verification; a no-op engine still failing verification; disconnect and reconnect (phase 3); core crash and restart reconciliation (phase 3); engine crash; a duplicate command ID; cleanup refusing while an artifact is still needed.
 
-- Native plan → approve → execute → verify.
-- gh-ost plan → copy → hold → cancel.
-- gh-ost plan → copy → hold → cutover → verify.
-- Client disconnect/reconnect.
-- Core crash dan startup reconciliation.
-- Engine crash.
-- Duplicate command ID.
-- Cleanup refusal ketika artifact masih diperlukan.
+### 17.4 Adversarial
 
-### 17.4 Adversarial test
-
-- Malicious identifier dan SQL comment.
-- Multi-statement input.
-- Credential pada error string.
-- Stale plan.
-- Race antara cutover dan cancel.
-- Dua session pada tabel yang sama.
-- Database state tidak sesuai event terakhir.
+Malicious identifiers and comments, multi-statement input, a credential inside an error string, a stale plan, a race between cutover and cancel, two sessions on the same table, and a database state that does not match the last event.
 
 ---
 
 ## 18. Roadmap
 
-### Fase 0 — Fondasi dokumen
-
-- Finalisasi PRD, decision log, checks catalog, event contract.
-- Validasi klaim capability terhadap dokumentasi dan fixture nyata.
-
-### Fase 1 — Analyzer dan CLI plan
-
-- Go project skeleton.
-- ALTER parser subset.
-- Pure analyzer.
-- Offline schema input.
-- JSON output dan plan card.
-- Initial checks catalog.
-
-**Exit criteria:** plan dapat dipakai sebagai CI gate tanpa mutation.
-
-### Fase 2 — Native execution
-
-- Introspection MySQL 8.0.
-- Native adapter.
-- Explicit algorithm/lock.
-- Core state store.
-- Approval dan audit.
-- Verify hasil.
-
-**Exit criteria:** subset native migration lolos staging soak test.
-
-### Fase 3 — gh-ost dan durable session
-
-- Engine supervision.
-- Throttling observation.
-- Hold-cutover.
-- Reconnect.
-- Cancel/cleanup.
-- Crash reconciliation.
-
-**Exit criteria:** tabel tanpa FK dapat dimigrasikan end-to-end dengan state durable.
-
-### Fase 4 — TUI
-
-- Plan review.
-- Live progress.
-- Approval/cutover controls.
-- Recovery guidance.
-- Responsive/plain terminal fallback.
-
-### Fase 5 — Adapter dan platform tambahan
-
-- pt-osc adapter.
-- RDS/Aurora capability profiles.
-- MySQL 5.7/legacy support bila layak.
-- Audit export yang lebih lengkap.
-
-### Fase 6 — Web/control plane
-
-- SSE event streaming.
-- RBAC.
-- Multi-user approval.
-- Scheduled window.
-- Hosted control plane tanpa menyimpan credential database.
-
----
-
-## 19. Risiko dan mitigasi
-
-| Risiko | Dampak | Mitigasi |
+| Phase | Content | State |
 |---|---|---|
-| Capability matrix salah | Lock/rebuild tak terduga | Versioned fixture, explicit algorithm/lock, fail-closed |
-| ALTER parser salah | Eksekusi berbeda dari plan | Subset grammar, reject unknown, adversarial tests |
-| FK rusak | Silent data integrity failure | Block copy engine + FK di v1; jangan otomatis recreate |
-| Rollback menghilangkan write | Data loss | Tidak menjanjikan rename-back; phase-aware recovery |
-| MDL menyebabkan outage | Query queue dan downtime | Preflight + immediate recheck + low `lock_wait_timeout` |
-| Disk habis | Migration gagal dan instance terdampak | Conservative disk estimate dan blocker |
-| Output engine berubah | Progress/logic rusak | Jangan jadikan parsing log sebagai source of truth |
-| Credential bocor | Security incident | File-based credential, redaction layer, leak tests |
-| Core crash pada cutover | State ambigu | Reconcile database/process sebelum transition |
-| Scope terlalu luas | Produk tidak selesai | MySQL 8.0 + subset ALTER + native-first |
-| False sense of zero downtime | Incident produksi | Hindari klaim absolut; tampilkan residual risk |
-| Low usage frequency | Retensi rendah | CI planning, expand-contract advisor, index hygiene di fase lanjut |
+| 0 | decision log, check catalogue, event contract | done |
+| 1 | analyzer, offline plan, JSON and plan card | done |
+| 2 | live introspection, native execution, sessions, events, engine matrix, server doctor | done |
+| 3 | daemon, cutover pause, cancel, cleanup, crash reconciliation | not built |
+| 4 | TUI | not built |
+| 5 | pt-osc verified against a real binary, RDS and Aurora profiles, broader MySQL support | partially |
+| 6 | web control plane, RBAC, scheduled windows | not started |
+| 7 | PostgreSQL | not started |
 
 ---
 
-## 20. Dependency dan lisensi
+## 19. Risks and mitigation
 
-- Bahasa: Go.
-- CLI framework: dipilih saat implementasi.
-- TUI: Bubble Tea/Lip Gloss pada fase TUI.
-- MySQL driver: `go-sql-driver/mysql` atau alternatif yang memenuhi requirement.
-- gh-ost: MIT; dapat dibundle jika mekanisme distribusi dan LICENSE sesuai.
-- pt-online-schema-change: GPL-2; tidak dibundle, hanya dipanggil sebagai binary eksternal.
-- Produk utama: MIT.
-
-Dependency baru harus melalui pemeriksaan:
-
-- lisensi;
-- maintenance status;
-- binary size;
-- CGO requirement;
-- security history;
-- kemampuan redaction dan observability.
+| Risk | Impact | Mitigation |
+|---|---|---|
+| the capability matrix is wrong | an unexpected lock or rebuild | versioned fixtures, explicit algorithm and lock, fail closed |
+| the ALTER parser is wrong | execution differs from the plan | a narrow grammar, refuse the unknown, adversarial tests |
+| a foreign key is broken | silent data integrity failure | read actions from structured metadata, never automate FK changes in v1 |
+| a rollback discards writes | data loss | never promise a rename back, phase aware recovery |
+| MDL causes an outage | query queueing and downtime | preflight plus an immediate recheck plus a short `lock_wait_timeout` |
+| disk fills up | the migration fails and the instance suffers | a conservative disk estimate and a blocker |
+| engine output changes | progress and logic break | never treat parsed output as the source of truth |
+| credentials leak | security incident | file based credentials, a redaction layer, leak tests |
+| a core crash during a cutover | ambiguous state | reconcile the database and the process before transitioning |
+| scope grows too wide | the product never ships | MySQL 8.0 and a subset of ALTERs, native first |
+| a false sense of zero downtime | a production incident | no absolute claims, show the residual risk |
+| low usage frequency | weak retention | CI planning, expand-contract advice, index hygiene |
 
 ---
 
-## 21. Dokumentasi yang wajib tersedia saat rilis
+## 20. Dependencies and licenses
 
-1. Quick start.
-2. Safety model dan batas jaminan.
-3. Supported MySQL/engine matrix.
-4. Supported ALTER matrix.
-5. Penjelasan MDL dan native online DDL.
-6. Hold-cutover guide.
-7. Recovery guide per fase.
-8. Credential setup.
-9. CI integration.
-10. RDS/Aurora limitations.
-11. Troubleshooting dan artifact cleanup.
-12. Security reporting policy.
+Go. A CLI framework chosen at implementation time. Bubble Tea and Lip Gloss for the TUI. `go-sql-driver/mysql`. gh-ost is MIT and may be bundled if distribution and LICENSE allow. `pt-online-schema-change` is GPL-2 and is never bundled, only invoked as an external binary. The product is MIT.
 
-Dokumentasi harus membedakan dengan jelas:
+Every new dependency is checked for license, maintenance status, binary size, CGO requirement, security history, and whether it supports redaction and observability.
 
-- online DDL vs zero downtime;
-- pre-cutover verification vs blue-green;
-- schema recovery vs data rollback;
-- warning yang dapat di-override vs invariant blocker.
+---
+
+## 21. Documentation required at release
+
+Quick start, the safety model and its guarantees, the supported MySQL and engine matrix, the supported ALTER matrix, an explanation of MDL and native online DDL, the cutover pause guide, the recovery guide per phase, credential setup, CI integration, RDS and Aurora limits, troubleshooting and artifact cleanup, and a security reporting policy.
+
+The documentation must distinguish clearly:
+
+- online DDL from zero downtime,
+- pre-cutover verification from blue-green,
+- schema recovery from data rollback,
+- overridable warnings from invariant blockers.
 
 ---
 
 ## 22. Open questions
 
-1. ~~Nama final~~ → **disepakati: Saksama** (D13). Sisa: ketersediaan `.io`/`.sh`/`.co` harus dicek manual di registrar.
-2. Minimum MySQL 8.0 minor version untuk MVP?
-3. Apakah RDS masuk MVP atau hanya preview detection?
-4. Bagaimana menandai host sebagai production: config, label, hostname pattern, atau kombinasi?
-5. Blocker mana yang boleh di-override dan siapa yang dapat meng-override?
-6. Berapa default `lock_wait_timeout` yang aman untuk native path?
-7. Apakah gh-ost dibundle atau diunduh/diinstal terpisah?
-8. Bagaimana schema fingerprint dihitung agar stabil tetapi sensitif terhadap perubahan relevan?
-9. Berapa lama plan dianggap valid sebelum wajib replan?
-10. State store awal: SQLite saja atau SQLite + JSONL sejak fase pertama?
-11. Apakah `saksama daemon` otomatis dijalankan sebagai user service atau secara eksplisit?
-12. Bagaimana melakukan disk-space check pada RDS yang tidak memberi akses filesystem?
-13. Apakah offline plan menerima `SHOW CREATE TABLE`, schema JSON, atau keduanya?
-14. Apakah MariaDB secara eksplisit ditolak pada MVP karena capability berbeda?
-15. Bagaimana policy cancel untuk native DDL yang sudah berjalan?
+1. ~~Final name~~ resolved: Saksama Core, see D13.
+2. ~~Minimum MySQL version for the MVP~~ resolved: 8.0 and 8.4 verified, 5.6 and 5.7 claimed only.
+3. ~~Is RDS in the MVP or preview only~~ partially resolved: detected and reported, not verified.
+4. How is a host marked as production: configuration, a label, a hostname pattern, or a combination?
+5. Which blockers may be overridden, and who may override them?
+6. ~~A safe default `lock_wait_timeout`~~ resolved: 10 seconds, configurable.
+7. ~~Is gh-ost bundled or installed separately~~ resolved: installed separately today, embedding is allowed by license.
+8. How is the schema fingerprint computed so it is stable yet sensitive to relevant change? Resolved for v1: a SHA-256 over the canonical schema, ignoring volatile row and size counts.
+9. How long is a plan valid before a replan is required?
+10. Should the state store start as SQLite, or as SQLite plus JSONL from phase one? Resolved for phase 2: JSON files plus JSONL.
+11. Should `saksama daemon` run as a user service automatically or only on request?
+12. How is free disk measured on RDS, where there is no filesystem access? Resolved: measured only when `@@datadir` exists locally, otherwise reported as not measured.
+13. Does an offline plan accept `SHOW CREATE TABLE`, a schema JSON, or both? Resolved: both.
+14. Is MariaDB explicitly refused in the MVP? Resolved: yes, check E1.
+15. What is the cancel policy for a native DDL that has already started?
+16. Which PostgreSQL operations, if any, can be analysed without an online rewrite? Open, for whoever picks up phase 7.
 
 ---
 
-## 23. Keputusan MVP yang mengikat
+## 23. Binding MVP decisions
 
-1. **Native-first**, tetapi hanya untuk capability yang telah dibuktikan.
-2. **Unknown ALTER diblokir**, bukan diasumsikan rebuild.
-3. **Copy engine + FK diblokir di v1.**
-4. **Hold-cutover adalah verification gate**, bukan blue-green penuh.
-5. **Tidak ada klaim rollback data otomatis setelah cutover.**
-6. **CLONE bukan engine tabel dan tidak masuk v1.**
-7. **CLI/headless lebih dahulu; TUI setelah core stabil.**
-8. **Core hidup terpisah dari client.**
-9. **Event contract dan JSON output adalah API produk.**
-10. **Credential tidak pernah masuk argv/event/audit dalam bentuk terbuka.**
+1. Native first, but only for proven capability.
+2. An unknown ALTER is blocked, never assumed to be a rebuild.
+3. Foreign key DDL is out of scope and blocked in v1.
+4. The cutover pause is a verification gate, not full blue-green.
+5. No claim of automatic data rollback after a cutover.
+6. The CLONE plugin is not a table engine and is not in v1.
+7. CLI and headless first, TUI after the core stabilises.
+8. The core lives independently of the client.
+9. The event contract and JSON output are the product API.
+10. Credentials never appear in argv, an event, or an audit export in clear text.
+11. The recommendation is advisory; the operator's recorded choice is executed.
+12. Server settings are a separate axis from engine suitability, and unknown is not a pass.
 
 ---
 
-## 24. Definisi selesai untuk v1
+## 24. Definition of done for v1
 
-v1 dianggap selesai jika pengguna dapat:
+v1 is done when a user can:
 
-1. Menginstal satu tool dan menghubungkannya ke MySQL 8.0 dengan credential aman.
-2. Menjalankan `saksama plan` untuk subset ALTER yang didukung.
-3. Mendapat rekomendasi native atau gh-ost beserta alasan, check, estimasi, dan recovery boundary.
-4. Menggunakan output JSON sebagai CI gate.
-5. Menjalankan native DDL yang terverifikasi tanpa silent fallback.
-6. Menjalankan gh-ost pada tabel tanpa FK dengan session durable dan hold-cutover.
-7. Disconnect/reconnect tanpa kehilangan kontrol session.
-8. Cancel secara aman sebelum cutover.
-9. Mendapat recovery guidance yang jujur setelah cutover atau crash.
-10. Mengekspor audit trail tanpa credential.
+1. Install one tool and connect it to MySQL with safe credentials.
+2. Run `saksama advise` and see the server settings and which engine suits each table, without naming a table or a change.
+3. Run `saksama plan` for the supported ALTER subset.
+4. Get a recommendation with the reasons, the checks, an estimate, and the recovery boundaries.
+5. Use the JSON output as a CI gate.
+6. Record an engine choice and have the tool execute it.
+7. Run a verified native DDL without a silent fallback.
+8. Run gh-ost on a table without foreign keys, with a durable session.
+9. Get a refusal that names the exact setting or package to fix, instead of an engine that fails at startup.
+10. Export an audit trail with no credentials in it.
 
-Keberhasilan v1 tidak diukur dari jumlah ALTER atau engine yang didukung, tetapi dari keakuratan keputusan, keamanan default, dan kemampuan tool menolak operasi yang belum dapat dijamin.
+Success for v1 is not measured by how many ALTERs or engines are supported. It is measured by the accuracy of the decisions, the safety of the defaults, and the tool's willingness to refuse what it cannot guarantee.
