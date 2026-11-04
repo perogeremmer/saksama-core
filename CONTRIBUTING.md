@@ -12,6 +12,8 @@ Thanks for taking a look. This project has an unusually strict bar because a bug
 
 ## Getting started
 
+The full command reference is in [COMMANDS.md](COMMANDS.md).
+
 ```bash
 git clone git@github.com:perogeremmer/saksama-core.git
 cd saksama-core

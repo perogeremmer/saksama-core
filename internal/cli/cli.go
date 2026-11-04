@@ -79,6 +79,7 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `Saksama - examine before you alter.
 
 Usage:
+  saksama --help            this page
   saksama plan   --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
   saksama plan --live -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama advise --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
@@ -128,7 +129,7 @@ Apply options:
   --production             require --confirm <host> before any mutation
   --confirm <host>         must equal the target host name when --production
   --dry-run                build statements and stop
-  --engine <name>          native|gh-ost|pt-osc (only native executes today)
+  --engine <name>          native|gh-ost|pt-osc; overrides the recorded choice
   --force                  downgrade selected preflight aborts
   --lock-wait-timeout <n>  session lock_wait_timeout in seconds (default 10)
   --hold-cutover           pause before the swap so you can verify (gh-ost)
