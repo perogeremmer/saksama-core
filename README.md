@@ -24,12 +24,15 @@ You have one MySQL instance. No replica. No DBA. A 59-million-row table, and a
 change you have postponed for three months because you do not know whether
 `ALTER TABLE` will lock it for two minutes or two hours.
 
-Blue-green would solve it, and blue-green is expensive in *engineering time*: dual
-writes, two deploy cycles, traffic switching, a rollback plan. That is the part
-small teams cannot afford, not the server.
+Blue-green would solve it, and blue-green bills a small team twice. Once for the
+second instance: a server paid for every month whether or not a migration is
+running. Once for the change itself: dual writes, two deploy cycles, traffic
+switching, a rollback plan, paid in salary or in features that do not ship. The
+second bill is the one that cannot be paid, because the engineer paying it is the
+engineer doing everything else.
 
 So the need is narrower than blue-green: **online schema change on one instance,
-done correctly.**
+done correctly.** One server, one deploy, no migration project to fund.
 
 The copy engines already exist and they are good. What is missing is the layer
 above them:

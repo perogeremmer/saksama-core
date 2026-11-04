@@ -47,8 +47,8 @@ An open source tool for backend developers and startup founders who:
 **Why this user exists:**
 
 - Most startups run **one instance**. This is not an edge case, it is the default.
-- What makes blue-green expensive is not the database side. It is the application side: dual writes, two deploy cycles, traffic switching, a rollback plan. That costs **engineering time**, not server money.
-- What is actually needed is **online schema change on one instance**. A different problem, and a cheap one, provided it is done correctly.
+- Blue-green bills this user twice. **The instance:** a second server, paid every month whether or not a migration is running. **The change:** dual writes, two deploy cycles, traffic switching, a rollback plan, paid in salary or in features that do not ship. This user is short on both, and the cash is the binding constraint.
+- What is actually needed is **online schema change on one instance**. One server, one deploy, a cheap operation, provided it is done correctly.
 
 > **Reframing:** "single server, therefore unsafe" is the wrong frame.
 > Online DDL on one instance is not a hack. The hack is a migration with no analysis, no guardrail, and no recovery plan.
