@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -311,6 +313,22 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 			ErrBlocked, plan.Recommendation.Blockers, sess.ID)
 	}
 
+	// A held cutover only means something if the gate exists before the engine
+	// starts: the engine waits for the file to disappear, so the file must be there.
+	cutoverGate := ""
+	if req.HoldCutover {
+		cutoverGate = filepath.Join(os.TempDir(), fmt.Sprintf("saksama-%s.cutover", sess.ID))
+		if err := os.WriteFile(cutoverGate, []byte("held by session "+sess.ID+"\n"), 0o600); err != nil {
+			sess.State = state.StateFailed
+			sess.Error = fmt.Sprintf("cannot create the cutover gate: %v", err)
+			_ = r.Store.Save(sess)
+			return sess, errors.New(sess.Error)
+		}
+		sess.CutoverFlagFile = cutoverGate
+		sess.RecordArtifact("gate", cutoverGate, string(plan.Recommendation.Engine),
+			"cutover gate file; removing it releases the swap")
+	}
+
 	opts := engine.Options{
 		Schema:                    req.Database,
 		Table:                     req.Table,
@@ -323,6 +341,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		Force:                     req.Force,
 		DryRun:                    req.DryRun,
 		HoldCutover:               req.HoldCutover,
+		CutoverGate:               cutoverGate,
 		AllowArgvPassword:         req.AllowArgvPassword,
 		HasReplica:                prep.Snapshot.Runtime.ReplicaConfigured,
 	}
@@ -465,6 +484,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		sess.Phase = "ddl"
 		// A failed run leaves the most debris, and the operator is most likely to
 		// want it gone. Still only what this session recorded.
+		cleanupGate(sess)
 		sess.MarkArtifactsSafe("leftover from a failed migration; the production table was not swapped")
 		sess.Error = execErr.Error()
 		sess.LastSeq = prep.emitter.Seq()
@@ -491,6 +511,9 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	}
 
 	if verifyErr != nil || !allOK {
+		// The engine has exited, so the gate has served its purpose whatever the
+		// outcome. Leaving it in /tmp would make the next `cutover` look meaningful.
+		cleanupGate(sess)
 		sess.State = state.StateFailed
 		sess.Phase = "verify"
 		if verifyErr != nil {
@@ -505,6 +528,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	}
 	r.emit(prep, events.TypePhaseCompleted, map[string]any{"phase": "verify"})
 
+	cleanupGate(sess)
 	sess.State = state.StateDone
 	sess.Phase = "done"
 	sess.Error = ""
@@ -769,4 +793,47 @@ func recordExpectedArtifacts(sess *state.Session, eng analyzer.Engine, req Reque
 			sess.RecordArtifact("trigger", "pt_osc_"+req.Database+"_"+t+suffix, "pt-osc", "copy trigger")
 		}
 	}
+}
+
+// cleanupGate removes the cutover gate file once the engine has exited, so a
+// finished session leaves no stray file in /tmp.
+func cleanupGate(sess *state.Session) {
+	if sess.CutoverFlagFile == "" {
+		return
+	}
+	_ = os.Remove(sess.CutoverFlagFile)
+	sess.ForgetsArtifact("gate", sess.CutoverFlagFile)
+	sess.CutoverFlagFile = ""
+}
+
+// ReleaseCutover removes the gate so the engine may swap tables.
+//
+// This is the verification gate the product is built around: the copy is finished,
+// the operator has looked at the shadow table, and only then is the swap allowed.
+func (r *Runner) ReleaseCutover(ctx context.Context, sessionID string) (*state.Session, error) {
+	sess, err := r.Store.Load(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sess.CutoverFlagFile == "" {
+		return nil, fmt.Errorf("session %s has no held cutover (it was not started with --hold-cutover, or the gate is already released)", sessionID)
+	}
+	if err := os.Remove(sess.CutoverFlagFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("cannot release the cutover gate: %w", err)
+	}
+
+	// The engine notices the file is gone and swaps. Its process is the one that
+	// reports the outcome, so this command only records the decision.
+	sess.CutoverFlagFile = ""
+	sess.RecordArtifact("cutover", "released", sess.Engine, "cutover approved by "+actorOrUnknown(sess))
+	sess.ForgetsArtifact("gate", "")
+	sess.ForgetsArtifact("cutover", "")
+	return sess, r.Store.Save(sess)
+}
+
+func actorOrUnknown(sess *state.Session) string {
+	if sess.Actor != "" {
+		return sess.Actor
+	}
+	return "an operator"
 }

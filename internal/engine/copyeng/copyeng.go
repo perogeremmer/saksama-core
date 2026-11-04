@@ -171,12 +171,12 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 			"--initially-drop-ghost-table",
 			"--initially-drop-old-table",
 		}
-		if e.opts.HoldCutover {
+		if e.opts.HoldCutover && e.opts.CutoverGate != "" {
 			// gh-ost waits for this file to disappear before swapping. The flag is
 			// only as reliable as the installed version; a bad flag makes gh-ost
 			// exit immediately with an argument error rather than doing something
 			// surprising, which is the behaviour we want.
-			argv = append(argv, "--postpone-cutover-file="+e.cutoverFile())
+			argv = append(argv, "--postpone-cutover-file="+e.opts.CutoverGate)
 		}
 		if !e.opts.HasReplica {
 			argv = append(argv, "--allow-on-master")
@@ -247,6 +247,15 @@ func (e *Engine) installHint() string {
 		return "install it from https://github.com/github/gh-ost/releases"
 	}
 	return "install it with: apt install percona-toolkit"
+}
+
+// CutoverGate implements engine.HoldsCutover. gh-ost waits until this file is
+// removed; pt-osc has no equivalent and swaps as soon as the copy finishes.
+func (e *Engine) CutoverGate() string {
+	if e.spec.Kind != KindGhOst {
+		return ""
+	}
+	return e.cutoverFile()
 }
 
 func (e *Engine) cutoverFile() string {

@@ -206,7 +206,7 @@ func TestUnknownCommandExitsUsage(t *testing.T) {
 }
 
 func TestUnimplementedCommandsAreHonest(t *testing.T) {
-	for _, cmd := range []string{"cutover", "recover", "daemon"} {
+	for _, cmd := range []string{"recover", "daemon"} {
 		code, _, errOut := run(t, cmd)
 		if code != ExitUsage {
 			t.Errorf("%s: got exit %d", cmd, code)
@@ -223,7 +223,7 @@ func TestImplementedCommandsDemandRequiredArguments(t *testing.T) {
 	if code != ExitUsage || !strings.Contains(errOut, "--database") {
 		t.Fatalf("apply: exit %d, stderr %q", code, errOut)
 	}
-	for _, cmd := range []string{"events", "export", "cleanup", "attach", "cancel"} {
+	for _, cmd := range []string{"events", "export", "cleanup", "attach", "cancel", "cutover"} {
 		code, _, errOut := run(t, cmd)
 		if code != ExitUsage || !strings.Contains(errOut, "session id required") {
 			t.Errorf("%s: exit %d, stderr %q", cmd, code, errOut)

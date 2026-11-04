@@ -263,6 +263,34 @@ no process to cancel. The tool says that instead of pretending.
 
 ---
 
+## `saksama cutover`
+
+Releases a cutover that was held, which is the verification gate this tool is built
+around.
+
+```
+saksama apply ... --engine gh-ost --hold-cutover
+saksama status s3                 # copy finished, swap held
+saksama attach s3                 # watch it, ctrl-c to detach
+saksama cutover s3                # now the swap may happen
+```
+
+How it works: the core creates a gate file before the engine starts and records its
+path in the session. gh-ost copies into the ghost table and then waits for that file
+to disappear. `cutover` removes it, so approval is one file deletion that works from
+any terminal, any ssh session, or after a reconnect.
+
+Limits worth stating plainly:
+
+- **gh-ost only.** pt-osc swaps as soon as the copy finishes and has no gate, so
+  `--hold-cutover` is ignored for it and the plan says so.
+- **A hold is not blue-green.** It gates the schema swap. A change that is not
+  backward compatible still needs an application deploy strategy.
+- **No rollback after the swap.** Once released, new writes live only in the new
+  table.
+
+---
+
 ## `saksama status`
 
 ```

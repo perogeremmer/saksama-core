@@ -54,6 +54,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdAttach(args[1:], stdout, stderr)
 	case "cancel":
 		return cmdCancel(args[1:], stdout, stderr)
+	case "cutover":
+		return cmdCutover(args[1:], stdout, stderr)
 	case "events":
 		return cmdEvents(args[1:], stdout, stderr)
 	case "export":
@@ -68,7 +70,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "help", "--help", "-help":
 		usage(stdout)
 		return ExitOK
-	case "daemon", "cutover", "recover":
+	case "daemon", "recover":
 		fmt.Fprintf(stderr, "saksama %s: not implemented in this build\n", args[0])
 		fmt.Fprintf(stderr, "this build provides: plan, plan --live, apply, status, events, export, cleanup, schema\n")
 		return ExitUsage
@@ -95,6 +97,7 @@ Usage:
   saksama status [<session>] [--json]
   saksama attach <session>                 follow the event log, detach with ctrl-c
   saksama cancel <session>                 stop a running copy engine by pid
+  saksama cutover <session>                release a held cutover, allowing the swap
   saksama events <session>
   saksama export <session>
   saksama cleanup <session>

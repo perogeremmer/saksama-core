@@ -1477,3 +1477,128 @@ func TestLiveSessionArtifactsAreNotDeletable(t *testing.T) {
 		t.Fatalf("a terminal session should offer its artifacts: %v", got)
 	}
 }
+
+// --- held cutover -----------------------------------------------------------
+
+// The gate is a file the engine waits on. The core creates it before the engine
+// starts, records it, and `cutover` removes it. This asserts the file lifecycle
+// without needing gh-ost's own cutover behaviour.
+func TestHoldCutoverCreatesAndReleasesTheGate(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, store := newRunner(t)
+	runner.DB = db
+
+	// A stub engine that waits for the gate file to disappear, like gh-ost does.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gh-ost")
+	script := "#!/bin/sh\n" +
+		"gate=$(printf '%s\\n' \"$@\" | sed -n 's/^--postpone-cutover-file=//p')\n" +
+		"[ -n \"$gate\" ] || { echo 'no gate given' >&2; exit 2; }\n" +
+		"[ -f \"$gate\" ] || { echo 'gate missing at start' >&2; exit 3; }\n" +
+		"while [ -f \"$gate\" ]; do sleep 0.2; done\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	req := applyRequest(schema, "t", "ADD COLUMN `note` varchar(64) NULL")
+	req.EngineHint = analyzer.EngineGhOst
+	req.EngineHintSource = "recorded"
+	req.ForExecution = true
+	req.HoldCutover = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+	req.Binaries = map[string]analyzer.EngineBinary{
+		"gh-ost": {Name: "gh-ost", Available: true, Path: bin, Version: "stub"},
+	}
+
+	done := make(chan struct{})
+	var sess *state.Session
+	var applyErr error
+	go func() {
+		sess, applyErr = runner.Apply(context.Background(), req)
+		close(done)
+	}()
+
+	// Wait until the session records the gate, which happens before the engine runs.
+	var gate string
+	var sessionID string
+	for i := 0; i < 100; i++ {
+		time.Sleep(50 * time.Millisecond)
+		sessions, _ := store.List()
+		if len(sessions) > 0 && sessions[0].CutoverFlagFile != "" {
+			gate = sessions[0].CutoverFlagFile
+			sessionID = sessions[0].ID
+			break
+		}
+	}
+	if gate == "" {
+		select {
+		case <-done:
+		default:
+		}
+		sessions, _ := store.List()
+		for _, s := range sessions {
+			t.Logf("session %s state=%s pid=%d gate=%q error=%q artifacts=%v",
+				s.ID, s.State, s.EnginePID, s.CutoverFlagFile, s.Error, s.Artifacts)
+		}
+		t.Fatalf("no cutover gate was recorded, so cutover could not release it")
+	}
+	if _, err := os.Stat(gate); err != nil {
+		t.Fatalf("the gate file must exist before the engine starts: %v", err)
+	}
+
+	// Releasing it is a separate command, as it would be from another terminal.
+	released, err := runner.ReleaseCutover(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if released.CutoverFlagFile != "" {
+		t.Fatal("the session still points at a released gate")
+	}
+	if _, err := os.Stat(gate); !os.IsNotExist(err) {
+		t.Fatal("the gate file was not removed")
+	}
+
+	// The stub exits 0 without changing anything, so verification must refuse to
+	// call it a success. That is the point: releasing the gate does not make the
+	// result true.
+	<-done
+	if applyErr == nil {
+		t.Fatal("a no-op engine must not be reported as a successful migration")
+	}
+	if sess.State != state.StateFailed {
+		t.Fatalf("state = %q", sess.State)
+	}
+	if !strings.Contains(sess.Error, "verification") {
+		t.Fatalf("the failure should be a verification failure, got %q", sess.Error)
+	}
+	// The gate has served its purpose and must not linger in /tmp.
+	if _, err := os.Stat(gate); !os.IsNotExist(err) {
+		t.Fatal("the gate file was left behind")
+	}
+	if sess.CutoverFlagFile != "" {
+		t.Fatalf("the session still references a finished gate: %q", sess.CutoverFlagFile)
+	}
+}
+
+// A session without a held cutover must say so plainly instead of pretending.
+func TestCutoverRefusesWhenNothingIsHeld(t *testing.T) {
+	runner, store := newRunner(t)
+	sess := &state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateRunning,
+		Database: "shop", Table: "t", Engine: "native",
+	}
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.ReleaseCutover(context.Background(), "s1"); err == nil {
+		t.Fatal("expected a refusal")
+	} else if !strings.Contains(err.Error(), "no held cutover") {
+		t.Fatalf("unhelpful error: %v", err)
+	}
+}
