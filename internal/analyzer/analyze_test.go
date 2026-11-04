@@ -1254,23 +1254,49 @@ func TestDiskOperatorSuppliedNumbersAreUsed(t *testing.T) {
 	}
 }
 
-// MySQL 5.6 is past end of life, and its information_schema does not carry the
-// facts a verified migration is built on. A plan against it must refuse rather
-// than pretend the rules transfer.
-func TestPlanRefusesMySQL56(t *testing.T) {
+// The floor is 5.6. Applications that started in 2015 are still running, and
+// every fact the matrix needs exists on 5.6, so it is planned rather than
+// refused - with one caveat that must never disappear from the output.
+func TestPlanAcceptsMySQL56WithTheMDLCaveat(t *testing.T) {
 	p := plan(t, baseTable(), "5.6.51", "ADD INDEX ix_c (status)")
-	if !p.Recommendation.Blocked {
-		t.Fatal("a plan against MySQL 5.6 must be blocked, not guessed")
+	if p.Recommendation.Blocked {
+		t.Fatalf("5.6 is the supported floor and must plan: %+v", p.Checks)
 	}
-	if p.Recommendation.Blockers == 0 {
-		t.Fatal("no blocker was counted for a MySQL 5.6 plan")
+	if !hasCheck(p, "E5b", SeverityWarn) {
+		t.Fatal("a 5.6 plan must carry E5b: the metadata lock queue cannot be observed")
+	}
+	if hasCheck(p, "E5", SeverityBlocker) {
+		t.Fatal("5.6 must no longer hit the too-old blocker")
+	}
+
+	// In production the missing lock queue is a blocker unless the operator says
+	// the risk is understood: the queue is the outage this tool exists to avoid.
+	prod := plan(t, baseTable(), "5.6.51", "ADD INDEX ix_c (status)", func(in *Input) { in.Production = true })
+	if !hasCheck(prod, "E5b", SeverityBlocker) {
+		t.Fatal("a production 5.6 plan must block on the unobservable lock queue")
+	}
+	accepted := plan(t, baseTable(), "5.6.51", "ADD INDEX ix_c (status)", func(in *Input) {
+		in.Production = true
+		in.AcceptUnknownMDL = true
+	})
+	if hasCheck(accepted, "E5b", SeverityBlocker) {
+		t.Fatal("--accept-unknown-mdl must clear the 5.6 production blocker")
+	}
+}
+
+// 5.5 and older stay refused: gh-ost needs 5.6, and 5.5 reached end of life in
+// 2018.
+func TestPlanRefusesMySQL55(t *testing.T) {
+	p := plan(t, baseTable(), "5.5.62", "ADD INDEX ix_c (status)")
+	if !p.Recommendation.Blocked {
+		t.Fatal("a plan against MySQL 5.5 must be blocked, not guessed")
 	}
 	if !hasCheck(p, "E5", SeverityBlocker) {
 		t.Fatal("check E5 (server too old) is missing from the plan")
 	}
-	// The boundary matters: 5.7 stays plannable.
-	if p := plan(t, baseTable(), "5.7.44", "ADD INDEX ix_c (status)"); p.Recommendation.Blocked && p.Recommendation.Engine == EngineNative {
-		t.Fatalf("5.7 must not be caught by the 5.6 refusal: %+v", p.Recommendation)
+	// The boundary matters: 5.6 stays plannable.
+	if p := plan(t, baseTable(), "5.6.51", "ADD INDEX ix_c (status)"); p.Recommendation.Blocked {
+		t.Fatalf("5.6 must not be caught by the 5.5 refusal: %+v", p.Recommendation)
 	}
 }
 
@@ -1323,6 +1349,8 @@ func TestNativeIndexPathFollowsTheCapabilityMatrix(t *testing.T) {
 		{Version: "8.0.46", Vendor: "mysql"},
 		{Version: "8.4.13", Vendor: "mysql"},
 		{Version: "5.7.44", Vendor: "mysql"},
+		// Online DDL for index creation arrived in 5.6, so the native claim holds.
+		{Version: "5.6.51", Vendor: "mysql"},
 	}
 	for _, srv := range ok {
 		yes, detail := NativeIndexPath(srv)
@@ -1336,7 +1364,6 @@ func TestNativeIndexPathFollowsTheCapabilityMatrix(t *testing.T) {
 
 	no := []model.Server{
 		{Version: "5.4.4", Vendor: "mysql"},
-		{Version: "5.6.51", Vendor: "mysql"},
 		{Version: "5.5.62", Vendor: "mysql"},
 		{Version: "10.11.6-MariaDB-log", Vendor: "mariadb"},
 		{Version: "", Vendor: "mysql"},
@@ -1349,6 +1376,24 @@ func TestNativeIndexPathFollowsTheCapabilityMatrix(t *testing.T) {
 		}
 		if detail == "" {
 			t.Errorf("%s: a refusal needs a reason", srv.Version)
+		}
+	}
+}
+
+// An index on a column that is not there is error 1072, not a key-length problem.
+// The width estimator has to assume *something* for an unknown column, and
+// without this check that assumption reached the operator as "key too long".
+func TestPlanNamesAMissingIndexColumn(t *testing.T) {
+	p := plan(t, baseTable(), "5.6.51", "ADD INDEX ix_nope (does_not_exist)")
+	if !hasCheck(p, "A8", SeverityBlocker) {
+		t.Fatalf("expected A8 for an unknown index column: %+v", p.Checks)
+	}
+	for _, c := range p.Checks {
+		if c.ID == "A5" {
+			t.Fatalf("A5 must not fire for a column that does not exist: %+v", c)
+		}
+		if c.ID == "A8" && c.MySQLError != 1072 {
+			t.Errorf("A8 must cite MySQL 1072, got %d", c.MySQLError)
 		}
 	}
 }

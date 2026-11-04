@@ -10,13 +10,14 @@ import (
 // Check IDs are stable and documented in docs/CHECKS.md. Never renumber them.
 const (
 	// Charset & collation.
-	chkFKCharsetMismatch = "A1"
-	chkConvertCharsetFK  = "A2"
-	chkFKColumnCharset   = "A3"
-	chkUtf8mb3           = "A4"
-	chkKeyTooLong        = "A5"
-	chkCompactRowFormat  = "A6"
-	chkBlobIndexNoPrefix = "A7"
+	chkFKCharsetMismatch  = "A1"
+	chkConvertCharsetFK   = "A2"
+	chkFKColumnCharset    = "A3"
+	chkUtf8mb3            = "A4"
+	chkKeyTooLong         = "A5"
+	chkCompactRowFormat   = "A6"
+	chkBlobIndexNoPrefix  = "A7"
+	chkIndexColumnMissing = "A8"
 
 	// Index.
 	chkNoPrimaryKey    = "B1"
@@ -97,18 +98,40 @@ func checksCapability(in Input, ops []model.Op, anyBlocked, anyRebuild bool) []C
 		})
 	}
 
-	// E5: anything older than 5.7 is refused outright, before the engine matrix
-	// is consulted. 5.6 and older are past end of life, and their
-	// information_schema lacks the facts (generated column expressions, altered
-	// column reporting) a verified migration is built on.
+	// E5: anything older than 5.6 is refused outright, before the engine matrix
+	// is consulted. 5.6 is still verified - plenty of applications have been
+	// running since 2015 and nobody is going to upgrade them this quarter - but
+	// 5.5 and older predate gh-ost's own support and reached end of life years
+	// ago.
 	if v, err := model.ParseVersion(in.Server.Version); err == nil {
-		if v.Major < 5 || (v.Major == 5 && v.Minor < 7) {
+		if v.Major < 5 || (v.Major == 5 && v.Minor < 6) {
 			out = append(out, Check{
 				ID:          chkOldServer,
 				Severity:    SeverityBlocker,
-				Title:       "MySQL older than 5.7 is not a verified target",
-				Detail:      fmt.Sprintf("server reports %d.%d.%d, which is past end of life and its INFORMATION_SCHEMA lacks the facts this plan is built on", v.Major, v.Minor, v.Patch),
-				Remediation: "upgrade to MySQL 5.7 or newer; for older servers use the copy engine directly under a reviewed procedure",
+				Title:       "MySQL older than 5.6 is not a verified target",
+				Detail:      fmt.Sprintf("server reports %d.%d.%d; 5.5 reached end of life in 2018 and gh-ost itself requires 5.6 or newer", v.Major, v.Minor, v.Patch),
+				Remediation: "upgrade to MySQL 5.6 or newer; for older servers use the copy engine directly under a reviewed procedure",
+			})
+		}
+
+		// E5b: 5.6 is supported, but it cannot answer the question that matters
+		// most. performance_schema.metadata_locks arrived in 5.7, so the lock
+		// queue is invisible here. Say that in every plan instead of letting the
+		// safety check quietly pass.
+		if v.Major == 5 && v.Minor == 6 {
+			sev := SeverityWarn
+			detail := "MySQL 5.6 has no performance_schema.metadata_locks, so a pending lock queue cannot be detected; DDL queues behind open metadata locks and blocks every other query"
+			remediation := "check SHOW PROCESSLIST and INFORMATION_SCHEMA.INNODB_TRX by hand immediately before applying, or run this on 5.7 or newer"
+			if in.Production && !in.AcceptUnknownMDL {
+				sev = SeverityBlocker
+				remediation += "; a production run needs --accept-unknown-mdl to say this risk is understood"
+			}
+			out = append(out, Check{
+				ID:          "E5b",
+				Severity:    sev,
+				Title:       "the metadata lock queue cannot be observed on MySQL 5.6",
+				Detail:      detail,
+				Remediation: remediation,
 			})
 		}
 	}
@@ -207,6 +230,26 @@ func checksIndexes(in Input, projected model.Table) []Check {
 	limit := keyLimitBytes(projected.RowFormat)
 
 	for _, ix := range projected.Indexes {
+		// A8: a column that is not there at all. MySQL answers this with 1072,
+		// and saying "key too long" instead sends the operator to count bytes on
+		// a column that does not exist.
+		var missing []string
+		for _, p := range ix.Parts {
+			if _, ok := projected.Column(p.Column); !ok {
+				missing = append(missing, p.Column)
+			}
+		}
+		if len(missing) > 0 {
+			out = append(out, Check{
+				ID: chkIndexColumnMissing, Severity: SeverityBlocker,
+				Title:       "index refers to a column the table does not have",
+				Detail:      fmt.Sprintf("index %q uses %s; the table has no such column", ix.Name, strings.Join(missing, ", ")),
+				Remediation: "fix the column name; MySQL would reject this with error 1072",
+				MySQLError:  1072,
+			})
+			continue
+		}
+
 		// A7: TEXT/BLOB indexed without a prefix length.
 		for _, p := range ix.Parts {
 			col, ok := projected.Column(p.Column)

@@ -448,7 +448,7 @@ func (c *Collector) Runtime(ctx context.Context) (Runtime, error) {
 
 	rt.LongQueries = c.longQueries(ctx)
 	rt.Transactions = c.transactions(ctx)
-	rt.PendingMDLocks = c.pendingMDLocks(ctx)
+	rt.PendingMDLocks, rt.MDLObservable = c.pendingMDLocks(ctx)
 	rt.Grants = c.grants(ctx)
 	rt.Artifacts = c.artifacts(ctx)
 	rt.ReplicaLagSec, rt.ReplicaConfigured, rt.ReplicaRunning = c.replica(ctx)
@@ -534,15 +534,23 @@ func (c *Collector) transactions(ctx context.Context) []Transaction {
 	return out
 }
 
-func (c *Collector) pendingMDLocks(ctx context.Context) int {
+// pendingMDLocks reads the metadata lock queue, and reports whether it could be
+// read at all.
+//
+// The second return value is not decoration. This query is the one that matters
+// most - a DDL statement queues behind a pending metadata lock and blocks every
+// other query - and it is a 5.7+ performance_schema table that a restricted user
+// may not be allowed to read. Returning 0 on failure would report "nothing
+// waiting" for a server that was never asked.
+func (c *Collector) pendingMDLocks(ctx context.Context) (int, bool) {
 	var n int
 	err := c.Q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM performance_schema.metadata_locks WHERE LOCK_STATUS = 'PENDING'
 	`).Scan(&n)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return n
+	return n, true
 }
 
 func (c *Collector) replica(ctx context.Context) (lag float64, configured, running bool) {

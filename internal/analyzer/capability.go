@@ -53,14 +53,14 @@ func capabilityFor(op model.Op, srv model.Server, tbl model.Table) Capability {
 		}
 	}
 
-	if v.Major < 5 || (v.Major == 5 && v.Minor < 7) {
-		// The copy engines have their own requirements (E4, E8), but before 5.7
-		// even the facts underwriting the plan are thinner than a verified
-		// migration can rest on. MySQL 5.6 information_schema also predates
-		// everything this tool checks, and 5.6 itself passed end of life in 2021.
+	if v.Major < 5 || (v.Major == 5 && v.Minor < 6) {
+		// 5.6 is the floor: it carries every fact this matrix needs, and it is
+		// still found running applications that started in 2015. 5.5 and older
+		// are not: gh-ost requires 5.6 or newer, and 5.5 reached end of life in
+		// 2018.
 		return Capability{
-			RuleID: "R-MYSQL-56-UNSUPPORTED", Method: MethodUnsupported, Blocked: true,
-			Reason: fmt.Sprintf("MySQL %d.%d is past end of life and its INFORMATION_SCHEMA lacks the reported fact this plan is built on; run MySQL 5.7 or newer", v.Major, v.Minor),
+			RuleID: "R-MYSQL-55-UNSUPPORTED", Method: MethodUnsupported, Blocked: true,
+			Reason: fmt.Sprintf("MySQL %d.%d is older than 5.6, the oldest server Saksama verifies; gh-ost requires 5.6 or newer and 5.5 reached end of life in 2018", v.Major, v.Minor),
 		}
 	}
 

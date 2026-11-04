@@ -11,14 +11,17 @@ import (
 // means the plan is offline, and every live-only check reports that it could not
 // be evaluated instead of silently passing.
 type LiveState struct {
-	ThreadsRunning    int
-	LongQuerySeconds  int64 // age of the oldest non-sleeping statement
-	LongQueryCount    int
-	LongestQuerySQL   string
-	LongestQueryID    int64
-	LongTransactions  int
-	OldestTrxSeconds  int64
-	PendingMDLocks    int
+	ThreadsRunning   int
+	LongQuerySeconds int64 // age of the oldest non-sleeping statement
+	LongQueryCount   int
+	LongestQuerySQL  string
+	LongestQueryID   int64
+	LongTransactions int
+	OldestTrxSeconds int64
+	PendingMDLocks   int
+	// MDLObservable reports whether the lock queue could be read at all. A zero
+	// that was never observed is not a pass.
+	MDLObservable     bool
 	ReplicaConfigured bool
 	ReplicaRunning    bool
 	ReplicaLagSeconds float64
@@ -34,6 +37,16 @@ type LiveState struct {
 	// Duplicates maps an index name to the number of duplicate groups found.
 	// Absent keys mean "not checked".
 	Duplicates map[string]int64
+}
+
+// mdlUnavailableByDesign reports whether this server version simply has no
+// metadata lock table, as opposed to hiding it behind a privilege.
+func mdlUnavailableByDesign(srv model.Server) bool {
+	v, err := model.ParseVersion(srv.Version)
+	if err != nil {
+		return false
+	}
+	return v.Major < 5 || (v.Major == 5 && v.Minor <= 6)
 }
 
 // Grants is the privilege picture that matters for DDL and copy engines.
@@ -91,13 +104,24 @@ func liveChecks(in Input, projected model.Table) []Check {
 	}
 
 	// L2: pending metadata locks.
-	if L.PendingMDLocks > 0 {
+	switch {
+	case L.MDLObservable && L.PendingMDLocks > 0:
 		out = append(out, Check{
 			ID: "D1b", Severity: SeverityBlocker,
 			Title:       "metadata locks are already pending",
 			Detail:      fmt.Sprintf("%d metadata lock request(s) are waiting; a DDL statement would enqueue behind them", L.PendingMDLocks),
 			Remediation: "resolve the existing lock queue first; adding this migration now would extend the outage",
 			MySQLError:  1205,
+		})
+	case !L.MDLObservable && !mdlUnavailableByDesign(in.Server):
+		// The server claims a version that has the table, so this is a privilege
+		// or configuration problem, not an old server. Either way, nobody looked.
+		out = append(out, Check{
+			ID: "D1b", Severity: SeverityWarn,
+			Title:       "the metadata lock queue could not be read",
+			Detail:      "performance_schema.metadata_locks was not readable, so a pending lock queue would not show up in this plan",
+			Remediation: "grant SELECT on performance_schema to this user, or confirm the queue is empty by hand before applying",
+			MySQLError:  1142,
 		})
 	}
 

@@ -78,9 +78,9 @@ var MySQL = []MySQLRow{
 		Detail: "43 of 44 integration tests pass (the INSTANT ones skip); with pt-osc 3.7.2 the full suite runs, and gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows",
 	},
 	{
-		Version: "5.6.51", Status: Unsupported,
-		Native: "refused",
-		Detail: "end of life and its INFORMATION_SCHEMA lacks the reported fact the plan is built on; check E5 blocks every plan (verified against mysql:5.6)",
+		Version: "5.6.51", Status: Verified,
+		Native: "INPLACE index, no INSTANT column",
+		Detail: "integration suite against mysql:5.6 with gh-ost 1.1.11 performing real migrations. Every fact the matrix needs is present. One caveat no version number hides: performance_schema.metadata_locks arrived in 5.7, so the lock queue cannot be read here; every plan carries E5b, and a production run blocks until --accept-unknown-mdl says the risk is understood",
 	},
 	{
 		Version: "MariaDB 10.11", Status: Unsupported,

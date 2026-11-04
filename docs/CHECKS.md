@@ -35,6 +35,7 @@ doctor (section S).
 | A5 | index key length exceeds the InnoDB limit for the row format | `BLOCKER` | done | `1071: Specified key was too long` |
 | A6 | the table uses `COMPACT` or `REDUNDANT`, so keys cap at 767 bytes | `WARN` | done | `1071` |
 | A7 | a `TEXT` or `BLOB` column is indexed without a prefix length | `BLOCKER` | done | `1170: BLOB/TEXT column used in key specification without a key length` |
+| A8 | an index names a column the table does not have | `BLOCKER` | done | `1072: Key column does not exist in table` |
 
 ---
 
@@ -103,7 +104,8 @@ doctor (section S).
 | E2 | the storage engine is not InnoDB | `BLOCKER` | done | the online DDL rules do not apply |
 | E3 | the server version cannot be parsed | `BLOCKER` | done | without a version, no capability can be claimed |
 | E4 | Percona Toolkit is older than 3.0 | `WARN` | planned | no `--resume`, narrower ALTER grammar |
-| E5 | MySQL is older than 5.7 | `BLOCKER` | done | past end of life, and its INFORMATION_SCHEMA lacks the facts a verified plan is built on |
+| E5 | MySQL is older than 5.6 | `BLOCKER` | done | gh-ost requires 5.6 or newer, and 5.5 reached end of life in 2018 |
+| E5b | the metadata lock queue cannot be observed (MySQL 5.6) | `WARN`, `BLOCKER` in production | done | performance_schema.metadata_locks arrived in 5.7; a queue that cannot be read is not an empty queue |
 | E6 | gh-ost is not installed | `BLOCKER` | moved | now `R3`, per engine |
 | E7 | gh-ost is selected for a composite primary key | `BLOCKER` | moved | now a gh-ost requirement in the engine matrix |
 | E8 | a donor or replica exists | `INFO` | planned | relevant to a future multi-instance profile |

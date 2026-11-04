@@ -428,8 +428,11 @@ func (a *AdviceInput) assessGhOst() EngineAssessment {
 	if v, err := model.ParseVersion(in.Server.Version); err != nil {
 		x.require("server version is known", false, "cannot parse "+in.Server.Version)
 	} else {
-		x.require("MySQL 5.7 or newer", v.AtLeast(5, 7, 0),
-			iff(v.AtLeast(5, 7, 0), "server is "+v.String(), "gh-ost needs binlog_row_image and a 5.7+ server"))
+		// gh-ost supports 5.6 and newer. binlog_row_image, the variable it really
+		// depends on, arrived in 5.6.2; requiring 5.7 refused a server gh-ost runs
+		// on happily, for a fact that is not true.
+		x.require("MySQL 5.6 or newer", v.AtLeast(5, 6, 0),
+			iff(v.AtLeast(5, 6, 0), "server is "+v.String(), "gh-ost supports MySQL 5.6 and newer"))
 	}
 
 	x.require("InnoDB storage engine", strings.EqualFold(t.Engine, "InnoDB"),

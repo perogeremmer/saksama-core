@@ -65,16 +65,20 @@ type Grants struct {
 
 // Runtime is the live server state that affects a migration decision.
 type Runtime struct {
-	ThreadsRunning    int           `json:"threads_running"`
-	LongQueries       []LongQuery   `json:"long_queries"`
-	Transactions      []Transaction `json:"transactions"`
-	PendingMDLocks    int           `json:"pending_metadata_locks"`
-	ReplicaLagSec     float64       `json:"replica_lag_seconds"`
-	ReplicaConfigured bool          `json:"replica_configured"`
-	ReplicaRunning    bool          `json:"replica_running"`
-	Grants            Grants        `json:"grants"`
-	Artifacts         []Artifact    `json:"artifacts"`
-	LockWaitTimeout   int64         `json:"lock_wait_timeout"`
+	ThreadsRunning int           `json:"threads_running"`
+	LongQueries    []LongQuery   `json:"long_queries"`
+	Transactions   []Transaction `json:"transactions"`
+	PendingMDLocks int           `json:"pending_metadata_locks"`
+	// MDLObservable reports whether the queue could actually be read. MySQL 5.6
+	// has no performance_schema.metadata_locks, and a restricted user may not be
+	// able to read it either: zero pending must never be confused with a pass.
+	MDLObservable     bool       `json:"mdl_observable"`
+	ReplicaLagSec     float64    `json:"replica_lag_seconds"`
+	ReplicaConfigured bool       `json:"replica_configured"`
+	ReplicaRunning    bool       `json:"replica_running"`
+	Grants            Grants     `json:"grants"`
+	Artifacts         []Artifact `json:"artifacts"`
+	LockWaitTimeout   int64      `json:"lock_wait_timeout"`
 	// Disk is the volume holding the data directory. MySQL cannot report free
 	// filesystem space over SQL, so this is only measured when Saksama runs on the
 	// database host.

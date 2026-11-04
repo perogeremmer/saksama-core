@@ -134,7 +134,7 @@ jobs:
   # The claims checks: what docs/COMPATIBILITY.md says must hold somewhere.
   # Refusals are cheap; the 5.7 suite is a full run against a real 5.7 server.
   claims:
-    name: Claim checks (5.6 refused, 5.7 verified, MariaDB refused)
+    name: Claim checks (5.6 verified with its caveat, MariaDB refused)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -213,17 +213,38 @@ jobs:
           chmod +x /tmp/ghost/gh-ost
           /tmp/ghost/gh-ost --version
 
-      - name: MySQL 5.6 is refused with a clear error, not a crash
+      # 5.6 is the supported floor, and the caveat is part of the contract: the
+      # metadata lock queue cannot be read there, so every 5.6 plan must say it,
+      # and a production run must block until the operator accepts the risk.
+      - name: MySQL 5.6 plans, with the unobservable lock queue stated
         run: |
           make build
-          set +e
           ./bin/saksama plan --live -h 127.0.0.1 -P 33309 -u root -d shop -t kept_table \
             -a "ADD INDEX ix (a)" --tls false --json > /tmp/56.json
+          jq -e '.recommendation.blocked == false' /tmp/56.json
+          jq -e '[.checks[] | select(.id == "E5b" and .severity == "WARN")] | length == 1' /tmp/56.json
+          jq -e '[.checks[] | select(.id == "E5")] | length == 0' /tmp/56.json
+
+      - name: MySQL 5.6 production run blocks until the lock queue risk is accepted
+        run: |
+          set +e
+          ./bin/saksama plan --live -h 127.0.0.1 -P 33309 -u root -d shop -t kept_table \
+            -a "ADD INDEX ix (a)" --tls false --production --json > /tmp/56p.json
           code=$?
           set -e
           test "$code" -eq 1
-          jq -e '.recommendation.blocked == true' /tmp/56.json
-          jq -e '[.checks[] | select(.id == "E5" and .severity == "BLOCKER")] | length == 1' /tmp/56.json
+          jq -e '[.checks[] | select(.id == "E5b" and .severity == "BLOCKER")] | length == 1' /tmp/56p.json
+
+          ./bin/saksama plan --live -h 127.0.0.1 -P 33309 -u root -d shop -t kept_table \
+            -a "ADD INDEX ix (a)" --tls false --production --accept-unknown-mdl --json > /tmp/56a.json
+          jq -e '[.checks[] | select(.id == "E5b" and .severity == "BLOCKER")] | length == 0' /tmp/56a.json
+
+      - name: MySQL 5.6 runs the whole integration suite, with a real gh-ost
+        env:
+          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33309)/"
+          PATH: /tmp/ghost:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+        run: |
+          go test -tags=integration -count=1 -v ./test/integration/
 
       - name: MariaDB is refused by E1, not by an introspection crash
         run: |

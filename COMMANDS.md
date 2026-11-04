@@ -81,6 +81,7 @@ saksama advise --schema <file>                             offline, from dumped 
 | `--schema <path>` | table JSON produced by `plan --dump-schema` |
 | `--mysql-version <v>` | server version, required offline |
 | `--no-probe` | skip detecting installed engine binaries |
+| `--accept-unknown-mdl` | proceed on MySQL 5.6 in production, where the metadata lock queue cannot be read |
 | `--plain` | borderless output, for scripts and logs |
 | `--json` | machine-readable output |
 | `--rows`, `--data-bytes`, `--index-bytes` | sizing facts for the offline estimate |

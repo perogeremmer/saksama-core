@@ -302,7 +302,7 @@ func TestSchemaReportDoesNotPromiseNativeOnAnOldServer(t *testing.T) {
 
 	servers := []model.Server{
 		{Version: "5.4.4", Vendor: "mysql"},
-		{Version: "5.6.51", Vendor: "mysql"},
+		{Version: "5.5.62", Vendor: "mysql"},
 		{Version: "10.11.6-MariaDB-log", Vendor: "mariadb"},
 	}
 	for _, srv := range servers {

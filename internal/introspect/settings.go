@@ -21,6 +21,7 @@ var relevantVariables = []string{
 	"super_read_only",
 	"performance_schema",
 	"transaction_isolation",
+	"tx_isolation", // MySQL 5.6 name for transaction_isolation
 	"innodb_file_per_table",
 	"innodb_autoinc_lock_mode",
 	"lower_case_table_names",
@@ -65,5 +66,17 @@ func (c *Collector) Settings(ctx context.Context) (map[string]string, error) {
 			out[key] = value.String
 		}
 	}
-	return out, rows.Err()
+	return normalizeSettings(out), rows.Err()
+}
+
+// normalizeSettings maps version-specific variable names onto one spelling, so a
+// check means the same thing on every server. MySQL 5.6 calls
+// transaction_isolation "tx_isolation".
+func normalizeSettings(in map[string]string) map[string]string {
+	if v, ok := in["tx_isolation"]; ok {
+		if _, exists := in["transaction_isolation"]; !exists {
+			in["transaction_isolation"] = v
+		}
+	}
+	return in
 }

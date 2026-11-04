@@ -19,7 +19,7 @@ Every row states how much evidence backs it:
 | 8.0.29+ | yes | INSTANT drop column | rule R-DROP-COLUMN-INSTANT-8029, covered by unit tests for both sides of the boundary |
 | 8.0.12 - 8.0.28 | claimed | INSTANT add column, appended only | rule R-ADD-COLUMN-INSTANT-8012; unit tested, not run against a server this old |
 | 5.7.44 | yes | INPLACE add/drop index; every column change is a rebuild | 43 of 44 integration tests pass (the INSTANT ones skip); with pt-osc 3.7.2 the full suite runs, and gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows |
-| 5.6.51 | no | refused | end of life and its INFORMATION_SCHEMA lacks the reported fact the plan is built on; check E5 blocks every plan (verified against mysql:5.6) |
+| 5.6.51 | yes | INPLACE index, no INSTANT column | integration suite against mysql:5.6 with gh-ost 1.1.11 performing real migrations. Every fact the matrix needs is present. One caveat no version number hides: performance_schema.metadata_locks arrived in 5.7, so the lock queue cannot be read here; every plan carries E5b, and a production run blocks until --accept-unknown-mdl says the risk is understood |
 | MariaDB 10.11 | no | refused | check E1 blocks every plan; verified against mariadb:10.11 (plan runs, then refuses with a clear error) |
 
 Native DDL is the cheapest path and the one Saksama prefers. It needs neither a copy

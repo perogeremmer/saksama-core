@@ -182,12 +182,16 @@ type Input struct {
 	Lock      string
 	Host      string
 	// DBUser and DBPort appear in generated engine commands.
-	DBUser       string
-	DBPort       string
-	Production   bool
-	SchemaSource string   // live | ddl | json
-	Ignored      []string // schema fragments the parser could not model
-	EngineHint   Engine   // resolved override; empty means auto
+	DBUser     string
+	DBPort     string
+	Production bool
+	// AcceptUnknownMDL records that the operator knowingly runs where the
+	// metadata lock queue cannot be observed. Without it, a production plan on
+	// such a server is blocked rather than merely warned.
+	AcceptUnknownMDL bool
+	SchemaSource     string   // live | ddl | json
+	Ignored          []string // schema fragments the parser could not model
+	EngineHint       Engine   // resolved override; empty means auto
 	// EngineHintSource records whether the override came from a flag or a
 	// recorded decision, so the audit trail can tell them apart.
 	EngineHintSource string

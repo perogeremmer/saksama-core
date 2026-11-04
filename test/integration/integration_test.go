@@ -223,8 +223,14 @@ func TestIntrospectReadsEverythingTheAnalyzerNeeds(t *testing.T) {
 	if snap.Table.Engine != "InnoDB" {
 		t.Errorf("engine = %q", snap.Table.Engine)
 	}
-	if snap.Table.RowFormat != "DYNAMIC" {
-		t.Errorf("row format = %q", snap.Table.RowFormat)
+	// MySQL 5.6 defaults to innodb_file_format=Antelope, where ROW_FORMAT=DYNAMIC
+	// is silently downgraded to COMPACT. Assert the value was read and is a real
+	// row format; the byte limits the analyzer derives from it differ, and A6
+	// covers that difference.
+	switch snap.Table.RowFormat {
+	case "DYNAMIC", "COMPACT", "REDUNDANT":
+	default:
+		t.Errorf("row format = %q, want a row format the server reports", snap.Table.RowFormat)
 	}
 	if snap.Table.Charset != "utf8mb4" {
 		t.Errorf("charset = %q", snap.Table.Charset)

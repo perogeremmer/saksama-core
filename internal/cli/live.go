@@ -95,15 +95,16 @@ func newStore() (*state.Store, error) {
 
 type livePlanOpts struct {
 	connFlags
-	table      string
-	alter      string
-	production bool
-	engine     string
-	force      bool
-	jsonOut    bool
-	storeDir   string
-	freeDisk   int64
-	diskTotal  int64
+	table            string
+	alter            string
+	production       bool
+	acceptUnknownMDL bool
+	engine           string
+	force            bool
+	jsonOut          bool
+	storeDir         string
+	freeDisk         int64
+	diskTotal        int64
 }
 
 func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
@@ -116,6 +117,8 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.alter, "a", "", "ALTER statement (also: --alter)")
 	fs.StringVar(&o.alter, "alter", "", "ALTER statement")
 	fs.BoolVar(&o.production, "production", false, "mark the target as production")
+	fs.BoolVar(&o.acceptUnknownMDL, "accept-unknown-mdl", false,
+		"proceed even though the metadata lock queue cannot be observed (MySQL 5.6)")
 	fs.StringVar(&o.engine, "engine", "", "force native|gh-ost|pt-osc")
 	fs.BoolVar(&o.force, "force", false, "downgrade selected preflight aborts (never capability blockers)")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
@@ -158,15 +161,16 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 
 	runner := core.New(db, store)
 	req := core.Request{
-		Conn:       conn,
-		Database:   o.database,
-		Table:      o.table,
-		Alter:      o.alter,
-		Production: o.production,
-		Force:      o.force,
-		FreeDisk:   o.freeDisk,
-		DiskTotal:  o.diskTotal,
-		Actor:      currentActor(),
+		Conn:             conn,
+		Database:         o.database,
+		Table:            o.table,
+		Alter:            o.alter,
+		Production:       o.production,
+		AcceptUnknownMDL: o.acceptUnknownMDL,
+		Force:            o.force,
+		FreeDisk:         o.freeDisk,
+		DiskTotal:        o.diskTotal,
+		Actor:            currentActor(),
 	}
 	if !*noProbe {
 		req.Binaries = probe.Binaries()
@@ -223,6 +227,7 @@ type applyOpts struct {
 	table             string
 	alter             string
 	production        bool
+	acceptUnknownMDL  bool
 	engine            string
 	force             bool
 	jsonOut           bool
@@ -249,6 +254,8 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.alter, "a", "", "ALTER statement (also: --alter)")
 	fs.StringVar(&o.alter, "alter", "", "ALTER statement")
 	fs.BoolVar(&o.production, "production", false, "mark the target as production, requiring --confirm")
+	fs.BoolVar(&o.acceptUnknownMDL, "accept-unknown-mdl", false,
+		"proceed although the metadata lock queue cannot be observed on this server")
 	fs.StringVar(&o.engine, "engine", "", "force native|gh-ost|pt-osc")
 	fs.BoolVar(&o.force, "force", false, "downgrade selected preflight aborts")
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
@@ -305,6 +312,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		Table:                  o.table,
 		Alter:                  o.alter,
 		Production:             o.production,
+		AcceptUnknownMDL:       o.acceptUnknownMDL,
 		Force:                  o.force,
 		DryRun:                 o.dryRun,
 		LockWaitTimeoutSeconds: o.lockWait,

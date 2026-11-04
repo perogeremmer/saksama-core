@@ -41,7 +41,10 @@ type Request struct {
 	Alter    string
 
 	Production bool
-	EngineHint analyzer.Engine
+	// AcceptUnknownMDL says the operator knows this server cannot report its
+	// metadata lock queue, and accepts the risk. Only MySQL 5.6 needs it.
+	AcceptUnknownMDL bool
+	EngineHint       analyzer.Engine
 	// EngineHintSource is "flag" or "recorded"; it only affects reporting.
 	EngineHintSource string
 	Force            bool
@@ -196,6 +199,7 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		DBUser:           req.Conn.User,
 		DBPort:           req.Conn.Port,
 		Production:       req.Production,
+		AcceptUnknownMDL: req.AcceptUnknownMDL,
 		SchemaSource:     "live",
 		Ignored:          ignored,
 		EngineHint:       req.EngineHint,
@@ -563,6 +567,7 @@ func liveStateFrom(snap introspect.Snapshot, duplicates map[string]int64) *analy
 		LongQueryCount:    len(snap.Runtime.LongQueries),
 		LongTransactions:  len(snap.Runtime.Transactions),
 		PendingMDLocks:    snap.Runtime.PendingMDLocks,
+		MDLObservable:     snap.Runtime.MDLObservable,
 		ReplicaConfigured: snap.Runtime.ReplicaConfigured,
 		ReplicaRunning:    snap.Runtime.ReplicaRunning,
 		ReplicaLagSeconds: snap.Runtime.ReplicaLagSec,
