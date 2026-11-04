@@ -393,6 +393,17 @@ func renderSession(w io.Writer, s *state.Session) {
 		}
 	}
 
+	if len(s.Artifacts) > 0 {
+		fmt.Fprintln(w, "\nOWNED ARTIFACTS")
+		for _, a := range s.Artifacts {
+			state := "kept for recovery"
+			if a.SafeToDelete {
+				state = "deletable"
+			}
+			fmt.Fprintf(w, "  %-8s %-32s %s (%s)\n", a.Kind, a.Name, state, a.Engine)
+		}
+	}
+
 	if s.Error != "" {
 		fmt.Fprintf(w, "\nERROR      %s\n", s.Error)
 	}
@@ -574,44 +585,6 @@ func cmdExport(args []string, stdout, stderr io.Writer) int {
 }
 
 // --- cleanup ----------------------------------------------------------------
-
-// cmdCleanup is deliberately conservative. It refuses to drop objects it cannot
-// prove belong to a recorded session, because guessing from a name pattern is how
-// people delete the wrong table at 2am.
-func cmdCleanup(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
-	}
-
-	store, err := newStore()
-	if err != nil {
-		fmt.Fprintf(stderr, "saksama cleanup: %v\n", err)
-		return ExitInternal
-	}
-
-	if fs.NArg() == 0 {
-		fmt.Fprintln(stderr, "saksama cleanup: session id required")
-		return ExitUsage
-	}
-
-	sess, err := store.Load(fs.Arg(0))
-	if err != nil {
-		fmt.Fprintf(stderr, "saksama cleanup: %v\n", err)
-		return ExitUsage
-	}
-
-	// The native path creates no shadow tables or triggers, so a recorded
-	// session has nothing to clean. Artifacts from engines arrive with the
-	// engine adapters, together with ownership records.
-	fmt.Fprintf(stdout, "session %s: engine %q creates no shadow tables or triggers\n", sess.ID, sess.Engine)
-	fmt.Fprintln(stdout, "nothing to clean up")
-	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "Objects matching shadow-table or pt-osc trigger naming patterns are NOT")
-	fmt.Fprintln(stdout, "dropped by name: ownership must be recorded in the session first.")
-	return ExitOK
-}
 
 func shorten(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")

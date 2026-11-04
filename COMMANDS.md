@@ -303,13 +303,26 @@ saksama export s3 --format json
 
 ## `saksama cleanup`
 
-Removes artifacts recorded as owned by a session. It refuses to drop anything it
-cannot prove belongs to that session, so a `_table_old` or a `pt_osc_` trigger
-with no ownership record is reported, never deleted.
+Drops the objects a session **recorded as its own**, and nothing else.
 
 ```
+saksama cleanup s3 --dry-run     # list what would be dropped
 saksama cleanup s3
 ```
+
+Ownership is recorded when the engine starts, not inferred from a name pattern. A
+table called `_orders_old` might belong to a migration, or might be something a
+person created deliberately, and the name cannot tell you which.
+
+- While the session is still running, its artifacts may be the only way back, so
+  they are kept and cleanup says so.
+- Once the session is terminal, they become deletable.
+- `status <session>` lists what the session owns and whether it is deletable yet.
+
+Engine debris this covers: gh-ost `_table_gho` and `_table_del` plus its
+`ghost_` triggers, and pt-osc `_table_new` and `_table_old` plus its
+`pt_osc_` triggers. pt-osc usually removes its own on success; gh-ost keeps
+`_table_del` on purpose, which is where disk quietly disappears.
 
 ---
 

@@ -62,6 +62,22 @@ type StatementRecord struct {
 	Error        string `json:"error,omitempty"`
 }
 
+// ArtifactRecord is an object this session is allowed to delete.
+//
+// Ownership is recorded when the object is observed, never inferred from its name.
+// A table called _orders_old might belong to a session, or might be something a
+// person made on purpose; the name cannot tell you which.
+type ArtifactRecord struct {
+	Kind      string `json:"kind"` // table | trigger
+	Name      string `json:"name"`
+	Engine    string `json:"engine"`
+	CreatedAt string `json:"created_at"`
+	// SafeToDelete is set only once the session is terminal and the artifact is no
+	// longer needed for recovery.
+	SafeToDelete bool   `json:"safe_to_delete"`
+	Note         string `json:"note,omitempty"`
+}
+
 // VerifyRecord is one post-execution assertion.
 type VerifyRecord struct {
 	Kind   string `json:"kind"`
@@ -96,6 +112,8 @@ type Session struct {
 	Statements   []StatementRecord `json:"statements,omitempty"`
 	Approvals    []Approval        `json:"approvals,omitempty"`
 	Verification []VerifyRecord    `json:"verification,omitempty"`
+	// Artifacts are the objects this session created and therefore owns.
+	Artifacts []ArtifactRecord `json:"artifacts,omitempty"`
 
 	// EnginePID is the copy engine's process id, so another command can stop it
 	// even after the client that started it is gone.

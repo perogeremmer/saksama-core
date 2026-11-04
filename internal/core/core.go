@@ -343,6 +343,10 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		_ = r.Store.Save(sess)
 		return sess, err
 	}
+	// Record the artifacts the chosen engine is about to create, before it runs, so
+	// ownership exists even if this process dies halfway.
+	recordExpectedArtifacts(sess, plan.Recommendation.Engine, req)
+
 	for _, s := range statements {
 		sess.Statements = append(sess.Statements, state.StatementRecord{
 			Description: s.Description, SQL: s.SQL, Algorithm: s.Algorithm, Lock: s.Lock,
@@ -459,6 +463,9 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	if execErr != nil {
 		sess.State = state.StateFailed
 		sess.Phase = "ddl"
+		// A failed run leaves the most debris, and the operator is most likely to
+		// want it gone. Still only what this session recorded.
+		sess.MarkArtifactsSafe("leftover from a failed migration; the production table was not swapped")
 		sess.Error = execErr.Error()
 		sess.LastSeq = prep.emitter.Seq()
 		_ = r.Store.Save(sess)
@@ -501,6 +508,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	sess.State = state.StateDone
 	sess.Phase = "done"
 	sess.Error = ""
+	sess.MarkArtifactsSafe("leftover from a finished migration; safe once you have checked the table")
 	sess.LastSeq = prep.emitter.Seq()
 	r.emit(prep, events.TypeSessionCompleted, map[string]any{
 		"duration_ms": exec.FinishedAt.Sub(exec.StartedAt).Milliseconds(),
@@ -741,4 +749,24 @@ func (r *Runner) ApplyFromSession(ctx context.Context, sessionID string, req Req
 	req.ResumedFrom = sessionID
 
 	return r.Apply(ctx, req)
+}
+
+// recordExpectedArtifacts names what the engine will create, so cleanup has
+// ownership rather than a naming convention.
+func recordExpectedArtifacts(sess *state.Session, eng analyzer.Engine, req Request) {
+	t := sess.Table
+	switch eng {
+	case analyzer.EngineGhOst:
+		sess.RecordArtifact("table", "_"+t+"_gho", "gh-ost", "ghost table, present only while copying")
+		sess.RecordArtifact("table", "_"+t+"_del", "gh-ost", "pre-migration table, kept after cutover")
+		for _, suffix := range []string{"_ins", "_upd", "_del"} {
+			sess.RecordArtifact("trigger", "ghost_"+t+suffix, "gh-ost", "copy trigger")
+		}
+	case analyzer.EnginePtOSC:
+		sess.RecordArtifact("table", "_"+t+"_new", "pt-osc", "shadow table, present only while copying")
+		sess.RecordArtifact("table", "_"+t+"_old", "pt-osc", "pre-migration table during the swap")
+		for _, suffix := range []string{"_ins", "_upd", "_del"} {
+			sess.RecordArtifact("trigger", "pt_osc_"+req.Database+"_"+t+suffix, "pt-osc", "copy trigger")
+		}
+	}
 }

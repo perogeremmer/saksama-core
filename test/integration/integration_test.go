@@ -1416,3 +1416,64 @@ func TestCopyEngineRunsDetachedAndCanBeCancelled(t *testing.T) {
 		t.Fatalf("a cancelled run must not be reported as done: %+v", sess)
 	}
 }
+
+// --- artifact ownership and cleanup ----------------------------------------
+
+// gh-ost keeps the pre-migration table as _table_del. That is real disk usage, and
+// cleanup may only remove it because the session recorded that it made it.
+func TestCleanupDropsOnlyRecordedArtifacts(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `keepme` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"CREATE TABLE `_t_del` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"CREATE TABLE `t_unrelated` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+	)
+
+	runner, store := newRunner(t)
+	runner.DB = db
+	sess := &state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateDone,
+		Database: schema, Table: "t", Engine: "gh-ost", Host: "test",
+	}
+	sess.RecordArtifact("table", "_t_del", "gh-ost", "pre-migration table")
+	sess.MarkArtifactsSafe("done")
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	dropped, failed := dropArtifactsForTest(t, db, schema, sess)
+	if failed != 0 {
+		t.Fatalf("%d artifact(s) failed", failed)
+	}
+	if len(dropped) != 1 || dropped[0] != "_t_del" {
+		t.Fatalf("dropped %v, want only _t_del", dropped)
+	}
+
+	// The unrelated tables must be untouched: cleanup follows ownership, not names.
+	for _, name := range []string{"keepme", "t_unrelated"} {
+		if n := countRows(t, db,
+			"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+			schema, name); n != 1 {
+			t.Fatalf("%s was dropped, but this session never recorded it", name)
+		}
+	}
+	if n := countRows(t, db,
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = '_t_del'",
+		schema); n != 0 {
+		t.Fatal("the recorded artifact was not dropped")
+	}
+}
+
+// A live session's artifacts may be the only way back, so they are not deletable.
+func TestLiveSessionArtifactsAreNotDeletable(t *testing.T) {
+	sess := &state.Session{State: state.StateRunning, Engine: "gh-ost"}
+	sess.RecordArtifact("table", "_t_gho", "gh-ost", "ghost table")
+	if got := sess.DeletableArtifacts(); len(got) != 0 {
+		t.Fatalf("a running session must not offer its artifacts: %v", got)
+	}
+	sess.State = state.StateFailed
+	sess.MarkArtifactsSafe("failed")
+	if got := sess.DeletableArtifacts(); len(got) != 1 {
+		t.Fatalf("a terminal session should offer its artifacts: %v", got)
+	}
+}
