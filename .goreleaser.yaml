@@ -61,7 +61,7 @@ release:
   footer: |
     ### Verified combinations
 
-    See [docs/COMPATIBILITY.md](https://github.com/perogeremmer/saksama-core/blob/main/docs/COMPATIBILITY.md).
+    See [docs/COMPATIBILITY.md](https://github.com/perogeremmer/saksama-core/blob/master/docs/COMPATIBILITY.md).
     A row marked "yes" means a test in this repository ran against it.
 
     ### Install
