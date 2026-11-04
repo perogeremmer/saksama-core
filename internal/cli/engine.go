@@ -29,6 +29,10 @@ func cmdEngine(args []string, stdout, stderr io.Writer) int {
 		return cmdEngineShow(args[1:], stdout, stderr)
 	case "clear", "unset":
 		return cmdEngineClear(args[1:], stdout, stderr)
+	case "doctor", "check":
+		return cmdEngineDoctor(args[1:], stdout, stderr)
+	case "install":
+		return cmdEngineInstall(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		engineUsage(stdout)
 		return ExitOK
@@ -53,6 +57,8 @@ Usage:
                                       what would be used right now
   saksama engine clear [-d db -t table]
                                       forget a recorded choice
+  saksama engine doctor [<name>]      can this engine run here? binary, deps, server
+  saksama engine install <name>       fetch the verified build for this machine
 
 Names: native | gh-ost | pt-osc   (aliases: ghost, pt, percona, ddl)
 

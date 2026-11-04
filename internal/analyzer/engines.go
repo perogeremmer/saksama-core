@@ -104,19 +104,15 @@ type EngineBinary struct {
 	Error     string
 }
 
-// Install commands for the copy engines. These are the commands, not a link,
-// because a verdict that says "gh-ost is not installed" is only useful if the
-// next thing on screen can be pasted.
+// Install hints point at Saksama's own installer rather than at a URL, because
+// the URL is not the hard part: choosing the right asset for this platform,
+// verifying it, and putting it where this build will find it is.
 //
-// pt-osc is a single Perl file. The toolkit package installs dozens of tools
-// this project never calls, and COMMANDS.md documents the single-file route CI
-// itself uses, so the hint must not contradict it.
-//
-// gh-ost ships per-architecture tarballs; both URLs below were fetched and run
-// against the published releases before being written down.
+// internal/enginesetup owns the actions and the checksums. These strings are what
+// a plan or a failure message shows, and they must name a command that exists.
 const (
-	GhOstInstall = "curl -fsSL https://github.com/github/gh-ost/releases/latest/download/gh-ost-linux-amd64.tar.gz | tar xz -C /usr/local/bin gh-ost"
-	PtOSCInstall = "curl -fsSL -o /usr/local/bin/pt-online-schema-change https://raw.githubusercontent.com/percona/percona-toolkit/v3.7.2/bin/pt-online-schema-change && chmod +x /usr/local/bin/pt-online-schema-change"
+	GhOstInstall = "saksama engine install gh-ost"
+	PtOSCInstall = "saksama engine install pt-osc"
 )
 
 // AdviceInput is everything the engine matrix needs.
@@ -300,7 +296,13 @@ func (x *EngineAssessment) binary(in Input, name, install string) *EngineBinary 
 	}
 	x.Installed = b.Available
 	if !b.Available {
-		x.Notes = append(x.Notes, fmt.Sprintf("%s is not installed on this machine", name))
+		// The probe's own words when it has them: "not installed" and "installed
+		// but cannot start" are different problems with different fixes.
+		detail := b.Error
+		if detail == "" {
+			detail = fmt.Sprintf("%s is not installed on this machine", name)
+		}
+		x.Notes = append(x.Notes, detail)
 	}
 	return &b
 }

@@ -83,6 +83,19 @@ go install github.com/perogeremmer/saksama-core/cmd/saksama@latest
 Or take a static binary from the [releases page](https://github.com/perogeremmer/saksama-core/releases):
 Linux and macOS, amd64 and arm64, with checksums and an SBOM.
 
+A copy engine is only needed when a change has to rebuild the table. Saksama
+installs the version it has actually verified, checks it against a published
+digest, and refuses a build it has no evidence for:
+
+```bash
+saksama engine doctor                 can gh-ost and pt-osc run here?
+saksama engine install gh-ost         verified build, this os and arch
+saksama engine install pt-osc         single Perl file, pinned digest
+saksama engine doctor gh-ost -h db.prod -u deployer
+```
+
+Nothing installs itself: `plan`, `advise`, and `apply` never touch a binary.
+
 Ask first. This only reads:
 
 ```bash

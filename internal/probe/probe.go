@@ -7,11 +7,14 @@ package probe
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
+	"github.com/perogeremmer/saksama-core/internal/enginesetup"
 )
 
 // names are the binaries whose availability changes what the tool can recommend.
@@ -56,9 +59,9 @@ func Results() map[string]Result {
 func probeOne(name string) analyzer.EngineBinary {
 	bin := analyzer.EngineBinary{Name: name}
 
-	path, err := exec.LookPath(name)
+	path, err := lookPath(name)
 	if err != nil {
-		bin.Error = "not found on PATH"
+		bin.Error = "not found on PATH or in " + managedDir()
 		return bin
 	}
 	bin.Path = path
@@ -91,7 +94,39 @@ func probeOne(name string) analyzer.EngineBinary {
 		bin.Version = "unknown"
 	}
 	bin.Available = true
+
+	// pt-osc is a Perl script: the file can be present and still unable to start,
+	// because it loads DBI and DBD::mysql at compile time. Reporting it as
+	// available would hand the planner an engine that dies on the first run.
+	if name == enginesetup.PtOSCBinary {
+		if reason, ok := enginesetup.PerlDepsReason(); !ok {
+			bin.Available = false
+			bin.Error = "installed at " + path + ", but pt-osc cannot start: " + enginesetup.TidyPerlError(reason)
+		}
+	}
 	return bin
+}
+
+// lookPath finds an engine, preferring the copy Saksama installed itself.
+//
+// The managed directory is checked first for two reasons: that copy is the exact
+// version this build verified, and it lets an install work without the operator
+// editing PATH. Everything else still comes from PATH.
+func lookPath(name string) (string, error) {
+	if dir, err := enginesetup.BinDir(); err == nil {
+		candidate := filepath.Join(dir, name)
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return exec.LookPath(name)
+}
+
+func managedDir() string {
+	if dir, err := enginesetup.BinDir(); err == nil {
+		return dir
+	}
+	return "the engine bin dir"
 }
 
 // parseVersion extracts the first dotted version number from probe output.

@@ -7,7 +7,7 @@ Full reference for every `saksama` command. For what the tool is and why, see th
 saksama advise    inspect the server and the schema, and say which engine fits
 saksama plan      produce a plan and record it, changing nothing
 saksama apply     execute the chosen engine
-saksama engine    list, set, show, and clear the engine choice
+saksama engine    list, set, show, clear, doctor, install
 saksama status    list sessions, or inspect one
 saksama events    print the append-only event log of a session
 saksama export    write a full audit export
@@ -214,6 +214,54 @@ Engine names accept common spellings: `gh-ost`, `ghost`, `gh`; `pt-osc`, `pt`,
 `engine show` reports the resolved choice and where it came from (`table`,
 `database`, or `global`). `engine clear` forgets one scope without touching the
 others.
+
+### Installing the engines
+
+```
+saksama engine doctor                 both engines, local side only
+saksama engine doctor gh-ost -h <host> -u <user>
+                                      one engine, binary and server together
+saksama engine install gh-ost         fetch the verified build for this machine
+saksama engine install pt-osc --dir ~/bin
+saksama engine install gh-ost --system --yes
+```
+
+`doctor` changes nothing. It answers "can this engine run here?" line by line:
+platform, binary, the version against `docs/COMPATIBILITY.md`, Perl and
+`DBD::mysql` for pt-osc, and the server settings that engine needs. Every FAIL
+carries the command that clears it. Exit `0` when nothing is missing, `1` when
+something is.
+
+Without `-h` the server side is not checked, and the verdict says so
+(`local side ready; 1 check(s) not run`) rather than calling it a pass.
+
+`install` is the only command in Saksama that downloads and writes an executable.
+It:
+
+| | |
+|---|---|
+| installs | the version `internal/support` marks verified, never `latest` |
+| picks | the asset for this os/arch, so nothing is chosen by hand |
+| verifies | gh-ost against its published `SHA256SUMS`; the pt-osc single file against a digest pinned in this build, because Percona publishes none |
+| asserts | the installed file reports that version from its own `--version` |
+| writes to | `$SAKSAMA_BIN_DIR`, else `$XDG_DATA_HOME/saksama/bin`, else `~/.local/share/saksama/bin` |
+| never | needs root, touches the database, or runs from `plan`, `advise`, or `apply` |
+
+That directory is probed before `PATH`, so an installed engine works without
+editing a shell profile, and the path is absolute by the time `apply` runs it.
+
+`--system` writes to `/usr/local/bin` and requires `--yes`. `--force` replaces an
+existing file. `--latest` is deliberately not implemented: installing a version
+no test in this repository has run would make `docs/COMPATIBILITY.md` a lie.
+
+A pt-osc file with no `DBI`/`DBD::mysql` is installed but reported as `cannot
+start`, with `apt-get install libdbi-perl libdbd-mysql-perl` as the fix. That is
+the difference between "installed" and "runnable", and both `doctor` and
+`advise` report it.
+
+Exit codes for `install`: `0` installed and runnable, `1` refused (digest or
+version mismatch, or a file already there) or installed but not runnable, `2`
+usage.
 
 ---
 

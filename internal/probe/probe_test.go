@@ -1,6 +1,11 @@
 package probe
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
 
 func TestParseVersion(t *testing.T) {
 	cases := map[string]string{
@@ -36,5 +41,35 @@ func TestBinariesReportsMissingWithoutError(t *testing.T) {
 		if !bin.Available && bin.Error == "" {
 			t.Errorf("%s: unavailable but no reason given", name)
 		}
+	}
+}
+
+// A binary Saksama installed itself must be found without the operator touching
+// PATH, and it must win over a different copy that happens to be on PATH: the
+// managed one is the version this build verified.
+func TestManagedBinaryWinsOverPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake engine is a shell script")
+	}
+	managed := t.TempDir()
+	onPath := t.TempDir()
+	for _, dir := range []string{managed, onPath} {
+		script := "#!/bin/sh\necho \"gh-ost 9.9.9\"\n"
+		if err := os.WriteFile(filepath.Join(dir, "gh-ost"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("SAKSAMA_BIN_DIR", managed)
+	t.Setenv("PATH", onPath+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got := probeOne("gh-ost")
+	if !got.Available {
+		t.Fatalf("the managed binary was not found: %+v", got)
+	}
+	if got.Path != filepath.Join(managed, "gh-ost") {
+		t.Errorf("probe used %q, want the managed copy in %q", got.Path, managed)
+	}
+	if got.Version != "9.9.9" {
+		t.Errorf("version %q", got.Version)
 	}
 }

@@ -88,8 +88,12 @@ func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]En
 		}
 
 		if a.RebuildEngine != EngineNone {
-			a.RebuildReady, a.RebuildBlocked, a.RebuildFix =
+			var note string
+			a.RebuildReady, a.RebuildBlocked, a.RebuildFix, note =
 				rebuildReadiness(byEngine[a.RebuildEngine], binaries != nil)
+			if note != "" {
+				a.Notes = append(a.Notes, note)
+			}
 		}
 
 		if t.Partitioned {
@@ -115,15 +119,23 @@ func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]En
 // probed is false when binaries were never checked (--no-probe). Unknown is not
 // a pass here either, so an unprobed binary is reported as unproven rather than
 // assumed present.
-func rebuildReadiness(x EngineAssessment, probed bool) (ready bool, blocked, fix string) {
+func rebuildReadiness(x EngineAssessment, probed bool) (ready bool, blocked, fix, note string) {
 	if !probed {
-		return false, "not probed", "run without --no-probe to check for the binary"
+		return false, "not probed", "run without --no-probe to check for the binary", ""
 	}
 	if !x.Installed {
-		return false, "not installed", x.Install
+		// A file that is present but cannot start is not a missing file, and
+		// telling the operator to install it again wastes their afternoon. The
+		// probe's own words go into the notes so the report explains itself.
+		for _, n := range x.Notes {
+			if strings.Contains(n, "cannot start") {
+				return false, "cannot start", "", n
+			}
+		}
+		return false, "not installed", x.Install, ""
 	}
 	if !x.Wrapped {
-		return false, "no adapter in this build", ""
+		return false, "no adapter in this build", "", ""
 	}
 
 	var unmet []string
@@ -133,9 +145,9 @@ func rebuildReadiness(x EngineAssessment, probed bool) (ready bool, blocked, fix
 		}
 	}
 	if len(unmet) > 0 {
-		return false, "server not configured: " + strings.Join(unmet, ", "), "see SERVER SETTINGS"
+		return false, "server not configured: " + strings.Join(unmet, ", "), "see SERVER SETTINGS", ""
 	}
-	return true, "", ""
+	return true, "", "", ""
 }
 
 // NativeIndexPath reports whether an index-only change on this server needs no

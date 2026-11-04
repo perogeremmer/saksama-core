@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -739,5 +740,36 @@ func TestCleanupDryRunListsRecordedArtifacts(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+// doctor is a gate: a missing engine must fail it, and a verified local binary
+// with no server given must pass it while saying what was not checked.
+func TestEngineDoctorExitCodes(t *testing.T) {
+	empty := t.TempDir()
+	t.Setenv("SAKSAMA_BIN_DIR", empty)
+	t.Setenv("PATH", empty) // nothing installed, nothing hiding on the real PATH
+
+	code, out, _ := run(t, "engine", "doctor", "gh-ost")
+	if code != ExitBlocked {
+		t.Fatalf("got exit %d, want %d; a missing engine must not pass\n%s", code, ExitBlocked, out)
+	}
+	if !strings.Contains(out, "saksama engine install gh-ost") {
+		t.Fatalf("the fix must be the installer:\n%s", out)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	script := "#!/bin/sh\necho \"gh-ost 1.1.11\"\n"
+	if err := os.WriteFile(filepath.Join(empty, "gh-ost"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ = run(t, "engine", "doctor", "gh-ost")
+	if code != ExitOK {
+		t.Fatalf("a verified local engine with no server given should pass, got %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "not run") {
+		t.Fatalf("the server check must be reported as not run:\n%s", out)
 	}
 }
