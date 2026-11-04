@@ -42,7 +42,7 @@ func cmdCompat(args []string, stdout, stderr io.Writer) int {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(map[string]any{
-			"version":  Version,
+			"version":  buildVersion(Version),
 			"mysql":    support.MySQL,
 			"engines":  support.Engines,
 			"findings": support.Findings,

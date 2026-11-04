@@ -419,6 +419,12 @@ $ saksama version
 saksama 1.2.3 (Saksama Core, contract v1)
 ```
 
+The number comes from the build, not from a file in the repository. A release
+binary is stamped by `-ldflags`; a `go install ...@v1.2.3` is not, so the version
+the toolchain resolved is used instead. A binary that reports `dev` is a build
+with no version recorded at all, which is what a working copy without a tag
+looks like. Nothing is fabricated.
+
 ---
 
 ## Installing the copy engines

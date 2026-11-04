@@ -16,7 +16,9 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/render"
 )
 
-// Version is the build version, injected with -ldflags.
+// Version is the build version, injected with -ldflags. When nothing is
+// injected, buildVersion falls back to the module version the toolchain
+// recorded, so an install without -ldflags still reports the release it is.
 var Version = "dev"
 
 // Exit codes are part of the contract with CI.
@@ -67,7 +69,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "schema":
 		return cmdSchema(args[1:], stdout, stderr)
 	case "version", "--version", "-V":
-		fmt.Fprintf(stdout, "saksama %s (Saksama Core, contract v%d)\n", Version, analyzer.ContractVersion)
+		fmt.Fprintf(stdout, "saksama %s (Saksama Core, contract v%d)\n", buildVersion(Version), analyzer.ContractVersion)
 		return ExitOK
 	case "help", "--help", "-help":
 		usage(stdout)
