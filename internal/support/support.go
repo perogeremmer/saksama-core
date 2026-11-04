@@ -64,13 +64,13 @@ var MySQL = []MySQLRow{
 	},
 	{
 		Version: "8.0.29+", Status: Verified,
-		Native: "INSTANT drop column",
-		Detail: "rule R-DROP-COLUMN-INSTANT-8029, covered by unit tests for both sides of the boundary",
+		Native: "INSTANT add column in any position, INSTANT drop column",
+		Detail: "integration test against mysql:8.0.29 ran ADD COLUMN ... AFTER and DROP COLUMN with ALGORITHM=INSTANT and the server accepted both; the same test against mysql:8.0.28 sees the server refuse them",
 	},
 	{
-		Version: "8.0.12 - 8.0.28", Status: Claimed,
+		Version: "8.0.12 - 8.0.28", Status: Verified,
 		Native: "INSTANT add column, appended only",
-		Detail: "rule R-ADD-COLUMN-INSTANT-8012; unit tested, not run against a server this old",
+		Detail: "integration test against mysql:8.0.28: an appended ADD COLUMN ran with ALGORITHM=INSTANT, while ADD COLUMN ... AFTER and DROP COLUMN were refused by the server, which is exactly what R-ADD-COLUMN-MIDDLE-COPY and R-DROP-COLUMN-COPY predict",
 	},
 	{
 		Version: "5.7.44", Status: Verified,

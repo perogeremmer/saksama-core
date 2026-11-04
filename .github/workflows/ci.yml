@@ -267,6 +267,55 @@ jobs:
         run: |
           go test -tags=integration -count=1 -v ./test/integration/
 
+  # The INSTANT boundary. 8.0.28 and 8.0.29 do not agree about ADD COLUMN in the
+  # middle of a row, or about DROP COLUMN, and the capability matrix has a row for
+  # each side. One test, two pinned servers, both must match the matrix: a row
+  # nobody runs against a real server is a guess with a rule id attached.
+  instant-boundary:
+    name: INSTANT boundary (MySQL ${{ matrix.mysql }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ["8.0.28", "8.0.29"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Start MySQL ${{ matrix.mysql }}
+        run: |
+          docker run -d --name mysql-instant \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
+            -e MYSQL_DATABASE=shop \
+            -p 33306:3306 mysql:${{ matrix.mysql }} --skip-ssl
+          for i in $(seq 1 90); do
+            if docker exec mysql-instant mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
+              echo ready; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready"; exit 1
+
+      # A tag moving under us would quietly turn this job into a duplicate of the
+      # other one, so the version is asserted rather than assumed.
+      - name: The server is the version this job claims
+        run: |
+          v=$(docker exec mysql-instant mysql -uroot -N -B -e "SELECT VERSION()")
+          echo "server: $v"
+          case "$v" in
+            "${{ matrix.mysql }}"*) ;;
+            *) echo "expected ${{ matrix.mysql }}, got $v"; exit 1 ;;
+          esac
+
+      - name: The matrix matches what this server actually does
+        env:
+          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
+        run: go test -tags=integration -count=1 -v -run 'TestInstant' ./test/integration/
+
   # The flag probe: what the wrappers emit must exist in the engine binaries.
   # A copy engine exits non-zero on one unknown flag, so a wrong spelling is a
   # whole-run failure at production time; here it is a whole-run failure at CI
