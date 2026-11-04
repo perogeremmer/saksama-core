@@ -1544,7 +1544,7 @@ func TestHoldCutoverCreatesAndReleasesTheGate(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "gh-ost")
 	script := "#!/bin/sh\n" +
-		"gate=$(printf '%s\\n' \"$@\" | sed -n 's/^--postpone-cutover-file=//p')\n" +
+		"gate=$(printf '%s\\n' \"$@\" | sed -n 's/^--postpone-cut-over-flag-file=//p')\n" +
 		"[ -n \"$gate\" ] || { echo 'no gate given' >&2; exit 2; }\n" +
 		"[ -f \"$gate\" ] || { echo 'gate missing at start' >&2; exit 3; }\n" +
 		"while [ -f \"$gate\" ]; do sleep 0.2; done\n" +

@@ -176,7 +176,7 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 			// only as reliable as the installed version; a bad flag makes gh-ost
 			// exit immediately with an argument error rather than doing something
 			// surprising, which is the behaviour we want.
-			argv = append(argv, "--postpone-cutover-file="+e.opts.CutoverGate)
+			argv = append(argv, "--postpone-cut-over-flag-file="+e.opts.CutoverGate)
 		}
 		if !e.opts.HasReplica {
 			argv = append(argv, "--allow-on-master")

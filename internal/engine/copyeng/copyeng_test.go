@@ -100,7 +100,7 @@ func TestGhOstHoldCutoverAddsPostponeFlag(t *testing.T) {
 	opts.CutoverGate = "/tmp/saksama-s3.cutover"
 
 	argv := argvOf(t, New(GhOst(), nil, conn(), opts, nil))
-	if !strings.Contains(joined(argv), "--postpone-cutover-file=/tmp/saksama-s3.cutover") {
+	if !strings.Contains(joined(argv), "--postpone-cut-over-flag-file=/tmp/saksama-s3.cutover") {
 		t.Fatalf("the engine must wait on the gate the core created: %v", argv)
 	}
 
@@ -108,7 +108,7 @@ func TestGhOstHoldCutoverAddsPostponeFlag(t *testing.T) {
 	// an engine waiting on a file that does not exist would hang forever.
 	opts.CutoverGate = ""
 	argv = argvOf(t, New(GhOst(), nil, conn(), opts, nil))
-	if strings.Contains(joined(argv), "--postpone-cutover-file") {
+	if strings.Contains(joined(argv), "--postpone-cut-over-flag-file") {
 		t.Fatalf("a hold without a gate path must not be passed to the engine: %v", argv)
 	}
 }
