@@ -163,7 +163,25 @@ func applyRequest(schema, table, alter string) core.Request {
 func runApply(t *testing.T, runner *core.Runner, db *sql.DB, req core.Request) (*state.Session, error) {
 	t.Helper()
 	runner.DB = db
-	return runner.Apply(context.Background(), req)
+	sess, err := runner.Apply(context.Background(), req)
+	if err != nil {
+		// "1 blocker(s)" is not a diagnosis. A blocked apply in CI has to say which
+		// check blocked it, or the next person reads a log that repeats the error
+		// and hides the reason - and some blockers (a pending metadata lock) depend
+		// on what the server was doing a moment ago.
+		if prep, aerr := runner.Analyze(context.Background(), req); aerr == nil {
+			var ids []string
+			for _, c := range prep.Plan.Checks {
+				if c.Severity == analyzer.SeverityBlocker {
+					ids = append(ids, c.ID+": "+c.Title)
+				}
+			}
+			if len(ids) > 0 {
+				err = fmt.Errorf("%w (blocked by %s)", err, strings.Join(ids, "; "))
+			}
+		}
+	}
+	return sess, err
 }
 
 func countRows(t *testing.T, db *sql.DB, query string, args ...any) int {
