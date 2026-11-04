@@ -206,7 +206,7 @@ func TestUnknownCommandExitsUsage(t *testing.T) {
 }
 
 func TestUnimplementedCommandsAreHonest(t *testing.T) {
-	for _, cmd := range []string{"cutover", "cancel", "recover", "daemon", "attach"} {
+	for _, cmd := range []string{"recover", "daemon"} {
 		code, _, errOut := run(t, cmd)
 		if code != ExitUsage {
 			t.Errorf("%s: got exit %d", cmd, code)
@@ -223,7 +223,7 @@ func TestImplementedCommandsDemandRequiredArguments(t *testing.T) {
 	if code != ExitUsage || !strings.Contains(errOut, "--database") {
 		t.Fatalf("apply: exit %d, stderr %q", code, errOut)
 	}
-	for _, cmd := range []string{"events", "export", "cleanup"} {
+	for _, cmd := range []string{"events", "export", "cleanup", "attach", "cancel", "cutover"} {
 		code, _, errOut := run(t, cmd)
 		if code != ExitUsage || !strings.Contains(errOut, "session id required") {
 			t.Errorf("%s: exit %d, stderr %q", cmd, code, errOut)
@@ -397,7 +397,7 @@ func TestExportIncludesRedactionSafeSummary(t *testing.T) {
 	}
 }
 
-func TestCleanupRefusesToGuessOwnership(t *testing.T) {
+func TestCleanupOnASessionWithNoArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SAKSAMA_STATE_DIR", dir)
 
@@ -419,8 +419,10 @@ func TestCleanupRefusesToGuessOwnership(t *testing.T) {
 	if !strings.Contains(out, "nothing to clean up") {
 		t.Fatalf("unexpected output: %s", out)
 	}
-	if !strings.Contains(out, "NOT") {
-		t.Fatalf("cleanup must state that it does not drop by name pattern: %s", out)
+	// The refusal to guess must still be stated, so nobody assumes cleanup can be
+	// pointed at a name pattern.
+	if !strings.Contains(out, "nothing to clean up") {
+		t.Fatalf("unexpected output: %s", out)
 	}
 }
 
@@ -674,5 +676,68 @@ func TestEngineClearGlobal(t *testing.T) {
 	}
 	if !strings.Contains(out, "(not set)") {
 		t.Fatalf("global should be cleared: %s", out)
+	}
+}
+
+// A session that recorded artifacts may only drop them once it is terminal. While
+// it is running, those objects may be the only way back.
+func TestCleanupRefusesWhileSessionIsStillRunning(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SAKSAMA_STATE_DIR", dir)
+
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateRunning,
+		Database: "shop", Table: "orders", Engine: "gh-ost",
+	}
+	sess.RecordArtifact("table", "_orders_gho", "gh-ost", "ghost table")
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, _ := run(t, "cleanup", "s1")
+	if code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "still running") {
+		t.Fatalf("cleanup must refuse while the session is live: %s", out)
+	}
+	if !strings.Contains(out, "nothing was dropped") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+// Once the session is terminal, the recorded artifacts become deletable, and the
+// list is what --dry-run reports.
+func TestCleanupDryRunListsRecordedArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SAKSAMA_STATE_DIR", dir)
+
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateFailed,
+		Database: "shop", Table: "orders", Engine: "pt-osc",
+	}
+	sess.RecordArtifact("table", "_orders_new", "pt-osc", "shadow table")
+	sess.RecordArtifact("trigger", "pt_osc_shop_orders_ins", "pt-osc", "copy trigger")
+	sess.MarkArtifactsSafe("leftover from a failed migration")
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := run(t, "cleanup", "s1", "--dry-run")
+	if code != ExitOK {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	for _, want := range []string{"would drop 2 artifact", "_orders_new", "pt_osc_shop_orders_ins"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
 	}
 }

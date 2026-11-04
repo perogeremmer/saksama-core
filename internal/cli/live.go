@@ -233,6 +233,8 @@ type applyOpts struct {
 	allowArgvPassword bool
 	freeDisk          int64
 	diskTotal         int64
+	session           string
+	detach            bool
 }
 
 func cmdApply(args []string, stdout, stderr io.Writer) int {
@@ -251,6 +253,8 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.force, "force", false, "downgrade selected preflight aborts")
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
 	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
+	fs.StringVar(&o.session, "session", "", "execute the plan stored in this session instead of planning again")
+	fs.BoolVar(&o.detach, "detach", false, "run the engine in its own process group, so closing this terminal does not stop it")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
 	fs.StringVar(&o.confirm, "confirm", "", "must equal the host name when --production is set")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "build statements and approvals without executing")
@@ -262,8 +266,8 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	if o.table == "" || o.database == "" || strings.TrimSpace(o.alter) == "" {
-		fmt.Fprintln(stderr, "saksama apply: --database, --table, and --alter are required")
+	if o.session == "" && (o.table == "" || o.database == "" || strings.TrimSpace(o.alter) == "") {
+		fmt.Fprintln(stderr, "saksama apply: --database, --table, and --alter are required, or pass --session <id>")
 		return ExitUsage
 	}
 
@@ -309,6 +313,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		FreeDisk:               o.freeDisk,
 		DiskTotal:              o.diskTotal,
 		ForExecution:           true,
+		Detach:                 o.detach,
 		Actor:                  currentActor(),
 		Binaries:               binariesOrNil(*noProbe),
 		Progress: func(p engine.Progress) {
@@ -327,7 +332,13 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		}, nil
 	}
 
-	sess, err := runner.Apply(context.Background(), req)
+	var sess *state.Session
+	if o.session != "" {
+		// A stored plan already names its engine; --engine still wins.
+		sess, err = runner.ApplyFromSession(context.Background(), o.session, req)
+	} else {
+		sess, err = runner.Apply(context.Background(), req)
+	}
 	if sess != nil {
 		if o.jsonOut {
 			enc := json.NewEncoder(stdout)
@@ -379,6 +390,17 @@ func renderSession(w io.Writer, s *state.Session) {
 				mark = "FAIL"
 			}
 			fmt.Fprintf(w, "  [%s] %-20s %s  %s\n", mark, v.Kind, v.Name, v.Detail)
+		}
+	}
+
+	if len(s.Artifacts) > 0 {
+		fmt.Fprintln(w, "\nOWNED ARTIFACTS")
+		for _, a := range s.Artifacts {
+			state := "kept for recovery"
+			if a.SafeToDelete {
+				state = "deletable"
+			}
+			fmt.Fprintf(w, "  %-8s %-32s %s (%s)\n", a.Kind, a.Name, state, a.Engine)
 		}
 	}
 
@@ -563,44 +585,6 @@ func cmdExport(args []string, stdout, stderr io.Writer) int {
 }
 
 // --- cleanup ----------------------------------------------------------------
-
-// cmdCleanup is deliberately conservative. It refuses to drop objects it cannot
-// prove belong to a recorded session, because guessing from a name pattern is how
-// people delete the wrong table at 2am.
-func cmdCleanup(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
-	}
-
-	store, err := newStore()
-	if err != nil {
-		fmt.Fprintf(stderr, "saksama cleanup: %v\n", err)
-		return ExitInternal
-	}
-
-	if fs.NArg() == 0 {
-		fmt.Fprintln(stderr, "saksama cleanup: session id required")
-		return ExitUsage
-	}
-
-	sess, err := store.Load(fs.Arg(0))
-	if err != nil {
-		fmt.Fprintf(stderr, "saksama cleanup: %v\n", err)
-		return ExitUsage
-	}
-
-	// The native path creates no shadow tables or triggers, so a recorded
-	// session has nothing to clean. Artifacts from engines arrive with the
-	// engine adapters, together with ownership records.
-	fmt.Fprintf(stdout, "session %s: engine %q creates no shadow tables or triggers\n", sess.ID, sess.Engine)
-	fmt.Fprintln(stdout, "nothing to clean up")
-	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "Objects matching shadow-table or pt-osc trigger naming patterns are NOT")
-	fmt.Fprintln(stdout, "dropped by name: ownership must be recorded in the session first.")
-	return ExitOK
-}
 
 func shorten(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")

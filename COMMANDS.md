@@ -131,6 +131,10 @@ database for progress, and verifies the result.
 ```
 saksama apply -h <host> -d <db> -t <table> -a "<ALTER>" --dry-run
 saksama apply -h <host> -d <db> -t <table> -a "<ALTER>" --production --confirm db.prod
+
+# plan, read it, decide, then execute exactly that plan
+saksama plan --live ... -a "<ALTER>"
+saksama apply --session s3 --confirm db.prod
 ```
 
 | Flag | Meaning |
@@ -141,6 +145,8 @@ saksama apply -h <host> -d <db> -t <table> -a "<ALTER>" --production --confirm d
 | `--engine <name>` | override the recorded choice |
 | `--force` | downgrade selected preflight aborts; never bypasses an invariant blocker |
 | `--lock-wait-timeout <n>` | session `lock_wait_timeout` in seconds, default 10 |
+| `--session <id>` | execute the plan stored in that session instead of planning again |
+| `--detach` | run the engine in its own process group, so closing the terminal does not stop it |
 | `--hold-cutover` | ask the engine to pause before the swap, where it supports that |
 | `--free-disk <bytes>` | free space on the data volume, when it cannot be measured from here |
 | `--disk-total <bytes>` | volume size, so the 10 percent floor can be applied |
@@ -154,6 +160,17 @@ recommendation. The analyzer's own pick always stays visible.
 
 After execution the result is verified through `information_schema`. An engine
 that exits `0` without doing the work is reported as a failure.
+
+The schema is checked twice, because a plan is a statement about a shape and shapes
+move:
+
+- `apply --session` compares the schema against the fingerprint recorded in that
+  plan, and refuses if anyone altered the table in between;
+- every apply rereads the schema immediately before the DDL, which also catches a
+  change that happened during the preflight checks.
+
+Row counts and sizes are excluded from the fingerprint, so a busy table does not
+trip it.
 
 ---
 
@@ -222,6 +239,58 @@ or run Saksama on the database host, where `@@datadir` can actually be read.
 
 ---
 
+## `saksama attach` and `saksama cancel`
+
+A migration should survive the terminal that started it. Two commands make that
+practical without a background daemon:
+
+```bash
+saksama apply ... --detach        # engine runs in its own process group
+saksama attach s3                 # follow the event log, ctrl-c to detach
+saksama cancel s3                 # SIGTERM the recorded engine pid
+```
+
+`attach` reads the append-only event log on disk, so it works from another
+terminal, after a reconnect, or hours later. Detaching does not stop anything on
+the server, and `attach` says so when you leave.
+
+`cancel` signals the process id recorded in the session. If the engine had not cut
+over, the production table was never swapped; `status` and `cleanup` handle what it
+left behind.
+
+The limit worth knowing: a native `ALTER` is owned by the MySQL server, so there is
+no process to cancel. The tool says that instead of pretending.
+
+---
+
+## `saksama cutover`
+
+Releases a cutover that was held, which is the verification gate this tool is built
+around.
+
+```
+saksama apply ... --engine gh-ost --hold-cutover
+saksama status s3                 # copy finished, swap held
+saksama attach s3                 # watch it, ctrl-c to detach
+saksama cutover s3                # now the swap may happen
+```
+
+How it works: the core creates a gate file before the engine starts and records its
+path in the session. gh-ost copies into the ghost table and then waits for that file
+to disappear. `cutover` removes it, so approval is one file deletion that works from
+any terminal, any ssh session, or after a reconnect.
+
+Limits worth stating plainly:
+
+- **gh-ost only.** pt-osc swaps as soon as the copy finishes and has no gate, so
+  `--hold-cutover` is ignored for it and the plan says so.
+- **A hold is not blue-green.** It gates the schema swap. A change that is not
+  backward compatible still needs an application deploy strategy.
+- **No rollback after the swap.** Once released, new writes live only in the new
+  table.
+
+---
+
 ## `saksama status`
 
 ```
@@ -260,15 +329,50 @@ saksama export s3 --format json
 
 ---
 
+## `saksama reconcile`
+
+Lists sessions that never reached a terminal state, and reports what the database
+shows for the objects each one owns.
+
+```
+saksama reconcile
+saksama reconcile --json
+```
+
+A crashed session is neither obviously failed nor obviously running, so this reports
+the observation rather than a verdict the tool cannot support:
+
+| What it finds | Next step it suggests |
+|---|---|
+| the engine process is still alive | `attach` to watch it, or `cancel` it |
+| the engine is gone but objects remain | check the table, then `cleanup` |
+| nothing remains | re-plan; the previous attempt did not finish |
+
+Nothing is changed by this command. The point is that nobody touches a half-finished
+migration without looking at it first.
+
 ## `saksama cleanup`
 
-Removes artifacts recorded as owned by a session. It refuses to drop anything it
-cannot prove belongs to that session, so a `_table_old` or a `pt_osc_` trigger
-with no ownership record is reported, never deleted.
+Drops the objects a session **recorded as its own**, and nothing else.
 
 ```
+saksama cleanup s3 --dry-run     # list what would be dropped
 saksama cleanup s3
 ```
+
+Ownership is recorded when the engine starts, not inferred from a name pattern. A
+table called `_orders_old` might belong to a migration, or might be something a
+person created deliberately, and the name cannot tell you which.
+
+- While the session is still running, its artifacts may be the only way back, so
+  they are kept and cleanup says so.
+- Once the session is terminal, they become deletable.
+- `status <session>` lists what the session owns and whether it is deletable yet.
+
+Engine debris this covers: gh-ost `_table_gho` and `_table_del` plus its
+`ghost_` triggers, and pt-osc `_table_new` and `_table_old` plus its
+`pt_osc_` triggers. pt-osc usually removes its own on success; gh-ost keeps
+`_table_del` on purpose, which is where disk quietly disappears.
 
 ---
 

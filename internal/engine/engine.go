@@ -92,6 +92,21 @@ type Engine interface {
 	Verify(ctx context.Context) ([]VerifyResult, error)
 }
 
+// HoldsCutover is implemented by engines that can pause before swapping tables.
+type HoldsCutover interface {
+	// CutoverGate is the path the engine watches. Removing the file releases the
+	// swap, which is how one command can hold it and another can approve it.
+	CutoverGate() string
+}
+
+// Detachable is implemented by engines that run as a child process and can
+// therefore survive their client.
+type Detachable interface {
+	// SetDetach puts the engine in its own process group and reports the child PID
+	// as soon as it exists.
+	SetDetach(detach bool, onStart func(pid int))
+}
+
 // Options carries what every engine needs.
 type Options struct {
 	Schema     string
@@ -116,6 +131,9 @@ type Options struct {
 	HasReplica bool
 	// HoldCutover asks the engine to pause before swapping tables, when it can.
 	HoldCutover bool
+	// CutoverGate is the file path the engine waits on. The core creates it before
+	// starting, records it in the session, and `saksama cutover` removes it.
+	CutoverGate string
 	// ChunkSize overrides the engine default.
 	ChunkSize int
 	// AllowArgvPassword permits passing a password in argv for engines that

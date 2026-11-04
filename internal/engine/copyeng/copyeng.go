@@ -87,6 +87,9 @@ type Engine struct {
 	now   func() time.Time
 	lines func(process.Line)
 
+	detach         bool
+	onProcessStart func(pid int)
+
 	// defaultsFile is a temporary 0600 option file used instead of argv
 	// credentials. It is removed when the run finishes.
 	defaultsFile string
@@ -168,12 +171,12 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 			"--initially-drop-ghost-table",
 			"--initially-drop-old-table",
 		}
-		if e.opts.HoldCutover {
+		if e.opts.HoldCutover && e.opts.CutoverGate != "" {
 			// gh-ost waits for this file to disappear before swapping. The flag is
 			// only as reliable as the installed version; a bad flag makes gh-ost
 			// exit immediately with an argument error rather than doing something
 			// surprising, which is the behaviour we want.
-			argv = append(argv, "--postpone-cutover-file="+e.cutoverFile())
+			argv = append(argv, "--postpone-cutover-file="+e.opts.CutoverGate)
 		}
 		if !e.opts.HasReplica {
 			argv = append(argv, "--allow-on-master")
@@ -244,6 +247,15 @@ func (e *Engine) installHint() string {
 		return "install it from https://github.com/github/gh-ost/releases"
 	}
 	return "install it with: apt install percona-toolkit"
+}
+
+// CutoverGate implements engine.HoldsCutover. gh-ost waits until this file is
+// removed; pt-osc has no equivalent and swaps as soon as the copy finishes.
+func (e *Engine) CutoverGate() string {
+	if e.spec.Kind != KindGhOst {
+		return ""
+	}
+	return e.cutoverFile()
 }
 
 func (e *Engine) cutoverFile() string {
@@ -348,7 +360,15 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 	}
 
 	start := e.now()
-	res, runErr := process.Run(ctx, process.Spec{Argv: stmts[0].Argv}, collect)
+	res, runErr := process.Run(ctx, process.Spec{
+		Argv:   stmts[0].Argv,
+		Detach: e.detach,
+		OnStart: func(pid int) {
+			if e.onProcessStart != nil {
+				e.onProcessStart(pid)
+			}
+		},
+	}, collect)
 	close(stop)
 
 	ex.Statements = append(ex.Statements, engine.StatementResult{
@@ -429,6 +449,12 @@ func (e *Engine) tableRows(ctx context.Context, table string) int64 {
 		return 0
 	}
 	return n
+}
+
+// SetDetach implements engine.Detachable.
+func (e *Engine) SetDetach(detach bool, onStart func(pid int)) {
+	e.detach = detach
+	e.onProcessStart = onStart
 }
 
 // Verify checks the result through information_schema.

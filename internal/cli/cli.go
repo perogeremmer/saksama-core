@@ -50,6 +50,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdApply(args[1:], stdout, stderr)
 	case "status":
 		return cmdStatus(args[1:], stdout, stderr)
+	case "attach":
+		return cmdAttach(args[1:], stdout, stderr)
+	case "cancel":
+		return cmdCancel(args[1:], stdout, stderr)
+	case "cutover":
+		return cmdCutover(args[1:], stdout, stderr)
+	case "reconcile":
+		return cmdReconcile(args[1:], stdout, stderr)
 	case "events":
 		return cmdEvents(args[1:], stdout, stderr)
 	case "export":
@@ -64,7 +72,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "help", "--help", "-help":
 		usage(stdout)
 		return ExitOK
-	case "daemon", "cutover", "cancel", "recover", "attach":
+	case "daemon", "recover":
 		fmt.Fprintf(stderr, "saksama %s: not implemented in this build\n", args[0])
 		fmt.Fprintf(stderr, "this build provides: plan, plan --live, apply, status, events, export, cleanup, schema\n")
 		return ExitUsage
@@ -89,6 +97,10 @@ Usage:
   saksama compat                       which MySQL and engine versions are verified
   saksama apply  -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama status [<session>] [--json]
+  saksama attach <session>                 follow the event log, detach with ctrl-c
+  saksama cancel <session>                 stop a running copy engine by pid
+  saksama cutover <session>                release a held cutover, allowing the swap
+  saksama reconcile                        sessions that never finished, and what is left
   saksama events <session>
   saksama export <session>
   saksama cleanup <session>
@@ -132,6 +144,8 @@ Apply options:
   --engine <name>          native|gh-ost|pt-osc; overrides the recorded choice
   --force                  downgrade selected preflight aborts
   --lock-wait-timeout <n>  session lock_wait_timeout in seconds (default 10)
+  --detach                 run the engine in its own process group, so closing
+                           this terminal does not stop it; stop it with: saksama cancel
   --hold-cutover           pause before the swap so you can verify (gh-ost)
   --allow-argv-password    let an engine without an option file take the password
                            in argv (visible in ps); off by default

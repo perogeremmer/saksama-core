@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +26,14 @@ type Spec struct {
 	Env []string
 	// Timeout bounds the whole run. Zero means no limit.
 	Timeout time.Duration
+	// Detach puts the engine in its own process group, so closing the terminal or
+	// killing the client does not take the migration down with it. The child is
+	// still our child: cmd.Wait still works, and a recorded PID lets another
+	// command stop it later.
+	Detach bool
+	// OnStart receives the child PID as soon as it is known, so it can be recorded
+	// before the long part of the run begins.
+	OnStart func(pid int)
 }
 
 // Result is the outcome of a run.
@@ -74,6 +83,11 @@ func Run(ctx context.Context, spec Spec, onLine func(Line)) (Result, error) {
 
 	cmd := exec.CommandContext(runCtx, bin, spec.Argv[1:]...)
 	cmd.Env = append(os.Environ(), spec.Env...)
+	if spec.Detach {
+		// A new session means no controlling terminal, so an SSH hangup does not
+		// deliver SIGHUP to the engine.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -92,6 +106,9 @@ func Run(ctx context.Context, spec Spec, onLine func(Line)) (Result, error) {
 		res.Err = err
 		res.Finished = time.Now()
 		return res, err
+	}
+	if spec.OnStart != nil && cmd.Process != nil {
+		spec.OnStart(cmd.Process.Pid)
 	}
 
 	var wg sync.WaitGroup
@@ -123,4 +140,44 @@ func Run(ctx context.Context, spec Spec, onLine func(Line)) (Result, error) {
 		res.Err = fmt.Errorf("engine timed out after %s", spec.Timeout)
 	}
 	return res, res.Err
+}
+
+// Stop sends SIGTERM to a detached engine and waits briefly for it to leave.
+//
+// It is used by `saksama cancel`, which runs in a different process from the one
+// that started the engine, so the PID is the only handle available.
+func Stop(pid int, wait time.Duration) error {
+	if pid <= 0 {
+		return fmt.Errorf("no process id recorded")
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("process %d is gone: %w", pid, err)
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("cannot signal process %d: %w", pid, err)
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if p.Signal(syscall.Signal(0)) != nil || isZombie(pid) {
+			return nil // gone, or waiting to be reaped
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("process %d did not stop within %s", pid, wait)
+}
+
+// Alive reports whether a process id is still running.
+func Alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if isZombie(pid) {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
 }

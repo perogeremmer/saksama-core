@@ -97,9 +97,30 @@ func TestGhOstAllowsArgvPasswordOnlyWhenAsked(t *testing.T) {
 func TestGhOstHoldCutoverAddsPostponeFlag(t *testing.T) {
 	opts := testOptions()
 	opts.HoldCutover = true
+	opts.CutoverGate = "/tmp/saksama-s3.cutover"
+
 	argv := argvOf(t, New(GhOst(), nil, conn(), opts, nil))
-	if !strings.Contains(joined(argv), "--postpone-cutover-file=") {
-		t.Fatalf("expected a cut-over gate: %v", argv)
+	if !strings.Contains(joined(argv), "--postpone-cutover-file=/tmp/saksama-s3.cutover") {
+		t.Fatalf("the engine must wait on the gate the core created: %v", argv)
+	}
+
+	// Without a gate path there is nothing to wait on, so the flag must not appear:
+	// an engine waiting on a file that does not exist would hang forever.
+	opts.CutoverGate = ""
+	argv = argvOf(t, New(GhOst(), nil, conn(), opts, nil))
+	if strings.Contains(joined(argv), "--postpone-cutover-file") {
+		t.Fatalf("a hold without a gate path must not be passed to the engine: %v", argv)
+	}
+}
+
+func TestPtOSCHasNoCutoverGate(t *testing.T) {
+	// pt-osc swaps as soon as the copy finishes, so claiming otherwise would be a
+	// promise the engine cannot keep.
+	if gate := New(PtOSC(), nil, conn(), testOptions(), nil).CutoverGate(); gate != "" {
+		t.Fatalf("pt-osc has no cutover gate, got %q", gate)
+	}
+	if gate := New(GhOst(), nil, conn(), testOptions(), nil).CutoverGate(); !strings.HasSuffix(gate, ".cutover") {
+		t.Fatalf("gh-ost gate looks wrong: %q", gate)
 	}
 }
 

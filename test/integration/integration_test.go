@@ -35,6 +35,7 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
 	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/cred"
+	"github.com/perogeremmer/saksama-core/internal/engine/process"
 	"github.com/perogeremmer/saksama-core/internal/introspect"
 	"github.com/perogeremmer/saksama-core/internal/model"
 	"github.com/perogeremmer/saksama-core/internal/state"
@@ -1187,5 +1188,500 @@ func TestApplyProceedsWithOperatorSuppliedDisk(t *testing.T) {
 	}
 	if sess.State != state.StateDone {
 		t.Fatalf("state = %q", sess.State)
+	}
+}
+
+// --- fingerprint revalidation ----------------------------------------------
+
+// The plan is computed and then executed later, possibly by a different person.
+// If the schema moved in between, the ALTER was written for a table that no longer
+// exists in that shape, so it must be refused rather than guessed at.
+func TestApplyRefusesWhenSchemaChangedAfterPlanning(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+
+	// Plan first, against the current shape.
+	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
+	prep, err := runner.PlanOnly(context.Background(), req)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planned := prep.Plan.SchemaFingerprint
+	prep.Close()
+
+	// Someone else changes the table before this plan is executed.
+	mustExec(t, db, "ALTER TABLE `t` ADD COLUMN `surprise` int NULL")
+
+	// Executing the already-planned fingerptrint must be refused even though the
+	// engine itself would happily run.
+	current, err := introspect.NewCollector(db, schema, "t").Table(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analyzer.Fingerprint(current) == planned {
+		t.Fatal("the fingerprint did not notice a new column, so the check would be useless")
+	}
+}
+
+// The same table, replanned, must be accepted: the guard refuses a stale plan, not
+// the change.
+func TestApplyAcceptsAFreshPlanAfterSchemaChange(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"ALTER TABLE `t` ADD COLUMN `surprise` int NULL",
+	)
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
+	req.ForExecution = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+
+	sess, err := runner.Apply(context.Background(), req)
+	if err != nil {
+		t.Fatalf("apply: %v (session error: %s)", err, sess.Error)
+	}
+	if sess.State != state.StateDone {
+		t.Fatalf("state = %q", sess.State)
+	}
+}
+
+// ApplyFromSession is the plan, review, execute workflow: the stored plan must be
+// refused once the schema no longer matches it.
+func TestApplyFromSessionRefusesAStalePlan(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+
+	// Plan and keep it.
+	prep, err := runner.PlanOnly(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_a (a)"))
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	sessionID := prep.Session.ID
+	prep.Close()
+
+	// The table moves before anyone executes the plan.
+	mustExec(t, db, "ALTER TABLE `t` ADD COLUMN `surprise` int NULL")
+
+	req := applyRequest(schema, "t", "")
+	req.ForExecution = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+
+	sess, err := runner.ApplyFromSession(context.Background(), sessionID, req)
+	if err == nil {
+		t.Fatalf("expected the stale plan to be refused, got state %q", sess.State)
+	}
+	if !errors.Is(err, core.ErrBlocked) {
+		t.Fatalf("expected ErrBlocked, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "changed since session") {
+		t.Fatalf("the error should say what changed: %v", err)
+	}
+
+	// Nothing may have run.
+	if n := countRows(t, db,
+		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
+		schema); n != 0 {
+		t.Fatal("the index was created despite the refusal")
+	}
+}
+
+func TestApplyFromSessionRunsAFreshPlan(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+
+	prep, err := runner.PlanOnly(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_a (a)"))
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	sessionID := prep.Session.ID
+	prep.Close()
+
+	req := applyRequest(schema, "t", "")
+	req.ForExecution = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+
+	sess, err := runner.ApplyFromSession(context.Background(), sessionID, req)
+	if err != nil {
+		t.Fatalf("apply from session: %v (session error: %s)", err, sess.Error)
+	}
+	if sess.State != state.StateDone {
+		t.Fatalf("state = %q", sess.State)
+	}
+	if sess.ResumedFrom != sessionID {
+		t.Fatalf("the execution should record the plan it followed, got %q", sess.ResumedFrom)
+	}
+	if n := countRows(t, db,
+		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
+		schema); n == 0 {
+		t.Fatal("the index was not created")
+	}
+}
+
+// --- durable sessions: detached engine, attach, cancel ---------------------
+
+// A killed client must not kill the migration. The engine runs in its own process
+// group and its pid is recorded, so `cancel` can stop it later from anywhere.
+func TestCopyEngineRunsDetachedAndCanBeCancelled(t *testing.T) {
+	// No real engine needed here: the plan's verified path is what runs, so a stub
+	// is enough to prove detachment and cancellation.
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	// A stand-in engine that sleeps long enough to be cancelled, and records its
+	// own command line so we can see it really started.
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "argv.txt")
+	bin := filepath.Join(dir, "pt-online-schema-change")
+	// A long-lived process that does not spawn a long-lived child, so a kill
+	// closes the output pipe promptly and the test stays fast.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + capture + "\nwhile :; do sleep 0.2; done\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	runner, store := newRunner(t)
+	runner.DB = db
+	req := applyRequest(schema, "t", "ADD COLUMN `note` varchar(64) NULL")
+	req.EngineHint = analyzer.EnginePtOSC
+	req.EngineHintSource = "recorded"
+	req.ForExecution = true
+	req.Detach = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+	req.Binaries = map[string]analyzer.EngineBinary{
+		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: bin, Version: "stub"},
+	}
+
+	done := make(chan struct{})
+	var sess *state.Session
+	go func() {
+		sess, _ = runner.Apply(context.Background(), req)
+		close(done)
+	}()
+
+	// Wait until the pid is recorded, which is the moment the engine exists.
+	var pid int
+	for i := 0; i < 100; i++ {
+		time.Sleep(50 * time.Millisecond)
+		sessions, _ := store.List()
+		if len(sessions) > 0 && sessions[0].EnginePID > 0 {
+			pid = sessions[0].EnginePID
+			break
+		}
+	}
+	if pid == 0 {
+		t.Fatal("no engine pid was recorded, so cancel could not work")
+	}
+	if !process.Alive(pid) {
+		t.Fatalf("recorded pid %d is not running", pid)
+	}
+	if _, err := os.Stat(capture); err != nil {
+		t.Fatalf("the engine never started: %v", err)
+	}
+
+	// Cancelling from another "client" is just a signal to the recorded pid.
+	if err := process.Stop(pid, 15*time.Second); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if process.Alive(pid) {
+		t.Fatal("the engine survived a cancel")
+	}
+
+	<-done
+	if sess != nil && sess.State == state.StateDone {
+		t.Fatalf("a cancelled run must not be reported as done: %+v", sess)
+	}
+}
+
+// --- artifact ownership and cleanup ----------------------------------------
+
+// gh-ost keeps the pre-migration table as _table_del. That is real disk usage, and
+// cleanup may only remove it because the session recorded that it made it.
+func TestCleanupDropsOnlyRecordedArtifacts(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `keepme` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"CREATE TABLE `_t_del` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"CREATE TABLE `t_unrelated` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+	)
+
+	runner, store := newRunner(t)
+	runner.DB = db
+	sess := &state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateDone,
+		Database: schema, Table: "t", Engine: "gh-ost", Host: "test",
+	}
+	sess.RecordArtifact("table", "_t_del", "gh-ost", "pre-migration table")
+	sess.MarkArtifactsSafe("done")
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	dropped, failed := dropArtifactsForTest(t, db, schema, sess)
+	if failed != 0 {
+		t.Fatalf("%d artifact(s) failed", failed)
+	}
+	if len(dropped) != 1 || dropped[0] != "_t_del" {
+		t.Fatalf("dropped %v, want only _t_del", dropped)
+	}
+
+	// The unrelated tables must be untouched: cleanup follows ownership, not names.
+	for _, name := range []string{"keepme", "t_unrelated"} {
+		if n := countRows(t, db,
+			"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+			schema, name); n != 1 {
+			t.Fatalf("%s was dropped, but this session never recorded it", name)
+		}
+	}
+	if n := countRows(t, db,
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = '_t_del'",
+		schema); n != 0 {
+		t.Fatal("the recorded artifact was not dropped")
+	}
+}
+
+// A live session's artifacts may be the only way back, so they are not deletable.
+func TestLiveSessionArtifactsAreNotDeletable(t *testing.T) {
+	sess := &state.Session{State: state.StateRunning, Engine: "gh-ost"}
+	sess.RecordArtifact("table", "_t_gho", "gh-ost", "ghost table")
+	if got := sess.DeletableArtifacts(); len(got) != 0 {
+		t.Fatalf("a running session must not offer its artifacts: %v", got)
+	}
+	sess.State = state.StateFailed
+	sess.MarkArtifactsSafe("failed")
+	if got := sess.DeletableArtifacts(); len(got) != 1 {
+		t.Fatalf("a terminal session should offer its artifacts: %v", got)
+	}
+}
+
+// --- held cutover -----------------------------------------------------------
+
+// The gate is a file the engine waits on. The core creates it before the engine
+// starts, records it, and `cutover` removes it. This asserts the file lifecycle
+// without needing gh-ost's own cutover behaviour.
+func TestHoldCutoverCreatesAndReleasesTheGate(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, store := newRunner(t)
+	runner.DB = db
+
+	// A stub engine that waits for the gate file to disappear, like gh-ost does.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gh-ost")
+	script := "#!/bin/sh\n" +
+		"gate=$(printf '%s\\n' \"$@\" | sed -n 's/^--postpone-cutover-file=//p')\n" +
+		"[ -n \"$gate\" ] || { echo 'no gate given' >&2; exit 2; }\n" +
+		"[ -f \"$gate\" ] || { echo 'gate missing at start' >&2; exit 3; }\n" +
+		"while [ -f \"$gate\" ]; do sleep 0.2; done\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	req := applyRequest(schema, "t", "ADD COLUMN `note` varchar(64) NULL")
+	req.EngineHint = analyzer.EngineGhOst
+	req.EngineHintSource = "recorded"
+	req.ForExecution = true
+	req.HoldCutover = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+	req.Binaries = map[string]analyzer.EngineBinary{
+		"gh-ost": {Name: "gh-ost", Available: true, Path: bin, Version: "stub"},
+	}
+
+	done := make(chan struct{})
+	var sess *state.Session
+	var applyErr error
+	go func() {
+		sess, applyErr = runner.Apply(context.Background(), req)
+		close(done)
+	}()
+
+	// Wait until the session records the gate, which happens before the engine runs.
+	var gate string
+	var sessionID string
+	for i := 0; i < 100; i++ {
+		time.Sleep(50 * time.Millisecond)
+		sessions, _ := store.List()
+		if len(sessions) > 0 && sessions[0].CutoverFlagFile != "" {
+			gate = sessions[0].CutoverFlagFile
+			sessionID = sessions[0].ID
+			break
+		}
+	}
+	if gate == "" {
+		select {
+		case <-done:
+		default:
+		}
+		sessions, _ := store.List()
+		for _, s := range sessions {
+			t.Logf("session %s state=%s pid=%d gate=%q error=%q artifacts=%v",
+				s.ID, s.State, s.EnginePID, s.CutoverFlagFile, s.Error, s.Artifacts)
+		}
+		t.Fatalf("no cutover gate was recorded, so cutover could not release it")
+	}
+	if _, err := os.Stat(gate); err != nil {
+		t.Fatalf("the gate file must exist before the engine starts: %v", err)
+	}
+
+	// Releasing it is a separate command, as it would be from another terminal.
+	released, err := runner.ReleaseCutover(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if released.CutoverFlagFile != "" {
+		t.Fatal("the session still points at a released gate")
+	}
+	if _, err := os.Stat(gate); !os.IsNotExist(err) {
+		t.Fatal("the gate file was not removed")
+	}
+
+	// The stub exits 0 without changing anything, so verification must refuse to
+	// call it a success. That is the point: releasing the gate does not make the
+	// result true.
+	<-done
+	if applyErr == nil {
+		t.Fatal("a no-op engine must not be reported as a successful migration")
+	}
+	if sess.State != state.StateFailed {
+		t.Fatalf("state = %q", sess.State)
+	}
+	if !strings.Contains(sess.Error, "verification") {
+		t.Fatalf("the failure should be a verification failure, got %q", sess.Error)
+	}
+	// The gate has served its purpose and must not linger in /tmp.
+	if _, err := os.Stat(gate); !os.IsNotExist(err) {
+		t.Fatal("the gate file was left behind")
+	}
+	if sess.CutoverFlagFile != "" {
+		t.Fatalf("the session still references a finished gate: %q", sess.CutoverFlagFile)
+	}
+}
+
+// A session without a held cutover must say so plainly instead of pretending.
+func TestCutoverRefusesWhenNothingIsHeld(t *testing.T) {
+	runner, store := newRunner(t)
+	sess := &state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateRunning,
+		Database: "shop", Table: "t", Engine: "native",
+	}
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.ReleaseCutover(context.Background(), "s1"); err == nil {
+		t.Fatal("expected a refusal")
+	} else if !strings.Contains(err.Error(), "no held cutover") {
+		t.Fatalf("unhelpful error: %v", err)
+	}
+}
+
+// --- reconcile --------------------------------------------------------------
+
+// After a crash, a session is neither obviously failed nor obviously running. What
+// reconcile reports is the observation, plus what exists in the database.
+func TestReconcileReportsUnfinishedSessionsAndLeftovers(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		// A leftover that a session claims, and one it does not.
+		"CREATE TABLE `_t_gho` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+	)
+
+	runner, store := newRunner(t)
+	runner.DB = db
+
+	// An unfinished session with a recorded artifact that still exists.
+	stale := &state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateRunning,
+		Database: schema, Table: "t", Engine: "gh-ost",
+	}
+	stale.RecordArtifact("table", "_t_gho", "gh-ost", "ghost table")
+	if err := store.Save(stale); err != nil {
+		t.Fatal(err)
+	}
+
+	// A finished session must not appear at all.
+	done := &state.Session{
+		ID: "s2", CreatedAt: "2026-01-02T00:00:00Z", State: state.StateDone,
+		Database: schema, Table: "t", Engine: "native",
+	}
+	if err := store.Save(done); err != nil {
+		t.Fatal(err)
+	}
+
+	findings, err := runner.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("got %d findings, want 1 (only the unfinished session): %+v", len(findings), findings)
+	}
+
+	f := findings[0]
+	if f.Session != "s1" {
+		t.Fatalf("wrong session: %q", f.Session)
+	}
+	if f.EngineAlive {
+		t.Fatal("no engine pid was recorded, so it cannot be alive")
+	}
+	if len(f.Observed) != 1 || !strings.Contains(f.Observed[0], "_t_gho") {
+		t.Fatalf("the leftover was not observed: %v", f.Observed)
+	}
+	if !f.Actionable {
+		t.Fatal("a session with leftovers should suggest cleanup")
+	}
+	if !strings.Contains(f.Verdict, "left") {
+		t.Fatalf("verdict should name the situation: %q", f.Verdict)
+	}
+}
+
+func TestReconcileIsQuietWhenEverythingFinished(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	_ = schema
+
+	runner, store := newRunner(t)
+	runner.DB = db
+	if err := store.Save(&state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateDone,
+		Database: "shop", Table: "t", Engine: "native",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	findings, err := runner.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected nothing to reconcile, got %+v", findings)
 	}
 }

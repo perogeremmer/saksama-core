@@ -1,0 +1,71 @@
+# Release configuration. One static binary per platform, no CGO, no runtime
+# dependencies, so "install one file" in the README is literally true.
+version: 2
+
+project_name: saksama
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: saksama
+    main: ./cmd/saksama
+    binary: saksama
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/perogeremmer/saksama-core/internal/cli.Version={{ .Version }}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - ARCHITECTURE.md
+      - COMMANDS.md
+      - LICENSE
+      - docs/CHECKS.md
+      - docs/COMPATIBILITY.md
+
+checksum:
+  name_template: checksums.txt
+
+sbom:
+  - DOCUMENT
+  - SPDX
+
+changelog:
+  use: github
+  groups:
+    - title: Features
+      regexp: '^feat'
+      order: 0
+    - title: Fixes
+      regexp: '^fix'
+      order: 1
+    - title: Documentation
+      regexp: '^docs'
+      order: 2
+    - title: Other
+      order: 999
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ### Verified combinations
+
+    See [docs/COMPATIBILITY.md](https://github.com/perogeremmer/saksama-core/blob/main/docs/COMPATIBILITY.md).
+    A row marked "yes" means a test in this repository ran against it.
+
+    ### Install
+
+    ```bash
+    go install github.com/perogeremmer/saksama-core/cmd/saksama@{{ .Tag }}
+    ```

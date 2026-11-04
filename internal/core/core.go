@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +49,11 @@ type Request struct {
 	// ForExecution is set by `apply`. A plan tolerates an unmeasured disk; an
 	// execution does not.
 	ForExecution bool
+	// ResumedFrom names the session whose plan this execution follows.
+	ResumedFrom string
+	// Detach runs the copy engine in its own process group, so a dropped SSH
+	// session does not kill it. `saksama cancel` stops it by recorded PID.
+	Detach bool
 
 	LockWaitTimeoutSeconds int
 	LongQueryThreshold     int64
@@ -224,6 +231,7 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		Warnings:          plan.Recommendation.Warnings,
 		Reasons:           plan.Recommendation.Reasons,
 		Actor:             req.Actor,
+		ResumedFrom:       req.ResumedFrom,
 	}
 	if raw, err := json.Marshal(plan); err == nil {
 		sess.Plan = raw
@@ -305,6 +313,22 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 			ErrBlocked, plan.Recommendation.Blockers, sess.ID)
 	}
 
+	// A held cutover only means something if the gate exists before the engine
+	// starts: the engine waits for the file to disappear, so the file must be there.
+	cutoverGate := ""
+	if req.HoldCutover {
+		cutoverGate = filepath.Join(os.TempDir(), fmt.Sprintf("saksama-%s.cutover", sess.ID))
+		if err := os.WriteFile(cutoverGate, []byte("held by session "+sess.ID+"\n"), 0o600); err != nil {
+			sess.State = state.StateFailed
+			sess.Error = fmt.Sprintf("cannot create the cutover gate: %v", err)
+			_ = r.Store.Save(sess)
+			return sess, errors.New(sess.Error)
+		}
+		sess.CutoverFlagFile = cutoverGate
+		sess.RecordArtifact("gate", cutoverGate, string(plan.Recommendation.Engine),
+			"cutover gate file; removing it releases the swap")
+	}
+
 	opts := engine.Options{
 		Schema:                    req.Database,
 		Table:                     req.Table,
@@ -317,6 +341,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		Force:                     req.Force,
 		DryRun:                    req.DryRun,
 		HoldCutover:               req.HoldCutover,
+		CutoverGate:               cutoverGate,
 		AllowArgvPassword:         req.AllowArgvPassword,
 		HasReplica:                prep.Snapshot.Runtime.ReplicaConfigured,
 	}
@@ -337,6 +362,10 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		_ = r.Store.Save(sess)
 		return sess, err
 	}
+	// Record the artifacts the chosen engine is about to create, before it runs, so
+	// ownership exists even if this process dies halfway.
+	recordExpectedArtifacts(sess, plan.Recommendation.Engine, req)
+
 	for _, s := range statements {
 		sess.Statements = append(sess.Statements, state.StatementRecord{
 			Description: s.Description, SQL: s.SQL, Algorithm: s.Algorithm, Lock: s.Lock,
@@ -390,6 +419,18 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	_ = r.Store.Save(sess)
 	r.emit(prep, events.TypePhaseStarted, map[string]any{"phase": "preflight"})
 
+	// The schema must still be the one that was planned and approved. Between the
+	// plan and this moment a deploy, another migration, or a colleague's ALTER can
+	// change it, and an ALTER written for the old shape is the wrong ALTER.
+	if err := r.revalidateSchema(ctx, prep, sess, req); err != nil {
+		sess.State = state.StateFailed
+		sess.Error = err.Error()
+		sess.LastSeq = prep.emitter.Seq()
+		_ = r.Store.Save(sess)
+		r.emit(prep, events.TypePhaseFailed, map[string]any{"phase": "preflight", "error": err.Error()})
+		return sess, err
+	}
+
 	if err := eng.Preflight(ctx); err != nil {
 		sess.State = state.StateFailed
 		sess.Error = err.Error()
@@ -402,6 +443,22 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 
 	sess.Phase = "ddl"
 	r.emit(prep, events.TypePhaseStarted, map[string]any{"phase": "ddl"})
+
+	// Detach is opt-in through the request, because a user watching a short
+	// migration in a terminal expects ctrl-c to reach it.
+	if req.Detach {
+		if d, ok := eng.(engine.Detachable); ok {
+			d.SetDetach(true, func(pid int) {
+				sess.EnginePID = pid
+				sess.LastSeq = prep.emitter.Seq()
+				_ = r.Store.Save(sess)
+				r.emit(prep, events.TypeEngineStarted, map[string]any{
+					"engine": sess.Engine, "pid": pid,
+					"note": "detached: closing this terminal will not stop the migration",
+				})
+			})
+		}
+	}
 
 	exec, execErr := eng.Execute(ctx, func(p engine.Progress) {
 		if req.Progress != nil {
@@ -425,6 +482,10 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	if execErr != nil {
 		sess.State = state.StateFailed
 		sess.Phase = "ddl"
+		// A failed run leaves the most debris, and the operator is most likely to
+		// want it gone. Still only what this session recorded.
+		cleanupGate(sess)
+		sess.MarkArtifactsSafe("leftover from a failed migration; the production table was not swapped")
 		sess.Error = execErr.Error()
 		sess.LastSeq = prep.emitter.Seq()
 		_ = r.Store.Save(sess)
@@ -450,6 +511,9 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	}
 
 	if verifyErr != nil || !allOK {
+		// The engine has exited, so the gate has served its purpose whatever the
+		// outcome. Leaving it in /tmp would make the next `cutover` look meaningful.
+		cleanupGate(sess)
 		sess.State = state.StateFailed
 		sess.Phase = "verify"
 		if verifyErr != nil {
@@ -464,9 +528,11 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	}
 	r.emit(prep, events.TypePhaseCompleted, map[string]any{"phase": "verify"})
 
+	cleanupGate(sess)
 	sess.State = state.StateDone
 	sess.Phase = "done"
 	sess.Error = ""
+	sess.MarkArtifactsSafe("leftover from a finished migration; safe once you have checked the table")
 	sess.LastSeq = prep.emitter.Seq()
 	r.emit(prep, events.TypeSessionCompleted, map[string]any{
 		"duration_ms": exec.FinishedAt.Sub(exec.StartedAt).Milliseconds(),
@@ -622,4 +688,152 @@ func binaryPath(bins map[string]analyzer.EngineBinary, name string) string {
 		return ""
 	}
 	return b.Path
+}
+
+// revalidateSchema compares the schema now against the schema the plan was built
+// from, and refuses on any difference the fingerprint tracks: columns, indexes,
+// foreign keys, engine, row format, charset.
+//
+// Volatile facts (row counts, sizes) are deliberately excluded, so a growing table
+// does not trip this.
+func (r *Runner) revalidateSchema(ctx context.Context, prep *Prepared, sess *state.Session, req Request) error {
+	current, err := introspect.NewCollector(r.DB, req.Database, req.Table).Table(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot re-read the schema before executing: %w", err)
+	}
+
+	now := analyzer.Fingerprint(current)
+	if now == prep.Plan.SchemaFingerprint {
+		return nil
+	}
+
+	sess.SchemaFingerprint = now
+	return fmt.Errorf(
+		"the schema changed after this plan was made (planned %s, now %s); "+
+			"someone altered %s.%s in between, so re-plan before executing",
+		shortFingerprint(prep.Plan.SchemaFingerprint), shortFingerprint(now),
+		req.Database, req.Table)
+}
+
+func shortFingerprint(f string) string {
+	if len(f) > 19 {
+		return f[:19]
+	}
+	return f
+}
+
+// ApplyFromSession executes a plan that was produced and reviewed earlier.
+//
+// This is the workflow the tool claims to support: plan, read it, decide, execute.
+// The schema must still be the one that plan describes, otherwise the ALTER was
+// written for a table that has since changed.
+func (r *Runner) ApplyFromSession(ctx context.Context, sessionID string, req Request) (*state.Session, error) {
+	stored, err := r.Store.Load(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if stored.State.Terminal() {
+		return nil, fmt.Errorf("session %s already ended as %q", sessionID, stored.State)
+	}
+	if stored.Blockers > 0 {
+		return nil, fmt.Errorf("%w: session %s was planned with %d blocker(s)", ErrBlocked, sessionID, stored.Blockers)
+	}
+
+	// Fill what the caller did not repeat.
+	if req.Database == "" {
+		req.Database = stored.Database
+	}
+	if req.Table == "" {
+		req.Table = stored.Table
+	}
+	if strings.TrimSpace(req.Alter) == "" {
+		req.Alter = stored.Alter
+	}
+	if req.Production != stored.Production && !req.Production {
+		req.Production = stored.Production
+	}
+
+	// Compare the stored plan against the schema as it is now, before doing
+	// anything. A plan is a statement about a shape, and shapes move.
+	current, err := introspect.NewCollector(r.DB, req.Database, req.Table).Table(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the table before executing session %s: %w", sessionID, err)
+	}
+	if now := analyzer.Fingerprint(current); now != stored.SchemaFingerprint {
+		return nil, fmt.Errorf(
+			"%w: the schema of %s.%s changed since session %s was planned (planned %s, now %s); re-plan first",
+			ErrBlocked, req.Database, req.Table, sessionID,
+			shortFingerprint(stored.SchemaFingerprint), shortFingerprint(now))
+	}
+
+	if req.EngineHint == "" && stored.Engine != "" && stored.Engine != "none" {
+		req.EngineHint = analyzer.Engine(stored.Engine)
+		req.EngineHintSource = "recorded"
+	}
+	req.ResumedFrom = sessionID
+
+	return r.Apply(ctx, req)
+}
+
+// recordExpectedArtifacts names what the engine will create, so cleanup has
+// ownership rather than a naming convention.
+func recordExpectedArtifacts(sess *state.Session, eng analyzer.Engine, req Request) {
+	t := sess.Table
+	switch eng {
+	case analyzer.EngineGhOst:
+		sess.RecordArtifact("table", "_"+t+"_gho", "gh-ost", "ghost table, present only while copying")
+		sess.RecordArtifact("table", "_"+t+"_del", "gh-ost", "pre-migration table, kept after cutover")
+		for _, suffix := range []string{"_ins", "_upd", "_del"} {
+			sess.RecordArtifact("trigger", "ghost_"+t+suffix, "gh-ost", "copy trigger")
+		}
+	case analyzer.EnginePtOSC:
+		sess.RecordArtifact("table", "_"+t+"_new", "pt-osc", "shadow table, present only while copying")
+		sess.RecordArtifact("table", "_"+t+"_old", "pt-osc", "pre-migration table during the swap")
+		for _, suffix := range []string{"_ins", "_upd", "_del"} {
+			sess.RecordArtifact("trigger", "pt_osc_"+req.Database+"_"+t+suffix, "pt-osc", "copy trigger")
+		}
+	}
+}
+
+// cleanupGate removes the cutover gate file once the engine has exited, so a
+// finished session leaves no stray file in /tmp.
+func cleanupGate(sess *state.Session) {
+	if sess.CutoverFlagFile == "" {
+		return
+	}
+	_ = os.Remove(sess.CutoverFlagFile)
+	sess.ForgetsArtifact("gate", sess.CutoverFlagFile)
+	sess.CutoverFlagFile = ""
+}
+
+// ReleaseCutover removes the gate so the engine may swap tables.
+//
+// This is the verification gate the product is built around: the copy is finished,
+// the operator has looked at the shadow table, and only then is the swap allowed.
+func (r *Runner) ReleaseCutover(ctx context.Context, sessionID string) (*state.Session, error) {
+	sess, err := r.Store.Load(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sess.CutoverFlagFile == "" {
+		return nil, fmt.Errorf("session %s has no held cutover (it was not started with --hold-cutover, or the gate is already released)", sessionID)
+	}
+	if err := os.Remove(sess.CutoverFlagFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("cannot release the cutover gate: %w", err)
+	}
+
+	// The engine notices the file is gone and swaps. Its process is the one that
+	// reports the outcome, so this command only records the decision.
+	sess.CutoverFlagFile = ""
+	sess.RecordArtifact("cutover", "released", sess.Engine, "cutover approved by "+actorOrUnknown(sess))
+	sess.ForgetsArtifact("gate", "")
+	sess.ForgetsArtifact("cutover", "")
+	return sess, r.Store.Save(sess)
+}
+
+func actorOrUnknown(sess *state.Session) string {
+	if sess.Actor != "" {
+		return sess.Actor
+	}
+	return "an operator"
 }
