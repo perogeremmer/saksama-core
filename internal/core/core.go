@@ -18,6 +18,7 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
 	"github.com/perogeremmer/saksama-core/internal/cred"
 	"github.com/perogeremmer/saksama-core/internal/engine"
+	"github.com/perogeremmer/saksama-core/internal/engine/copyeng"
 	"github.com/perogeremmer/saksama-core/internal/engine/native"
 	"github.com/perogeremmer/saksama-core/internal/events"
 	"github.com/perogeremmer/saksama-core/internal/introspect"
@@ -39,8 +40,10 @@ type Request struct {
 
 	Production bool
 	EngineHint analyzer.Engine
-	Force      bool
-	DryRun     bool
+	// EngineHintSource is "flag" or "recorded"; it only affects reporting.
+	EngineHintSource string
+	Force            bool
+	DryRun           bool
 
 	LockWaitTimeoutSeconds int
 	LongQueryThreshold     int64
@@ -51,6 +54,10 @@ type Request struct {
 	Progress func(engine.Progress)
 	// EventSink, when non-nil, receives every event in addition to the log file.
 	EventSink io.Writer
+	// HoldCutover asks the engine to pause before swapping, when it supports it.
+	HoldCutover bool
+	// AllowArgvPassword permits an argv password for engines with no option file.
+	AllowArgvPassword bool
 	// Actor records who ran this, for the audit trail.
 	Actor string
 	// Binaries are the engine executables found locally, for the engine matrix.
@@ -78,6 +85,15 @@ type Runner struct {
 // New creates a runner.
 func New(db *sql.DB, store *state.Store) *Runner {
 	return &Runner{DB: db, Store: store, Now: time.Now}
+}
+
+// now returns the clock, tolerating a Runner built as a struct literal. A nil
+// clock must not panic in the middle of a migration setup.
+func (r *Runner) now() time.Time {
+	if r.Now == nil {
+		return time.Now()
+	}
+	return r.Now()
 }
 
 // Prepared is the shared result of the observe-and-analyze phase.
@@ -146,19 +162,22 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 	}
 
 	input := analyzer.Input{
-		Server:       snap.Server,
-		Table:        snap.Table,
-		Ops:          ops,
-		RawAlter:     strings.TrimSpace(req.Alter),
-		Algorithm:    alter.Algorithm,
-		Lock:         alter.Lock,
-		Host:         req.Conn.Describe(),
-		Production:   req.Production,
-		SchemaSource: "live",
-		Ignored:      ignored,
-		EngineHint:   req.EngineHint,
-		Live:         liveStateFrom(snap, duplicates),
-		Binaries:     req.Binaries,
+		Server:           snap.Server,
+		Table:            snap.Table,
+		Ops:              ops,
+		RawAlter:         strings.TrimSpace(req.Alter),
+		Algorithm:        alter.Algorithm,
+		Lock:             alter.Lock,
+		Host:             req.Conn.Describe(),
+		DBUser:           req.Conn.User,
+		DBPort:           req.Conn.Port,
+		Production:       req.Production,
+		SchemaSource:     "live",
+		Ignored:          ignored,
+		EngineHint:       req.EngineHint,
+		EngineHintSource: req.EngineHintSource,
+		Live:             liveStateFrom(snap, duplicates),
+		Binaries:         req.Binaries,
 	}
 
 	plan := analyzer.Analyze(input)
@@ -170,7 +189,7 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 
 	sess := &state.Session{
 		ID:                id,
-		CreatedAt:         r.Now().UTC().Format(time.RFC3339),
+		CreatedAt:         r.now().UTC().Format(time.RFC3339),
 		State:             state.StatePlanned,
 		Host:              req.Conn.Describe(),
 		Database:          req.Database,
@@ -255,18 +274,6 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 			ErrBlocked, plan.Recommendation.Blockers, sess.ID)
 	}
 
-	if plan.Recommendation.Engine != analyzer.EngineNative {
-		r.emit(prep, events.TypePlanRejected, map[string]any{
-			"engine": plan.Recommendation.Engine,
-			"reason": "only the native execution path is implemented in this build",
-		})
-		sess.State = state.StateBlocked
-		sess.Error = fmt.Sprintf("engine %q is recommended but not implemented in this build", plan.Recommendation.Engine)
-		sess.LastSeq = prep.emitter.Seq()
-		_ = r.Store.Save(sess)
-		return sess, fmt.Errorf("%w: %s", ErrBlocked, sess.Error)
-	}
-
 	opts := engine.Options{
 		Schema:                    req.Database,
 		Table:                     req.Table,
@@ -278,9 +285,19 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		LongQueryThresholdSeconds: int(req.LongQueryThreshold),
 		Force:                     req.Force,
 		DryRun:                    req.DryRun,
+		HoldCutover:               req.HoldCutover,
+		AllowArgvPassword:         req.AllowArgvPassword,
+		HasReplica:                prep.Snapshot.Runtime.ReplicaConfigured,
 	}
 
-	eng := native.New(r.DB, opts)
+	eng, err := r.buildEngine(plan.Recommendation.Engine, req, opts)
+	if err != nil {
+		sess.State = state.StateFailed
+		sess.Error = err.Error()
+		sess.LastSeq = prep.emitter.Seq()
+		_ = r.Store.Save(sess)
+		return sess, err
+	}
 	statements, err := eng.Statements()
 	if err != nil {
 		sess.State = state.StateFailed
@@ -312,7 +329,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 			_ = r.Store.Save(sess)
 			return sess, err
 		}
-		approval.At = r.Now().UTC().Format(time.RFC3339)
+		approval.At = r.now().UTC().Format(time.RFC3339)
 		approval.PlanFingerprint = plan.SchemaFingerprint
 		sess.Approvals = append(sess.Approvals, approval)
 		r.emit(prep, events.TypeApprovalGranted, map[string]any{
@@ -520,4 +537,22 @@ func alterBody(s string) string {
 		return strings.TrimSpace(t[len("alter table"):])
 	}
 	return t
+}
+
+// buildEngine returns the adapter for the chosen engine.
+func (r *Runner) buildEngine(name analyzer.Engine, req Request, opts engine.Options) (engine.Engine, error) {
+	conn := copyeng.Conn{
+		Host: req.Conn.Host, Port: req.Conn.Port, User: req.Conn.User,
+		Password: req.Conn.Password, Socket: req.Conn.Socket,
+	}
+
+	switch name {
+	case analyzer.EngineNative:
+		return native.New(r.DB, opts), nil
+	case analyzer.EngineGhOst:
+		return copyeng.New(copyeng.GhOst(), r.DB, conn, opts, nil), nil
+	case analyzer.EnginePtOSC:
+		return copyeng.New(copyeng.PtOSC(), r.DB, conn, opts, nil), nil
+	}
+	return nil, fmt.Errorf("%w: no adapter for engine %q", ErrBlocked, name)
 }

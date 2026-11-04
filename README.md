@@ -37,6 +37,59 @@ The copy engines already exist and they are good. What is missing is the layer a
 
 Saksama Core is **not** a new copy engine and **not** a thin gh-ost wrapper. It owns the decision layer; engines stay interchangeable workers.
 
+## You decide, we execute: `saksama engine`
+
+Saksama is a wrapper. It recommends, you choose, and then **it runs the engine for you** — with the exact argv shown to you first, progress polled from the database, and the result verified against `information_schema`.
+
+```
+$ saksama advise --live -h db.prod -d shop -t orders -a "MODIFY COLUMN status varchar(64) NOT NULL"
+
+NATIVE    UNSUITABLE
+  [FAIL] no table rebuild required          these operations rebuild the table: modify_column
+GH-OST    UNSUITABLE
+  [FAIL] no foreign keys in or out          2 constraint(s) involve this table
+PT-OSC    SUITABLE  (ready)
+  [  ok] primary or unique key              the table can be chunked
+  note  2 outgoing foreign key(s): pt-osc 3.x handles these natively
+
+  analyzer recommends  pt-osc
+  recorded choice      none, so the recommendation would be used
+  decide with          saksama engine set <native|gh-ost|pt-osc>
+```
+
+Record the decision, then apply:
+
+```
+$ saksama engine set pt-osc -d shop -t orders --note "FK must be copied"
+engine set to pt-osc for shop.orders
+
+$ saksama apply -h db.prod -d shop -t orders -a "MODIFY COLUMN status varchar(64) NOT NULL"
+  [ 42.0%] copying 24.8M / 59.0M rows
+  [100.0%] engine finished
+SESSION    s3
+STATE      done
+ENGINE     pt-osc
+
+STATEMENTS
+  1. pt-online-schema-change \
+  --alter "MODIFY COLUMN status varchar (64) NOT NULL" \
+  --chunk-size 1000 --max-load Threads_running=50 --critical-load Threads_running=100 \
+  --print D=shop,t=orders,h=db.prod,P=3306,u=deployer
+
+VERIFICATION
+  [ok  ] column_exists  status  column status present
+  [ok  ] foreign_key_present  fk_orders_spot  constraint fk_orders_spot intact
+```
+
+```
+saksama engine list                      engines, versions found locally, recorded choices
+saksama engine set <name> [-d db -t t]   record a decision (default or one table)
+saksama engine show [-d db -t t]         what apply would use right now
+saksama engine clear [-d db -t t]        forget it
+```
+
+Precedence: `--engine` flag → recorded choice for `db.table` → recorded default → analyzer recommendation. The analyzer's own pick always stays visible, so an override is never silent.
+
 ## Which tool fits? `saksama advise`
 
 The most common question is not "run this" — it is *"is this a gh-ost table or a Percona Toolkit table?"* That question deserves its own command, and it deserves an answer even when this build cannot execute the engine.
@@ -271,11 +324,13 @@ Stated plainly, because a safety tool that overpromises is worse than no tool:
 ## Engine ladder
 
 ```
-1. native    MySQL DDL with verified capability for the target version   [implemented]
-2. gh-ost    rebuild, single-column key, no foreign keys (MIT)           [planned]
-3. pt-osc    composite keys / legacy servers (GPL-2, never bundled)      [planned]
-4. refuse    no engine satisfies the safety policy                       [implemented]
+1. native    MySQL DDL with verified capability for the target version
+2. gh-ost    rebuild, single-column key, no foreign keys (MIT)
+3. pt-osc    composite keys, foreign keys, legacy servers (GPL-2, never bundled)
+4. refuse    no engine satisfies the safety policy
 ```
+
+All three are executable. The analyzer walks this ladder, stops at the first engine whose requirements all pass, and applies your recorded choice on top.
 
 MySQL Clone Plugin is deliberately **not** in the ladder: it clones an instance, not a table.
 
@@ -287,7 +342,10 @@ MySQL Clone Plugin is deliberately **not** in the ladder: it clones an instance,
 | `SHOW CREATE TABLE` parser incl. FK actions | ✅ |
 | Version-gated capability matrix | ✅ |
 | Checks catalog (A/B/C/D/E/R, 34 rules) | ✅ |
-| Engine suitability matrix (`advise`, native/gh-ost/pt-osc) | ✅ |
+| Engine suitability matrix with evidence, pros and cons (`advise`) | ✅ |
+| Operator-chosen engine, recorded and honoured (`engine set/show/list/clear`) | ✅ |
+| gh-ost adapter (argv, subprocess, DB-polled progress, verification) | ✅ |
+| pt-osc adapter (same, with `--defaults-file` so no password in argv) | ✅ |
 | Installed-binary probe with version detection | ✅ |
 | Offline plan, plan card, `--json`, exit codes | ✅ |
 | Live introspection (`information_schema`, `performance_schema`) | ✅ |
@@ -295,11 +353,12 @@ MySQL Clone Plugin is deliberately **not** in the ladder: it clones an instance,
 | Session state, table lock, atomic persistence | ✅ |
 | Event contract, redaction, audit export | ✅ |
 | Verified post-execution checks via `information_schema` | ✅ |
-| gh-ost supervision, hold-cutover, cancel | 🚧 phase 3 |
+| Cut-over pause and cancel for copy engines | 🚧 phase 3 |
 | TUI (Bubble Tea) | 🚧 phase 4 |
-| pt-osc adapter | 🚧 phase 5 |
 
-Commands that are not implemented yet (`apply --engine gh-ost`, `cutover`, `cancel`, `recover`, `daemon`, `attach`) exit `2` with an explicit message. They are never stubbed into something that looks like it works.
+Commands that are not implemented yet (`cutover`, `cancel`, `recover`, `daemon`, `attach`) exit `2` with an explicit message. They are never stubbed into something that looks like it works.
+
+Engine credentials: pt-osc reads a temporary `0600` option file, so its password never reaches argv. gh-ost has no option-file support, so a password must go in argv — that is refused unless you pass `--allow-argv-password`, because a password in argv is visible in `ps`.
 
 ## Documentation
 
@@ -315,13 +374,13 @@ Commands that are not implemented yet (`apply --engine gh-ost`, `cutover`, `canc
 ## Development
 
 ```bash
-make test               # 138 unit tests
+make test               # 160 unit tests
 make lint               # go vet + gofmt check
 make cover              # per-package coverage
 make demo               # two plan cards side by side, no database needed
 
 make integration-up     # disposable MySQL 8.0 in docker on :33306
-make test-integration   # 22 tests against a real server
+make test-integration   # 23 tests against a real server
 make integration-down
 ```
 

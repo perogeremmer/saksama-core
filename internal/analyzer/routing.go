@@ -7,123 +7,206 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/model"
 )
 
-// routingChecks emits blockers that come from the engine decision itself rather
-// than from a single rule.
-func routingChecks(in Input, anyRebuild bool, projected model.Table) []Check {
-	if !anyRebuild {
-		return nil
+// ladder is the order engines are tried in when nothing has been chosen.
+//
+// Cheapest and least invasive first: a native ALTER copies nothing, gh-ost is a
+// single MIT binary, pt-osc needs Perl and is GPL-2.
+var ladder = []Engine{EngineNative, EngineGhOst, EnginePtOSC}
+
+// route picks the engine using the suitability matrix, then applies the
+// operator's override.
+//
+// Routing deliberately does not re-implement engine limitations. If gh-ost
+// cannot handle foreign keys, that lives in gh-ost's requirements, not in a
+// separate policy rule that would drift out of sync.
+func route(in Input, assessments []EngineAssessment, anyRebuild, anyNative, anyBlocked bool, projected model.Table) Recommendation {
+	rec := Recommendation{Engine: EngineNone, EngineSource: "recommendation"}
+	_ = anyRebuild
+	_ = anyNative
+
+	if anyBlocked {
+		rec.Reasons = append(rec.Reasons, "an operation is unsupported or unsafe")
 	}
+
+	// 1. What would the rules pick on their own?
+	for _, want := range ladder {
+		if a, ok := findAssessment(assessments, want); ok && a.Verdict == VerdictSuitable {
+			rec.Engine = want
+			break
+		}
+	}
+	rec.Analyzer = rec.Engine
+
+	switch rec.Engine {
+	case EngineNative:
+		rec.Reasons = append(rec.Reasons,
+			"every operation has a verified native DDL rule; no table copy is needed")
+		if allInstant(in.Ops) {
+			rec.Reasons = append(rec.Reasons, "all changes are metadata-only INSTANT operations")
+		}
+	case EngineGhOst:
+		rec.Reasons = append(rec.Reasons,
+			"the change needs a table rebuild, and gh-ost is the cheapest engine that fits this table")
+	case EnginePtOSC:
+		rec.Reasons = append(rec.Reasons,
+			"the change needs a table rebuild; gh-ost does not fit this table, and pt-osc finds it cheap enough")
+	}
+
+	// 2. The operator's decision wins, even when it disagrees.
+	if in.EngineHint != "" {
+		source := in.EngineHintSource
+		if source == "" {
+			source = "flag"
+		}
+		rec.EngineSource = source
+		if in.EngineHint != rec.Analyzer {
+			rec.Reasons = append(rec.Reasons, fmt.Sprintf(
+				"engine overridden to %s by %s (analyzer would have picked %s)",
+				in.EngineHint, source, rec.Analyzer))
+		}
+		rec.Engine = in.EngineHint
+	}
+
+	// 3. Fallbacks are informational only; nothing is used implicitly.
+	if rec.Engine != EngineNone {
+		for _, want := range ladder {
+			if want == rec.Engine {
+				continue
+			}
+			if a, ok := findAssessment(assessments, want); ok && a.Verdict == VerdictSuitable {
+				rec.Fallbacks = append(rec.Fallbacks, want)
+			}
+		}
+	}
+
+	return rec
+}
+
+// engineChecks turns the routing decision into blockers the operator can act on.
+func engineChecks(assessments []EngineAssessment, rec Recommendation) []Check {
 	var out []Check
 
-	pk, hasPK := projected.PrimaryKey()
-	if !hasPK {
+	effective, ok := findAssessment(assessments, rec.Engine)
+	if rec.Engine == EngineNone {
+		var lines []string
+		for _, a := range assessments {
+			if a.Verdict == VerdictSuitable {
+				continue
+			}
+			if unmet := unmetRequirements(a); len(unmet) > 0 {
+				lines = append(lines, fmt.Sprintf("%s: %s", a.Engine, strings.Join(unmet, ", ")))
+			}
+		}
 		out = append(out, Check{
-			ID: chkCopyEngineNoPK, Severity: SeverityBlocker,
-			Title:       "a copy engine is required but the table has no primary key",
-			Detail:      "this ALTER needs a table rebuild, and both gh-ost and pt-online-schema-change require a primary or unique key to chunk safely",
-			Remediation: "add a primary key in a separate migration first, then run this change",
+			ID: chkNoEngineFits, Severity: SeverityBlocker,
+			Title:       "no engine can perform this change",
+			Detail:      "every candidate fails at least one requirement. " + strings.Join(lines, "; "),
+			Remediation: "resolve the requirement above (add a key, remove the conflicting constraint, or rewrite the change) and plan again",
 		})
-	} else if len(pk.Parts) > 1 {
+		return out
+	}
+
+	if ok && effective.Verdict != VerdictSuitable {
 		out = append(out, Check{
-			ID: chkCompositePKNoGhOst, Severity: SeverityBlocker,
-			Title:       "a copy engine is required but the primary key is composite",
-			Detail:      "gh-ost supports single-column keys only, and the pt-online-schema-change adapter is not enabled in v1",
-			Remediation: "enable the pt-osc adapter, add a surrogate single-column key, or rewrite the change as a native operation",
+			ID: chkChosenEngineUnsuitable, Severity: SeverityBlocker,
+			Title: fmt.Sprintf("%s cannot perform this change", effective.Engine),
+			Detail: fmt.Sprintf("unmet requirement(s): %s",
+				strings.Join(unmetRequirements(effective), ", ")),
+			Remediation: fmt.Sprintf("choose another engine (see `saksama advise`), or clear the recorded choice with `saksama engine clear`"),
 		})
 	}
 
-	if fks := projected.AllForeignKeys(); len(fks) > 0 {
+	// Engine-specific operational caveats that are not go/no-go decisions.
+	if ok && effective.Verdict == VerdictSuitable {
+		if n := len(effectiveOwner(assessments, rec)); n > 0 {
+			_ = n
+		}
+	}
+
+	if ok && effective.Verdict == VerdictSuitable && !effective.Installed {
 		out = append(out, Check{
-			ID: chkFKCopyBlocked, Severity: SeverityBlocker,
-			Title: "no available copy engine supports this table's foreign keys",
-			Detail: fmt.Sprintf("%s has %d foreign key constraint(s) in or out; gh-ost does not support foreign keys, "+
-				"and the pt-online-schema-change adapter is not enabled in this build", projected.Name, len(fks)),
-			Remediation: "use a verified native operation, enable the pt-osc adapter, or run a reviewed maintenance procedure; " +
-				"Saksama will not drop and recreate constraints automatically",
+			ID: chkEngineNotInstalled, Severity: SeverityBlocker,
+			Title:       fmt.Sprintf("%s is not installed on this machine", effective.Engine),
+			Detail:      "the engine fits this change, but Saksama cannot start it",
+			Remediation: effective.Install,
 		})
 	}
 
 	return out
 }
 
-// route applies the engine ladder from docs/DECISIONS.md D2.
-func route(in Input, anyRebuild, anyNative, anyBlocked bool, projected model.Table) Recommendation {
-	rec := Recommendation{Engine: EngineNone}
+// engineWarnings reports caveats that matter when a copy engine is running but
+// do not change the go/no-go decision.
+func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation) []Check {
+	var out []Check
 
-	switch {
-	case anyBlocked:
-		rec.Reasons = append(rec.Reasons, "an operation is unsupported or unsafe")
+	effective, ok := findAssessment(assessments, rec.Engine)
+	if !ok || effective.Verdict != VerdictSuitable {
+		return nil
+	}
 
-	case anyRebuild:
-		pk, hasPK := projected.PrimaryKey()
-		switch {
-		case !hasPK:
-			rec.Reasons = append(rec.Reasons, "rebuild required but no primary key is available for chunking")
-		case len(pk.Parts) > 1:
-			rec.Reasons = append(rec.Reasons, "rebuild required with a composite primary key; gh-ost cannot chunk it")
-		case len(projected.AllForeignKeys()) > 0:
-			rec.Reasons = append(rec.Reasons, "rebuild required on a table with foreign keys; copy engines are blocked in v1")
-		default:
-			rec.Engine = EngineGhOst
-			rec.Reasons = append(rec.Reasons,
-				"at least one operation requires a table rebuild, so a copy engine is needed",
-				"the table has a single-column primary key and no foreign keys, which satisfies gh-ost preconditions")
-			if in.Server.IsManaged() {
-				rec.Reasons = append(rec.Reasons,
-					"managed server detected: gh-ost may need additional privileges (for example rds_superuser)")
-			}
-			if !hasReplicaHint(in) {
-				rec.Reasons = append(rec.Reasons,
-					"no replica was described, so gh-ost must run with --allow-on-master; throttling will be conservative")
-			}
-		}
+	if rec.Engine == EnginePtOSC && len(in.Table.ReferencedBy) > 0 {
+		out = append(out, Check{
+			ID: "R4", Severity: SeverityWarn,
+			Title:       "incoming foreign keys need an explicit strategy",
+			Detail:      fmt.Sprintf("%d constraint(s) on other tables reference this table", len(in.Table.ReferencedBy)),
+			Remediation: "pt-osc needs --alter-foreign-keys-method (auto is used here); rows in those tables are briefly rewritten, so schedule accordingly",
+		})
+	}
 
-	case anyNative:
-		rec.Engine = EngineNative
-		rec.Reasons = append(rec.Reasons,
-			"every operation is supported by a verified native DDL rule; no table copy is needed")
-		switch {
-		case allInstant(in.Ops):
-			rec.Reasons = append(rec.Reasons, "all operations are metadata-only INSTANT changes")
-		default:
-			rec.Reasons = append(rec.Reasons, "the operation is in-place and permits concurrent DML")
+	// Choosing a copy engine where native would do is legal but expensive: it
+	// copies the whole table and doubles the disk for nothing. Say so once.
+	if rec.Engine != EngineNative && rec.Engine != EngineNone {
+		if native, ok := findAssessment(assessments, EngineNative); ok && native.Verdict == VerdictSuitable {
+			out = append(out, Check{
+				ID: "R7", Severity: SeverityWarn,
+				Title:       "a copy engine was chosen although native would suffice",
+				Detail:      fmt.Sprintf("%s was chosen, but MySQL can do this change in place", rec.Engine),
+				Remediation: "native avoids copying the table and needs no extra disk; keep the copy engine only if you want its throttling or cut-over pause",
+			})
 		}
 	}
 
-	if in.EngineHint != "" && in.EngineHint != rec.Engine {
-		rec.Reasons = append(rec.Reasons, fmt.Sprintf("user override requested %s", in.EngineHint))
-		rec.Engine = in.EngineHint
+	if rec.Engine == EngineGhOst && in.Server.IsManaged() {
+		out = append(out, Check{
+			ID: "R5", Severity: SeverityWarn,
+			Title:       "managed server may refuse gh-ost",
+			Detail:      "gh-ost needs privileges a managed service may not grant",
+			Remediation: "on RDS this usually needs rds_superuser; otherwise use pt-osc on the same table",
+		})
 	}
 
-	// Execution capability of this build, independent of safety.
-	rec.Executable, rec.ExecutableReason = executableHere(rec.Engine)
-
-	// Fallbacks are informational; they are never used implicitly.
-	if rec.Engine == EngineNative {
-		rec.Fallbacks = []Engine{EngineGhOst}
-	}
-	if rec.Engine == EngineGhOst {
-		rec.Fallbacks = []Engine{EnginePtOSC}
+	if rec.Engine == EngineGhOst && in.Live != nil && !in.Live.ReplicaConfigured {
+		out = append(out, Check{
+			ID: "R6", Severity: SeverityWarn,
+			Title:       "no replica: the copy load lands on the primary",
+			Detail:      "gh-ost will run with --allow-on-master",
+			Remediation: "schedule a quiet window, or add a replica so the copy can read from it",
+		})
 	}
 
-	return rec
+	return out
 }
 
-// executableHere reports whether this build actually implements the engine.
-//
-// Only the native path exists today. Saying "recommended: gh-ost" while being
-// unable to run gh-ost would be the most damaging kind of dishonesty: the plan
-// card would read as ready and `apply` would then refuse.
-func executableHere(e Engine) (bool, string) {
-	switch e {
-	case EngineNative:
-		return true, ""
-	case EngineGhOst:
-		return false, "the gh-ost adapter is not implemented in this build"
-	case EnginePtOSC:
-		return false, "the pt-online-schema-change adapter is not implemented in this build"
+func effectiveOwner([]EngineAssessment, Recommendation) []string { return nil }
+
+func findAssessment(all []EngineAssessment, e Engine) (EngineAssessment, bool) {
+	for _, a := range all {
+		if a.Engine == e {
+			return a, true
+		}
 	}
-	return false, "no execution path was selected"
+	return EngineAssessment{}, false
+}
+
+func unmetRequirements(a EngineAssessment) []string {
+	var out []string
+	for _, r := range a.Requirements {
+		if !r.Met {
+			out = append(out, r.Name)
+		}
+	}
+	return out
 }
 
 func allInstant(ops []model.Op) bool {
@@ -137,14 +220,11 @@ func allInstant(ops []model.Op) bool {
 	return true
 }
 
-func hasReplicaHint(Input) bool { return false }
-
-// estimateDuration returns a range plus confidence. It never returns a single
-// authoritative number, because a single number is a lie (PRD §14).
+// estimateDuration still needs to know whether Native was chosen.
 func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate {
 	size := tbl.SizeBytes()
 	if size == 0 && tbl.Rows > 0 {
-		size = tbl.Rows * 500 // rough row-width assumption
+		size = tbl.Rows * 500
 	}
 	if size == 0 {
 		return DurationEstimate{
@@ -161,8 +241,8 @@ func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate
 				Basis: "INSTANT operations only modify metadata; the table is not scanned or rebuilt",
 			}
 		}
-		from := int(size / (100 << 20)) // 100 MB/s
-		to := int(size / (20 << 20))    // 20 MB/s
+		from := int(size / (100 << 20))
+		to := int(size / (20 << 20))
 		if from < 2 {
 			from = 2
 		}
@@ -187,6 +267,20 @@ func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate
 			FromSeconds: from, ToSeconds: to, Confidence: "low",
 			Basis: "row-by-row copy plus trigger overhead; throughput assumed between 2 and 20 MB/s and actual speed depends on load and throttling",
 		}
+
+	case EnginePtOSC:
+		from := int(size / (15 << 20))
+		to := int(size / (2 << 20))
+		if from < 30 {
+			from = 30
+		}
+		if to < from {
+			to = from
+		}
+		return DurationEstimate{
+			FromSeconds: from, ToSeconds: to, Confidence: "low",
+			Basis: "row-by-row copy driven by triggers; throughput assumed between 2 and 15 MB/s and actual speed depends on load and throttling",
+		}
 	}
 
 	return DurationEstimate{
@@ -206,10 +300,10 @@ func estimateDisk(tbl model.Table, engine Engine) DiskEstimate {
 			}
 		}
 		return DiskEstimate{RequiredBytes: 0, Note: "metadata-only change; no measurable disk growth"}
-	case EngineGhOst:
+	case EngineGhOst, EnginePtOSC:
 		return DiskEstimate{
 			RequiredBytes: size * 2,
-			Note:          "the ghost table plus the retained old table peak at roughly twice the table size",
+			Note:          "the copy table plus the retained old table peak at roughly twice the table size",
 		}
 	}
 	return DiskEstimate{RequiredBytes: 0, Note: "no execution is planned"}
@@ -229,6 +323,12 @@ func recoveryFor(engine Engine) Recovery {
 			DuringExecution: "cancel stops the engine; the production table is untouched, artifacts are cleaned up",
 			AfterSuccess:    "no automatic data rollback: after cutover, new writes live only in the new table",
 			HoldCutover:     true,
+		}
+	case EnginePtOSC:
+		return Recovery{
+			BeforeExecution: "cancel stops the engine; the production table is untouched",
+			DuringExecution: "cancel stops the engine; the production table is untouched, artifacts are cleaned up",
+			AfterSuccess:    "no automatic data rollback: pt-osc swaps as soon as the copy finishes, so writes after that point live only in the new table",
 		}
 	}
 	return Recovery{BeforeExecution: "no execution is planned"}
@@ -269,22 +369,9 @@ func verifications(in Input, projected model.Table) []Verification {
 		}
 	}
 
-	// Always assert that constraints survived untouched.
 	for _, fk := range projected.AllForeignKeys() {
 		add(Verification{Kind: "foreign_key_present", Name: fk.Name})
 	}
 
 	return out
-}
-
-func engineLabel(e Engine) string {
-	switch e {
-	case EngineNative:
-		return "native MySQL DDL"
-	case EngineGhOst:
-		return "gh-ost"
-	case EnginePtOSC:
-		return "pt-online-schema-change"
-	}
-	return strings.ToLower(string(e))
 }

@@ -50,9 +50,9 @@ const (
 	chkVersionUnparseable = "E3"
 
 	// Engine routing.
-	chkCopyEngineNoPK     = "R1"
-	chkCompositePKNoGhOst = "R2"
-	chkFKCopyBlocked      = "R3"
+	chkNoEngineFits           = "R1"
+	chkChosenEngineUnsuitable = "R2"
+	chkEngineNotInstalled     = "R3"
 )
 
 // checksCapability reports operations the analyzer could not classify.

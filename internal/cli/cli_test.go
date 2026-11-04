@@ -63,10 +63,15 @@ func TestPlanSimpleAddIndexSucceeds(t *testing.T) {
 }
 
 func TestPlanBlockedReturnsNonZeroExit(t *testing.T) {
-	ddl := writeTemp(t, "orders.sql", testDDLWithFK)
+	// A TEXT index without a prefix cannot be created by any engine, so this is a
+	// genuine refusal rather than an engine choice.
+	ddl := writeTemp(t, "t.sql",
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `note` text, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+
 	code, out, _ := run(t, "plan",
 		"--ddl", ddl,
-		"--alter", "MODIFY COLUMN status varchar(64) NOT NULL",
+		"--alter", "ADD INDEX ix_note (note)",
 		"--mysql-version", "8.0.36",
 		"--host", "db.prod")
 	if code != ExitBlocked {
@@ -74,6 +79,23 @@ func TestPlanBlockedReturnsNonZeroExit(t *testing.T) {
 	}
 	if !strings.Contains(out, "RESULT     refused") {
 		t.Fatalf("expected refused result:\n%s", out)
+	}
+}
+
+// A table with foreign keys is not a dead end: pt-osc handles them, so the plan
+// must name that engine instead of refusing.
+func TestPlanWithForeignKeysSelectsPtOSC(t *testing.T) {
+	ddl := writeTemp(t, "orders.sql", testDDLWithFK)
+	code, out, _ := run(t, "plan",
+		"--ddl", ddl,
+		"--alter", "MODIFY COLUMN status varchar(64) NOT NULL",
+		"--mysql-version", "8.0.36",
+		"--host", "db.prod")
+	if code != ExitOK {
+		t.Fatalf("got exit %d, want 0:\n%s", code, out)
+	}
+	if !strings.Contains(out, "RECOMMEND  pt-osc") {
+		t.Fatalf("expected pt-osc:\n%s", out)
 	}
 }
 
@@ -267,8 +289,11 @@ func TestEngineOverrideIsReported(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("got exit %d", code)
 	}
-	if !strings.Contains(out, "user override requested gh-ost") {
+	if !strings.Contains(out, "overridden to gh-ost by flag") {
 		t.Fatalf("override not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "analyzer would have picked native") {
+		t.Fatalf("the analyzer's own pick must stay visible:\n%s", out)
 	}
 }
 
@@ -409,8 +434,8 @@ func TestAdviseOfflineShowsAllThreeEngines(t *testing.T) {
 		"--alter", "MODIFY COLUMN status varchar(64) NOT NULL",
 		"--mysql-version", "8.0.36",
 		"--no-probe")
-	if code != ExitBlocked {
-		t.Fatalf("exit %d, want %d (blocked)\nstderr: %s", code, ExitBlocked, errOut)
+	if code != ExitOK {
+		t.Fatalf("exit %d, want 0 (pt-osc fits)\nstderr: %s", code, errOut)
 	}
 	for _, want := range []string{"ENGINE SUITABILITY", "NATIVE", "GH-OST", "PT-OSC", "VERDICT"} {
 		if !strings.Contains(out, want) {
@@ -434,8 +459,11 @@ func TestAdviseNativeSuitableExitsZero(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("exit %d, want 0:\n%s", code, out)
 	}
-	if !strings.Contains(out, "recommended: native (executable now)") {
+	if !strings.Contains(out, "analyzer recommends  native") {
 		t.Fatalf("unexpected verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "NATIVE    SUITABLE") {
+		t.Fatalf("native should be SUITABLE:\n%s", out)
 	}
 }
 
@@ -463,11 +491,18 @@ func TestAdviseJSONIncludesEngineMatrix(t *testing.T) {
 	if payload["recommended"] != "gh-ost" {
 		t.Fatalf("recommended = %v", payload["recommended"])
 	}
+	if _, ok := payload["table_facts"]; !ok {
+		t.Fatal("advice must carry the schema facts it is based on")
+	}
 
-	// The recommendation must admit it cannot run here.
-	rec, _ := payload["recommendation"].(map[string]any)
-	if rec["executable"] != false {
-		t.Fatalf("this build must not claim gh-ost is executable: %v", rec["executable"])
+	// Every engine must report suitability separately from availability.
+	for _, raw := range engines {
+		m := raw.(map[string]any)
+		for _, key := range []string{"engine", "verdict", "installed", "wrapped"} {
+			if _, ok := m[key]; !ok {
+				t.Errorf("engine %v missing %q", m["engine"], key)
+			}
+		}
 	}
 }
 

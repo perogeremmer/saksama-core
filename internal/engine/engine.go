@@ -34,6 +34,8 @@ type Statement struct {
 	Lock      string
 	// Ops are the ALTER operations this statement covers.
 	Ops []model.Op
+	// Argv is set instead of SQL when the statement is an external process.
+	Argv []string
 }
 
 // VerifyResult is the outcome of one post-execution assertion.
@@ -110,4 +112,13 @@ type Options struct {
 	Force bool
 	// DryRun builds statements and reports them without executing.
 	DryRun bool
+	// HasReplica is true when a replica can take the copy read load.
+	HasReplica bool
+	// HoldCutover asks the engine to pause before swapping tables, when it can.
+	HoldCutover bool
+	// ChunkSize overrides the engine default.
+	ChunkSize int
+	// AllowArgvPassword permits passing a password in argv for engines that
+	// cannot read an option file. Off by default.
+	AllowArgvPassword bool
 }

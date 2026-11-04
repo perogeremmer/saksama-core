@@ -129,6 +129,9 @@ func describeAlgorithm(algorithm, lock string) string {
 // between planning and running. A stale plan is the most common real cause of an
 // incident, so the recheck is unconditional.
 func (e *Engine) Preflight(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !hasMethod(e.opts.Plan, analyzer.MethodInstant) {
 		// INPLACE operations take a metadata lock even with LOCK=NONE, so a long
 		// statement or a pending MDL queue is fatal.
@@ -173,6 +176,9 @@ func hasMethod(p analyzer.Plan, m analyzer.Method) bool {
 // Execute runs each statement in its own transaction-free session, with a short
 // lock_wait_timeout so it fails fast instead of blocking the whole server.
 func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) (engine.Execution, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ex := engine.Execution{Engine: engine.Native, StartedAt: e.now()}
 
 	stmts, err := e.Statements()
@@ -251,80 +257,9 @@ func (e *Engine) setSessionGuards(ctx context.Context) error {
 // Verify asserts the intended end state through information_schema, not through
 // the engine's exit code.
 func (e *Engine) Verify(ctx context.Context) ([]engine.VerifyResult, error) {
-	var out []engine.VerifyResult
-
-	for _, v := range e.opts.Plan.Verification {
-		res := engine.VerifyResult{Kind: v.Kind, Name: v.Name}
-		switch v.Kind {
-		case "index_exists":
-			n, err := e.count(ctx, `
-				SELECT COUNT(*) FROM information_schema.STATISTICS
-				WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?`, v.Name)
-			res.OK = err == nil && n > 0
-			res.Detail = presence(res.OK, fmt.Sprintf("index %s present", v.Name), fmt.Sprintf("index %s missing", v.Name))
-
-		case "index_absent":
-			n, err := e.count(ctx, `
-				SELECT COUNT(*) FROM information_schema.STATISTICS
-				WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?`, v.Name)
-			res.OK = err == nil && n == 0
-			res.Detail = presence(res.OK, fmt.Sprintf("index %s removed", v.Name), fmt.Sprintf("index %s still present", v.Name))
-
-		case "column_exists":
-			n, err := e.count(ctx, `
-				SELECT COUNT(*) FROM information_schema.COLUMNS
-				WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`, v.Name)
-			res.OK = err == nil && n > 0
-			res.Detail = presence(res.OK, fmt.Sprintf("column %s present", v.Name), fmt.Sprintf("column %s missing", v.Name))
-
-		case "column_absent":
-			n, err := e.count(ctx, `
-				SELECT COUNT(*) FROM information_schema.COLUMNS
-				WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`, v.Name)
-			res.OK = err == nil && n == 0
-			res.Detail = presence(res.OK, fmt.Sprintf("column %s removed", v.Name), fmt.Sprintf("column %s still present", v.Name))
-
-		case "foreign_key_present":
-			// This query takes (schema, constraint name): two placeholders, not three.
-			n, err := e.countQuery(ctx, `
-				SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS
-				WHERE CONSTRAINT_SCHEMA = ? AND CONSTRAINT_NAME = ?`, e.opts.Schema, v.Name)
-			res.OK = err == nil && n > 0
-			res.Detail = presence(res.OK, fmt.Sprintf("constraint %s intact", v.Name), fmt.Sprintf("constraint %s missing", v.Name))
-
-		default:
-			res.OK = false
-			res.Detail = fmt.Sprintf("unknown verification kind %q", v.Kind)
-		}
-		out = append(out, res)
-	}
-
-	return out, nil
+	return engine.VerifyAgainstSchema(ctx, e.db, e.opts.Schema, e.opts.Table, e.opts.Plan.Verification)
 }
 
-// count counts rows for a query that takes (schema, table, name).
-func (e *Engine) count(ctx context.Context, query, name string) (int, error) {
-	return e.countQuery(ctx, query, e.opts.Schema, e.opts.Table, name)
-}
-
-// countQuery counts rows for a query with explicit arguments.
-func (e *Engine) countQuery(ctx context.Context, query string, args ...any) (int, error) {
-	var n int
-	if err := e.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
-}
-
-func presence(ok bool, yes, no string) string {
-	if ok {
-		return yes
-	}
-	return no
-}
-
-func quoteIdent(s string) string {
-	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
-}
+func quoteIdent(s string) string { return engine.QuoteIdent(s) }
 
 var _ engine.Engine = (*Engine)(nil)

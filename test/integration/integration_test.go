@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -406,9 +407,10 @@ func TestApplyDropIndexEndToEnd(t *testing.T) {
 	}
 }
 
-// TestApplyBlockedOnForeignKeyRebuild is the guardrail that matters most: a
-// rebuild on a table with foreign keys must be refused before anything runs.
-func TestApplyBlockedOnForeignKeyRebuild(t *testing.T) {
+// A rebuild on a table with foreign keys is not a dead end anymore: gh-ost is
+// out, pt-osc copies the constraints, and that is what gets chosen. Nothing may
+// be mutated unless the chosen engine actually runs.
+func TestApplyForeignKeyRebuildRoutesToPtOSC(t *testing.T) {
 	schema, db := fixtureSchema(t)
 	mustExec(t, db,
 		"CREATE TABLE `p` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB",
@@ -424,20 +426,30 @@ func TestApplyBlockedOnForeignKeyRebuild(t *testing.T) {
 	before := columnType(t, db, schema, "c", "status")
 
 	runner, store := newRunner(t)
-	sess, err := runApply(t, runner, db, applyRequest(schema, "c", "MODIFY COLUMN status varchar(64) NOT NULL"))
-	if err == nil {
-		t.Fatal("expected the migration to be blocked")
-	}
-	if !errors.Is(err, core.ErrBlocked) {
-		t.Fatalf("expected ErrBlocked, got %v", err)
-	}
-	if sess.State != state.StateBlocked {
-		t.Errorf("state = %q, want blocked", sess.State)
-	}
-	if after := columnType(t, db, schema, "c", "status"); after != before {
-		t.Fatalf("column changed despite refusal: %q -> %q", before, after)
+	runner.DB = db
+	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(64) NOT NULL")
+	// Report the engine binary as present so the plan is judged on the schema, not
+	// on this machine's PATH.
+	req.Binaries = map[string]analyzer.EngineBinary{
+		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: "/nonexistent/pt-osc", Version: "3.5.1"},
 	}
 
+	sess, err := runner.Apply(context.Background(), req)
+	if sess == nil {
+		t.Fatal("no session returned")
+	}
+	if sess.Engine != "pt-osc" {
+		t.Fatalf("engine = %q, want pt-osc", sess.Engine)
+	}
+	if err == nil {
+		t.Fatal("expected the run to fail: the recorded binary path does not exist")
+	}
+
+	// The refused run must not have changed anything, and the constraint with its
+	// action must be intact.
+	if after := columnType(t, db, schema, "c", "status"); after != before {
+		t.Fatalf("column changed despite the failure: %q -> %q", before, after)
+	}
 	var deleteRule string
 	if err := db.QueryRow(
 		"SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND CONSTRAINT_NAME = 'fk_c_p'",
@@ -448,7 +460,7 @@ func TestApplyBlockedOnForeignKeyRebuild(t *testing.T) {
 		t.Fatalf("ON DELETE changed to %q", deleteRule)
 	}
 	if _, err := store.Load(sess.ID); err != nil {
-		t.Fatalf("blocked session not recorded: %v", err)
+		t.Fatalf("session not recorded: %v", err)
 	}
 }
 
@@ -759,6 +771,16 @@ func TestAddIndexAllowedOnTableWithForeignKey(t *testing.T) {
 
 // --- advise against a live server -------------------------------------------
 
+func unmetRequirementsOf(a analyzer.EngineAssessment) []string {
+	var out []string
+	for _, r := range a.Requirements {
+		if !r.Met {
+			out = append(out, r.Name)
+		}
+	}
+	return out
+}
+
 func TestAdviseLiveDetectsForeignKeyAndSuggestsPtOSC(t *testing.T) {
 	schema, db := fixtureSchema(t)
 	mustExec(t, db,
@@ -772,7 +794,7 @@ func TestAdviseLiveDetectsForeignKeyAndSuggestsPtOSC(t *testing.T) {
 	runner.DB = db
 	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(64) NOT NULL")
 	req.Binaries = map[string]analyzer.EngineBinary{
-		"gh-ost":                  {Name: "gh-ost", Available: true, Path: "/usr/bin/gh-ost", Version: "1.1.6"},
+		"gh-ost":                  {Name: "gh-ost", Available: true, Path: "/usr/bin/gh-ost", Version: "1.1.7"},
 		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: "/usr/bin/pt-online-schema-change", Version: "3.5.1"},
 	}
 
@@ -793,31 +815,32 @@ func TestAdviseLiveDetectsForeignKeyAndSuggestsPtOSC(t *testing.T) {
 	if !ok {
 		t.Fatal("gh-ost assessment missing")
 	}
-	if gh.Verdict != analyzer.VerdictBlocked {
-		t.Fatalf("gh-ost verdict = %q, want blocked on an FK table", gh.Verdict)
+	if gh.Verdict != analyzer.VerdictUnsuitable {
+		t.Fatalf("gh-ost verdict = %q, want unsuitable on an FK table", gh.Verdict)
+	}
+	if !gh.Installed {
+		t.Fatal("gh-ost is installed, so the verdict must be about the engine, not availability")
 	}
 	var fkBlocked bool
-	for _, b := range gh.BlockedBy {
-		if b == "no foreign keys in or out" {
+	for _, r := range unmetRequirementsOf(gh) {
+		if r == "no foreign keys in or out" {
 			fkBlocked = true
 		}
 	}
 	if !fkBlocked {
-		t.Fatalf("gh-ost blockers = %v", gh.BlockedBy)
+		t.Fatalf("gh-ost unmet requirements = %v", unmetRequirementsOf(gh))
 	}
 
-	// pt-osc handles foreign keys, so it must not be blocked by them.
+	// pt-osc handles foreign keys natively, so it is the answer here.
 	pt, ok := byEngine[analyzer.EnginePtOSC]
 	if !ok {
 		t.Fatal("pt-osc assessment missing")
 	}
-	for _, b := range pt.BlockedBy {
-		if b == "no foreign keys in or out" {
-			t.Fatalf("pt-osc must not be blocked by foreign keys: %v", pt.BlockedBy)
-		}
+	if pt.Verdict != analyzer.VerdictSuitable {
+		t.Fatalf("pt-osc verdict = %q (%v)", pt.Verdict, unmetRequirementsOf(pt))
 	}
-	if pt.Verdict != analyzer.VerdictNotExecutable {
-		t.Fatalf("pt-osc verdict = %q, want not_executable (fits, adapter missing)", pt.Verdict)
+	if prep.Plan.Recommendation.Engine != analyzer.EnginePtOSC {
+		t.Fatalf("recommended = %q, want pt-osc", prep.Plan.Recommendation.Engine)
 	}
 }
 
@@ -843,9 +866,86 @@ func TestAdviseLiveFavoursNativeForAddIndex(t *testing.T) {
 		}
 	}
 	if native.Verdict != analyzer.VerdictSuitable {
-		t.Fatalf("native verdict = %q: %v", native.Verdict, native.BlockedBy)
+		t.Fatalf("native verdict = %q: %v", native.Verdict, unmetRequirementsOf(native))
 	}
 	if !prep.Plan.Recommendation.Executable {
 		t.Fatal("native recommendation must be executable")
+	}
+	if len(prep.Plan.TableFacts) == 0 {
+		t.Fatal("a live plan must carry the schema facts the advice is based on")
+	}
+}
+
+// --- engine choice and copy-engine wiring -----------------------------------
+
+// The wrapper must invoke the engine it promised, with the argv it printed. A
+// fake binary on PATH proves the wiring; because the fake does nothing, this also
+// proves that a zero exit code is not treated as success.
+func TestApplyRunsTheChosenCopyEngineAndStillVerifies(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `status` varchar(32) NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+	)
+
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "argv.txt")
+	bin := filepath.Join(dir, "pt-online-schema-change")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + capture + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Record the operator's decision, exactly as `saksama engine set` would.
+	if err := store.SetEngineChoice(state.EngineChoice{Engine: "pt-osc", Target: schema + ".t", Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &core.Runner{DB: db, Store: store}
+	req := applyRequest(schema, "t", "ADD COLUMN `note` varchar(64) NOT NULL DEFAULT ''")
+	req.EngineHint = analyzer.EnginePtOSC
+	req.EngineHintSource = "recorded"
+	req.Binaries = map[string]analyzer.EngineBinary{
+		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: bin, Version: "3.5.1"},
+	}
+
+	sess, applyErr := runner.Apply(context.Background(), req)
+	if sess == nil {
+		t.Fatal("no session returned")
+	}
+	if sess.Engine != "pt-osc" {
+		t.Fatalf("engine = %q, want pt-osc", sess.Engine)
+	}
+
+	// The engine was really invoked with the argv we advertise.
+	data, readErr := os.ReadFile(capture)
+	if readErr != nil {
+		t.Fatalf("the engine was never invoked: %v", readErr)
+	}
+	argv := string(data)
+	for _, want := range []string{"--alter", "--print", "D=" + schema, "t=t"} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("engine did not receive %q; argv:\n%s", want, argv)
+		}
+	}
+
+	// The fake engine exited 0 but changed nothing. Verification must catch it:
+	// an engine's exit code is not evidence.
+	if applyErr == nil {
+		t.Fatalf("a no-op engine that exits 0 must not be reported as success; state=%q verification=%+v",
+			sess.State, sess.Verification)
+	}
+	if sess.State != state.StateFailed {
+		t.Fatalf("state = %q, want failed", sess.State)
+	}
+	if n := countRows(t, db,
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND COLUMN_NAME = 'note'",
+		schema); n != 0 {
+		t.Fatal("the column should not exist")
 	}
 }

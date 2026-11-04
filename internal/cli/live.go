@@ -21,6 +21,7 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/cred"
 	"github.com/perogeremmer/saksama-core/internal/engine"
 	"github.com/perogeremmer/saksama-core/internal/events"
+	"github.com/perogeremmer/saksama-core/internal/probe"
 	"github.com/perogeremmer/saksama-core/internal/render"
 	"github.com/perogeremmer/saksama-core/internal/state"
 )
@@ -118,6 +119,7 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.force, "force", false, "downgrade selected preflight aborts (never capability blockers)")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
 	fs.StringVar(&o.storeDir, "state-dir", "", "state directory (default: ~/.local/state/saksama)")
+	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
 	fs.Bool("no-color", false, "accepted for compatibility")
 
 	if err := fs.Parse(args); err != nil {
@@ -161,13 +163,11 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 		Force:      o.force,
 		Actor:      currentActor(),
 	}
-	if o.engine != "" {
-		e, err := parseEngine(o.engine)
-		if err != nil {
-			fmt.Fprintf(stderr, "saksama plan: %v\n", err)
-			return ExitUsage
-		}
-		req.EngineHint = e
+	if !*noProbe {
+		req.Binaries = probe.Binaries()
+	}
+	if code := resolveEngineChoice(&req, o.engine, o.database, o.table, "saksama plan", stderr); code != 0 {
+		return code
 	}
 
 	ctx := context.Background()
@@ -215,15 +215,17 @@ func parseEngine(s string) (analyzer.Engine, error) {
 
 type applyOpts struct {
 	connFlags
-	table      string
-	alter      string
-	production bool
-	engine     string
-	force      bool
-	jsonOut    bool
-	confirm    string
-	dryRun     bool
-	lockWait   int
+	table             string
+	alter             string
+	production        bool
+	engine            string
+	force             bool
+	jsonOut           bool
+	confirm           string
+	dryRun            bool
+	lockWait          int
+	holdCutover       bool
+	allowArgvPassword bool
 }
 
 func cmdApply(args []string, stdout, stderr io.Writer) int {
@@ -244,6 +246,9 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.confirm, "confirm", "", "must equal the host name when --production is set")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "build statements and approvals without executing")
 	fs.IntVar(&o.lockWait, "lock-wait-timeout", 10, "session lock_wait_timeout in seconds")
+	fs.BoolVar(&o.holdCutover, "hold-cutover", false, "pause before the swap so you can verify first (engine permitting)")
+	fs.BoolVar(&o.allowArgvPassword, "allow-argv-password", false, "permit engines with no option file to receive the password in argv (visible in ps)")
+	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
 
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
@@ -290,20 +295,18 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		Force:                  o.force,
 		DryRun:                 o.dryRun,
 		LockWaitTimeoutSeconds: o.lockWait,
+		HoldCutover:            o.holdCutover,
+		AllowArgvPassword:      o.allowArgvPassword,
 		Actor:                  currentActor(),
+		Binaries:               binariesOrNil(*noProbe),
 		Progress: func(p engine.Progress) {
 			if !o.jsonOut && p.Note != "" {
 				fmt.Fprintf(stderr, "  [%5.1f%%] %s\n", p.Percent, p.Note)
 			}
 		},
 	}
-	if o.engine != "" {
-		e, err := parseEngine(o.engine)
-		if err != nil {
-			fmt.Fprintf(stderr, "saksama apply: %v\n", err)
-			return ExitUsage
-		}
-		req.EngineHint = e
+	if code := resolveEngineChoice(&req, o.engine, o.database, o.table, "saksama apply", stderr); code != 0 {
+		return code
 	}
 	req.Approve = func(ar core.ApprovalRequest) (state.Approval, error) {
 		return state.Approval{
@@ -585,4 +588,44 @@ func shorten(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "~"
+}
+
+// resolveEngineChoice applies the documented precedence:
+//
+//  1. --engine on the command line
+//  2. the choice recorded for this table
+//  3. the recorded default choice
+//  4. the analyzer's recommendation
+func resolveEngineChoice(req *core.Request, flagValue, database, table, cmd string, stderr io.Writer) int {
+	if flagValue != "" {
+		e, err := parseEngine(flagValue)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
+			return ExitUsage
+		}
+		req.EngineHint = e
+		req.EngineHintSource = "flag"
+		return 0
+	}
+
+	choice, err := loadEngineChoice(database, table)
+	if err != nil || choice == nil {
+		return 0
+	}
+	e, err := parseEngine(choice.Engine)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: recorded engine %q is not valid: %v\n", cmd, choice.Engine, err)
+		return ExitUsage
+	}
+	req.EngineHint = e
+	req.EngineHintSource = "recorded"
+	return 0
+}
+
+// binariesOrNil probes installed engines unless the operator opted out.
+func binariesOrNil(noProbe bool) map[string]analyzer.EngineBinary {
+	if noProbe {
+		return nil
+	}
+	return probe.Binaries()
 }

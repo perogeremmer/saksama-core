@@ -109,7 +109,7 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 	case p.Recommendation.Blockers > 0:
 		fmt.Fprintf(&b, "RESULT     refused\n")
 	case !p.Recommendation.Executable:
-		fmt.Fprintf(&b, "RESULT     fits, but not executable in this build\n")
+		fmt.Fprintf(&b, "RESULT     engine fits, but cannot run here yet\n")
 		fmt.Fprintf(&b, "REASON     %s\n", p.Recommendation.ExecutableReason)
 	case p.Recommendation.Engine == analyzer.EngineNone:
 		fmt.Fprintf(&b, "RESULT     no execution path selected\n")
@@ -126,6 +126,16 @@ func engineLine(p analyzer.Plan) string {
 	if p.Recommendation.Engine == analyzer.EngineNone {
 		return "none (blocked)"
 	}
+	// The per-operation method only describes what the server *could* do. When a
+	// copy engine runs, the method is the copy, so showing INSTANT there would be
+	// actively misleading.
+	if p.Recommendation.Engine != analyzer.EngineNative {
+		label := fmt.Sprintf("%s [table copy] (%s)", eng, p.Server.Version)
+		if p.Recommendation.EngineSource != "" && p.Recommendation.EngineSource != "recommendation" {
+			label += " chosen by " + p.Recommendation.EngineSource
+		}
+		return label
+	}
 	var methods []string
 	for _, op := range p.Operations {
 		m := string(op.Method)
@@ -133,6 +143,9 @@ func engineLine(p analyzer.Plan) string {
 			m += ", LOCK=" + op.Lock
 		}
 		methods = append(methods, m)
+	}
+	if p.Recommendation.EngineSource != "" && p.Recommendation.EngineSource != "recommendation" {
+		eng += " (chosen by " + p.Recommendation.EngineSource + ")"
 	}
 	if len(methods) > 0 {
 		return fmt.Sprintf("%s [%s] (%s)", eng, strings.Join(dedupe(methods), " + "), p.Server.Version)
@@ -155,13 +168,15 @@ func enginesLine(p analyzer.Plan) string {
 	}
 	var parts []string
 	for _, a := range p.Engines {
-		switch a.Verdict {
-		case analyzer.VerdictSuitable:
-			parts = append(parts, fmt.Sprintf("%s ok", a.Engine))
-		case analyzer.VerdictBlocked:
-			parts = append(parts, fmt.Sprintf("%s blocked", a.Engine))
+		switch {
+		case a.Verdict != analyzer.VerdictSuitable:
+			parts = append(parts, fmt.Sprintf("%s no", a.Engine))
+		case !a.Installed:
+			parts = append(parts, fmt.Sprintf("%s not-installed", a.Engine))
+		case !a.Wrapped:
+			parts = append(parts, fmt.Sprintf("%s no-adapter", a.Engine))
 		default:
-			parts = append(parts, fmt.Sprintf("%s fits/not-built", a.Engine))
+			parts = append(parts, fmt.Sprintf("%s yes", a.Engine))
 		}
 	}
 	return strings.Join(parts, " | ") + "   (see: saksama advise)"

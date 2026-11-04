@@ -143,20 +143,32 @@ func TestModifyColumnRoutesToGhOst(t *testing.T) {
 	}
 }
 
-func TestModifyColumnWithForeignKeysIsBlocked(t *testing.T) {
-	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
-	if p.Recommendation.Engine != EngineNone {
-		t.Fatalf("got %q, want none", p.Recommendation.Engine)
+// A table with foreign keys still has a viable engine: pt-osc copies constraints
+// natively. Routing must reach for it instead of refusing the change.
+func TestModifyColumnWithForeignKeysSelectsPtOSC(t *testing.T) {
+	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
+
+	if p.Recommendation.Engine != EnginePtOSC {
+		t.Fatalf("got %q, want pt-osc", p.Recommendation.Engine)
 	}
-	if !hasCheck(p, chkFKCopyBlocked, SeverityBlocker) {
-		t.Fatalf("expected copy-with-FK blocker: %+v", p.Checks)
+	if p.Recommendation.Blockers != 0 {
+		t.Fatalf("expected no blockers, got %+v", p.Checks)
+	}
+	if !p.Recommendation.Executable {
+		t.Fatalf("pt-osc should be runnable here, reason=%q", p.Recommendation.ExecutableReason)
 	}
 }
 
-func TestIncomingForeignKeyAlsoBlocksCopyEngine(t *testing.T) {
-	p := plan(t, withIncomingFK(baseTable()), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
-	if !hasCheck(p, chkFKCopyBlocked, SeverityBlocker) {
-		t.Fatalf("expected blocker for incoming FK: %+v", p.Checks)
+func TestIncomingForeignKeyWarnsAboutTheRewrittenChildRows(t *testing.T) {
+	p := plan(t, withIncomingFK(baseTable()), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
+
+	if p.Recommendation.Engine != EnginePtOSC {
+		t.Fatalf("got %q, want pt-osc", p.Recommendation.Engine)
+	}
+	if !hasCheck(p, "R4", SeverityWarn) {
+		t.Fatalf("expected the incoming-FK strategy warning: %+v", p.Checks)
 	}
 }
 
@@ -164,21 +176,23 @@ func TestRebuildWithoutPrimaryKeyIsBlocked(t *testing.T) {
 	tbl := baseTable()
 	tbl.Indexes = []model.Index{{Name: "ix_spot", Parts: []model.IndexPart{{Column: "spot_id"}}}}
 	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
-	if !hasCheck(p, chkCopyEngineNoPK, SeverityBlocker) {
-		t.Fatalf("expected no-PK blocker: %+v", p.Checks)
+	if !hasCheck(p, chkNoEngineFits, SeverityBlocker) && !hasCheck(p, chkChosenEngineUnsuitable, SeverityBlocker) {
+		t.Fatalf("expected a no-key blocker: %+v", p.Checks)
 	}
 	if p.Recommendation.Engine != EngineNone {
 		t.Fatalf("got %q, want none", p.Recommendation.Engine)
 	}
 }
 
-func TestCompositePrimaryKeyBlocksGhOst(t *testing.T) {
+func TestCompositePrimaryKeyRoutesToPtOSC(t *testing.T) {
 	tbl := baseTable()
 	tbl.Indexes[0] = model.Index{Name: "PRIMARY", Primary: true, Unique: true,
 		Parts: []model.IndexPart{{Column: "id"}, {Column: "spot_id"}}}
-	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
-	if !hasCheck(p, chkCompositePKNoGhOst, SeverityBlocker) {
-		t.Fatalf("expected composite-PK blocker: %+v", p.Checks)
+	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
+
+	if p.Recommendation.Engine != EnginePtOSC {
+		t.Fatalf("got %q, want pt-osc", p.Recommendation.Engine)
 	}
 	if !hasCheck(p, chkCompositePK, SeverityInfo) {
 		t.Fatalf("expected composite-PK info: %+v", p.Checks)
@@ -421,13 +435,13 @@ func TestManagedServerMentionedInReasons(t *testing.T) {
 		t.Fatal("expected managed server detection")
 	}
 	found := false
-	for _, r := range p.Recommendation.Reasons {
-		if contains(r, "rds_superuser") {
+	for _, c := range p.Checks {
+		if c.ID == "R5" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected privilege note, got %v", p.Recommendation.Reasons)
+		t.Fatalf("expected the managed-server warning, got %+v", p.Checks)
 	}
 }
 
@@ -558,6 +572,39 @@ func assessmentFor(p Plan, e Engine) (EngineAssessment, bool) {
 	return EngineAssessment{}, false
 }
 
+// unmet returns the requirement names that failed for an engine.
+func unmetList(a EngineAssessment) []string { return unmet(a) }
+
+func unmetContains(a EngineAssessment, name string) bool {
+	for _, n := range unmet(a) {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+func unmet(a EngineAssessment) []string {
+	var out []string
+	for _, r := range a.Requirements {
+		if !r.Met {
+			out = append(out, r.Name)
+		}
+	}
+	return out
+}
+
+func withBinaries(b map[string]EngineBinary) func(*Input) {
+	return func(in *Input) { in.Binaries = b }
+}
+
+func availableBinaries() map[string]EngineBinary {
+	return map[string]EngineBinary{
+		"gh-ost":                  {Name: "gh-ost", Available: true, Path: "/usr/local/bin/gh-ost", Version: "1.1.7"},
+		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: "/usr/bin/pt-online-schema-change", Version: "3.5.1"},
+	}
+}
+
 func TestAdviseNativeSuitableForAddIndex(t *testing.T) {
 	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix_created (created_at)")
 
@@ -566,93 +613,88 @@ func TestAdviseNativeSuitableForAddIndex(t *testing.T) {
 		t.Fatal("native assessment missing")
 	}
 	if native.Verdict != VerdictSuitable {
-		t.Fatalf("native verdict = %q (%v)", native.Verdict, native.BlockedBy)
+		t.Fatalf("native verdict = %q (%v)", native.Verdict, unmet(native))
 	}
-	if !native.Executable {
-		t.Fatal("native must be executable in this build")
+	if !native.Runnable() {
+		t.Fatal("native must be runnable")
 	}
 	if !p.Recommendation.Executable {
 		t.Fatal("recommendation must be executable")
 	}
-}
-
-func TestAdviseGhOstBlockedByForeignKeys(t *testing.T) {
-	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
-
-	gh, ok := assessmentFor(p, EngineGhOst)
-	if !ok {
-		t.Fatal("gh-ost assessment missing")
-	}
-	if gh.Verdict != VerdictBlocked {
-		t.Fatalf("gh-ost verdict = %q", gh.Verdict)
-	}
-	found := false
-	for _, b := range gh.BlockedBy {
-		if b == "no foreign keys in or out" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected the foreign key requirement to be the blocker, got %v", gh.BlockedBy)
-	}
-
-	// pt-osc handles foreign keys, so it must NOT be blocked by them.
-	pt, ok := assessmentFor(p, EnginePtOSC)
-	if !ok {
-		t.Fatal("pt-osc assessment missing")
-	}
-	for _, b := range pt.BlockedBy {
-		if b == "no foreign keys in or out" {
-			t.Fatal("pt-osc should not be blocked by foreign keys")
-		}
+	if p.Recommendation.Analyzer != EngineNative {
+		t.Fatalf("analyzer pick = %q", p.Recommendation.Analyzer)
 	}
 }
 
-func TestAdviseGhOstFitsWithoutForeignKeys(t *testing.T) {
-	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", func(in *Input) {
-		in.Binaries = map[string]EngineBinary{
-			"gh-ost": {Name: "gh-ost", Available: true, Path: "/usr/local/bin/gh-ost", Version: "1.1.6"},
-		}
-	})
+func TestAdviseGhOstUnsuitableWithForeignKeys(t *testing.T) {
+	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
 
 	gh, _ := assessmentFor(p, EngineGhOst)
-	if gh.Verdict != VerdictNotExecutable {
-		t.Fatalf("gh-ost verdict = %q, want not_executable (fits, adapter missing): %v", gh.Verdict, gh.BlockedBy)
+	if gh.Verdict != VerdictUnsuitable {
+		t.Fatalf("gh-ost verdict = %q, want unsuitable", gh.Verdict)
 	}
-	if len(gh.BlockedBy) != 0 {
-		t.Fatalf("gh-ost should have no blockers here: %v", gh.BlockedBy)
+	if !unmetContains(gh, "no foreign keys in or out") {
+		t.Fatalf("expected the FK requirement to fail, got %v", unmet(gh))
+	}
+	// It is installed, so "unsuitable" must be about the engine, not about us.
+	if !gh.Installed {
+		t.Fatal("gh-ost should be reported as installed")
+	}
+	if gh.Runnable() {
+		t.Fatal("an unsuitable engine must never be runnable")
 	}
 
-	// The recommendation must not claim to be executable.
+	// pt-osc handles foreign keys, so it must not fail that requirement.
+	pt, _ := assessmentFor(p, EnginePtOSC)
+	if unmetContains(pt, "no foreign keys in or out") {
+		t.Fatal("pt-osc should not be blocked by foreign keys")
+	}
+	if pt.Verdict != VerdictSuitable {
+		t.Fatalf("pt-osc verdict = %q (%v)", pt.Verdict, unmet(pt))
+	}
+}
+
+func TestAdviseGhOstSuitableWithoutForeignKeys(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
+
+	gh, _ := assessmentFor(p, EngineGhOst)
+	if gh.Verdict != VerdictSuitable {
+		t.Fatalf("gh-ost verdict = %q (%v)", gh.Verdict, unmet(gh))
+	}
+	if !gh.Runnable() {
+		t.Fatal("gh-ost should be runnable: suitable, installed, wrapped")
+	}
 	if p.Recommendation.Engine != EngineGhOst {
 		t.Fatalf("recommended = %q", p.Recommendation.Engine)
 	}
-	if p.Recommendation.Executable {
-		t.Fatal("this build must not claim it can run gh-ost")
+	if !p.Recommendation.Executable {
+		t.Fatalf("recommendation must be executable, reason=%q", p.Recommendation.ExecutableReason)
 	}
-	if !strings.Contains(p.Recommendation.ExecutableReason, "not implemented") {
-		t.Fatalf("reason = %q", p.Recommendation.ExecutableReason)
+	if gh.Command == "" {
+		t.Fatal("a suitable engine must show the command Saksama will run")
 	}
 }
 
-func TestAdviseGhOstBlockedWhenBinaryMissing(t *testing.T) {
-	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", func(in *Input) {
-		in.Binaries = map[string]EngineBinary{
+func TestAdviseGhOstNotInstalledIsNotUnsuitable(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(map[string]EngineBinary{
 			"gh-ost": {Name: "gh-ost", Available: false, Error: "not found on PATH"},
-		}
-	})
+		}))
+
 	gh, _ := assessmentFor(p, EngineGhOst)
-	if gh.Verdict != VerdictBlocked {
-		t.Fatalf("verdict = %q, want blocked", gh.Verdict)
+	if gh.Verdict != VerdictSuitable {
+		t.Fatalf("verdict = %q; a missing binary must not change the verdict", gh.Verdict)
 	}
-	var hasBinaryBlock bool
-	for _, b := range gh.BlockedBy {
-		if b == "gh-ost binary installed" {
-			hasBinaryBlock = true
-		}
+	if gh.Installed {
+		t.Fatal("binary should be reported as missing")
 	}
-	if !hasBinaryBlock {
-		t.Fatalf("expected the binary requirement: %v", gh.BlockedBy)
+	if gh.Runnable() {
+		t.Fatal("a missing binary must make the engine not runnable")
+	}
+	if !strings.Contains(p.Recommendation.ExecutableReason, "not installed") {
+		t.Fatalf("reason = %q", p.Recommendation.ExecutableReason)
 	}
 }
 
@@ -661,83 +703,119 @@ func TestAdviseCompositePrimaryKeyFavoursPtOSC(t *testing.T) {
 	tbl.Indexes[0] = model.Index{Name: "PRIMARY", Primary: true, Unique: true,
 		Parts: []model.IndexPart{{Column: "id"}, {Column: "spot_id"}}}
 
-	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
+	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
 
 	gh, _ := assessmentFor(p, EngineGhOst)
-	if gh.Verdict != VerdictBlocked {
-		t.Fatalf("gh-ost verdict = %q, want blocked", gh.Verdict)
+	if gh.Verdict != VerdictUnsuitable {
+		t.Fatalf("gh-ost verdict = %q", gh.Verdict)
 	}
+	if !unmetContains(gh, "single-column key to chunk by") {
+		t.Fatalf("gh-ost should fail the single-column key requirement: %v", unmet(gh))
+	}
+
 	pt, _ := assessmentFor(p, EnginePtOSC)
-	if len(pt.BlockedBy) != 0 {
-		t.Fatalf("pt-osc should fit a composite key, blocked by %v", pt.BlockedBy)
-	}
-	// And it must say why pt-osc is the better fit.
-	var mentionsComposite bool
-	for _, n := range pt.Notes {
-		if strings.Contains(n, "composite primary key") {
-			mentionsComposite = true
-		}
-	}
-	if !mentionsComposite {
-		t.Fatalf("expected a note about composite keys: %v", pt.Notes)
+	if pt.Verdict != VerdictSuitable {
+		t.Fatalf("pt-osc should fit a composite key: %v", unmet(pt))
 	}
 }
 
-func TestAdvisePtOSCBlockedWithoutKey(t *testing.T) {
+func TestAdvisePtOSCUnsuitableWithoutKey(t *testing.T) {
 	tbl := baseTable()
 	tbl.Indexes = nil
 
-	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
+	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
 	pt, _ := assessmentFor(p, EnginePtOSC)
-	if pt.Verdict != VerdictBlocked {
-		t.Fatalf("pt-osc verdict = %q, want blocked", pt.Verdict)
+	if pt.Verdict != VerdictUnsuitable {
+		t.Fatalf("pt-osc verdict = %q", pt.Verdict)
 	}
 }
 
-func TestAdviseNativeBlockedWhenFKColumnTouched(t *testing.T) {
+func TestAdviseNativeUnsuitableWhenFKColumnTouched(t *testing.T) {
 	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN spot_id bigint unsigned NOT NULL")
 	native, _ := assessmentFor(p, EngineNative)
-	if native.Verdict != VerdictBlocked {
-		t.Fatalf("native verdict = %q", native.Verdict)
+	// Two requirements fail here: MODIFY COLUMN needs a rebuild, and the column is
+	// constrained by a foreign key.
+	if native.Verdict != VerdictUnsuitable {
+		t.Fatalf("native verdict = %q, want unsuitable", native.Verdict)
 	}
-	var hasFkBlock bool
-	for _, b := range native.BlockedBy {
-		if b == "no foreign-key column touched" {
-			hasFkBlock = true
-		}
+	if !unmetContains(native, "no table rebuild required") {
+		t.Fatalf("rebuild requirement should fail: %v", unmet(native))
 	}
-	if !hasFkBlock {
-		t.Fatalf("expected the FK-column requirement: %v", native.BlockedBy)
+	if !unmetContains(native, "no foreign-key column is modified") {
+		t.Fatalf("expected the FK-column requirement to fail: %v", unmet(native))
 	}
 }
 
-func TestAdvisePartitionedTableBlocksGhOst(t *testing.T) {
+func TestAdvisePartitionedTableUnsuitableForGhOst(t *testing.T) {
 	tbl := baseTable()
 	tbl.Partitioned = true
-	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
+	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
 	gh, _ := assessmentFor(p, EngineGhOst)
-	var blocked bool
-	for _, b := range gh.BlockedBy {
-		if b == "table is not partitioned" {
-			blocked = true
-		}
+	if gh.Verdict != VerdictUnsuitable {
+		t.Fatalf("partitioned table must make gh-ost unsuitable: %q", gh.Verdict)
 	}
-	if !blocked {
-		t.Fatalf("partitioned table must block gh-ost: %v", gh.BlockedBy)
+	if !unmetContains(gh, "not partitioned") {
+		t.Fatalf("blockers: %v", unmet(gh))
 	}
 }
 
-func TestAdviseEveryEngineIsAssessed(t *testing.T) {
-	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix_created (created_at)")
-	if len(p.Engines) != 3 {
-		t.Fatalf("got %d assessments, want 3", len(p.Engines))
+func TestAdviseExplainsWithEvidenceAndTradeoffs(t *testing.T) {
+	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		withBinaries(availableBinaries()))
+
+	if len(p.TableFacts) == 0 {
+		t.Fatal("no table facts: the advice must be traceable to observed schema")
 	}
+	var sawFKFact, sawPKFact bool
+	for _, f := range p.TableFacts {
+		if strings.Contains(f.Fact, "foreign key") {
+			sawFKFact = true
+		}
+		if strings.Contains(f.Fact, "primary key") {
+			sawPKFact = true
+		}
+		if f.Fact == "" || f.Effect == "" {
+			t.Fatalf("incomplete evidence: %+v", f)
+		}
+	}
+	if !sawFKFact || !sawPKFact {
+		t.Fatalf("expected PK and FK facts, got %+v", p.TableFacts)
+	}
+
 	for _, a := range p.Engines {
+		if len(a.Pros) == 0 || len(a.Cons) == 0 {
+			t.Errorf("%s must list pros and cons", a.Engine)
+		}
 		if a.Summary == "" {
 			t.Errorf("%s has no summary", a.Engine)
 		}
-		if len(a.Requirements) == 0 {
-			t.Errorf("%s has no requirements", a.Engine)
+	}
+}
+
+func TestAdviseUUIDPrimaryKeyWarnsInCons(t *testing.T) {
+	tbl := model.Table{
+		Schema: "shop", Name: "sessions", Engine: "InnoDB", RowFormat: "DYNAMIC",
+		Charset: "utf8mb4", Collation: "utf8mb4_0900_ai_ci",
+		Columns: []model.Column{
+			{Name: "uuid", DataType: "char", Type: "char(36)", Charset: "utf8mb4"},
+			{Name: "at", DataType: "datetime", Type: "datetime"},
+		},
+		Indexes: []model.Index{{Name: "PRIMARY", Primary: true, Unique: true,
+			Parts: []model.IndexPart{{Column: "uuid"}}}},
+	}
+	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN at datetime(6) NOT NULL", withBinaries(availableBinaries()))
+
+	gh, _ := assessmentFor(p, EngineGhOst)
+	var mentioned bool
+	for _, c := range gh.Cons {
+		if strings.Contains(strings.ToLower(c), "uuid") {
+			mentioned = true
 		}
+	}
+	if !mentioned {
+		t.Fatalf("expected a UUID chunking caveat in gh-ost cons: %v", gh.Cons)
 	}
 }

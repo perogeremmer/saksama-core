@@ -125,35 +125,57 @@ func TestMultiLineInputIsFlattened(t *testing.T) {
 
 func TestEngineMatrixShowsEveryEngine(t *testing.T) {
 	p := samplePlan()
-	p.Engines = []analyzer.EngineAssessment{
-		{Engine: analyzer.EngineNative, Verdict: analyzer.VerdictSuitable, Executable: true,
-			Summary: "plain ALTER TABLE",
-			Requirements: []analyzer.Requirement{
-				{Name: "no table copy required", Met: true, Blocking: true, Detail: "in place"},
-			}},
-		{Engine: analyzer.EngineGhOst, Verdict: analyzer.VerdictBlocked,
-			Summary: "ghost table copy", BlockedBy: []string{"no foreign keys in or out"},
-			Requirements: []analyzer.Requirement{
-				{Name: "no foreign keys in or out", Met: false, Blocking: true, Detail: "2 constraints"},
-			}},
-		{Engine: analyzer.EnginePtOSC, Verdict: analyzer.VerdictNotExecutable,
-			Summary: "Percona Toolkit",
-			Requirements: []analyzer.Requirement{
-				{Name: "primary or unique key", Met: true, Blocking: true, Detail: "chunkable"},
-			}},
+	p.TableFacts = []analyzer.Evidence{
+		{Fact: "primary key is a single column: id bigint unsigned", Effect: "both copy engines can chunk by range"},
+		{Fact: "2 outgoing foreign key(s)", Effect: "gh-ost has no foreign key support; pt-osc copies them"},
 	}
-	p.Recommendation = analyzer.Recommendation{Engine: analyzer.EngineNative, Executable: true}
+	p.Engines = []analyzer.EngineAssessment{
+		{
+			Engine: analyzer.EngineNative, Verdict: analyzer.VerdictSuitable,
+			Installed: true, Wrapped: true, Summary: "plain ALTER TABLE",
+			Requirements: []analyzer.Requirement{{Name: "no table rebuild required", Met: true, Detail: "in place"}},
+			Pros:         []string{"no copy, no shadow table"},
+			Cons:         []string{"still needs the metadata lock"},
+		},
+		{
+			Engine: analyzer.EngineGhOst, Verdict: analyzer.VerdictUnsuitable,
+			Installed: true, Wrapped: true, Summary: "ghost table copy",
+			Requirements: []analyzer.Requirement{{Name: "no foreign keys in or out", Met: false, Detail: "2 constraints"}},
+			Pros:         []string{"MIT, single binary"},
+			Cons:         []string{"cannot do foreign keys at all"},
+		},
+		{
+			Engine: analyzer.EnginePtOSC, Verdict: analyzer.VerdictSuitable,
+			Installed: false, Wrapped: true, Summary: "Percona Toolkit",
+			Requirements: []analyzer.Requirement{{Name: "primary or unique key", Met: true, Detail: "chunkable"}},
+			Pros:         []string{"handles composite keys"},
+			Cons:         []string{"needs Perl"},
+			Command:      "pt-online-schema-change --alter=\"ADD INDEX ix (a)\"",
+			Steps:        []string{"review with --print first"},
+		},
+	}
+	p.Recommendation = analyzer.Recommendation{
+		Engine: analyzer.EnginePtOSC, Analyzer: analyzer.EnginePtOSC,
+		EngineSource: "recommendation", Executable: false,
+		ExecutableReason: "the engine binary is not installed on this machine",
+	}
 
 	var buf bytes.Buffer
-	if err := EngineMatrix(&buf, p); err != nil {
+	if err := EngineMatrix(&buf, p, ""); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
 
 	for _, want := range []string{
-		"ENGINE SUITABILITY", "NATIVE", "GH-OST", "PT-OSC", "VERDICT",
-		"SUITABLE", "BLOCKED by no foreign keys in or out", "NOT EXECUTABLE HERE",
-		"recommended: native (executable now)",
+		"ENGINE SUITABILITY", "WHAT THIS TABLE LOOKS LIKE",
+		"NATIVE", "GH-OST", "PT-OSC", "VERDICT",
+		"SUITABLE", "UNSUITABLE",
+		"primary key is a single column",
+		"pros:", "cons:", "+ no copy, no shadow table", "- cannot do foreign keys at all",
+		"not installed",
+		"command (what Saksama runs):",
+		"analyzer recommends  pt-osc",
+		"decide with          saksama engine set",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -166,34 +188,29 @@ func TestEngineMatrixShowsEveryEngine(t *testing.T) {
 	}
 }
 
-func TestEngineMatrixExplainsNonExecutableRecommendation(t *testing.T) {
+func TestEngineMatrixShowsRecordedChoiceMismatch(t *testing.T) {
 	p := samplePlan()
-	p.Engines = []analyzer.EngineAssessment{
-		{Engine: analyzer.EngineGhOst, Verdict: analyzer.VerdictNotExecutable, Summary: "copy"},
-	}
 	p.Recommendation = analyzer.Recommendation{
-		Engine: analyzer.EngineGhOst, Executable: false,
-		ExecutableReason: "the gh-ost adapter is not implemented in this build",
+		Engine: analyzer.EngineGhOst, Analyzer: analyzer.EngineGhOst,
+		EngineSource: "recorded", Executable: true,
 	}
 
 	var buf bytes.Buffer
-	if err := EngineMatrix(&buf, p); err != nil {
+	if err := EngineMatrix(&buf, p, "pt-osc"); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "best fit for this change: gh-ost") {
-		t.Fatalf("expected the best-fit line:\n%s", out)
-	}
-	if !strings.Contains(out, "not implemented in this build") {
-		t.Fatalf("expected the reason:\n%s", out)
+	if !strings.Contains(out, "recorded choice      pt-osc (differs from the recommendation)") {
+		t.Fatalf("expected the mismatch to be visible:\n%s", out)
 	}
 }
 
 func TestPlanCardSaysNotExecutableInsteadOfReady(t *testing.T) {
 	p := samplePlan()
 	p.Recommendation = analyzer.Recommendation{
-		Engine: analyzer.EngineGhOst, Executable: false,
-		ExecutableReason: "the gh-ost adapter is not implemented in this build",
+		Engine: analyzer.EngineGhOst, Analyzer: analyzer.EngineGhOst,
+		Executable:       false,
+		ExecutableReason: "the engine binary is not installed on this machine",
 	}
 
 	var buf bytes.Buffer
@@ -204,7 +221,10 @@ func TestPlanCardSaysNotExecutableInsteadOfReady(t *testing.T) {
 	if strings.Contains(out, "RESULT     ready") {
 		t.Fatalf("a non-executable plan must never read as ready:\n%s", out)
 	}
-	if !strings.Contains(out, "not executable in this build") {
+	if !strings.Contains(out, "cannot run here yet") {
 		t.Fatalf("expected the not-executable result:\n%s", out)
+	}
+	if !strings.Contains(out, "not installed") {
+		t.Fatalf("expected the reason:\n%s", out)
 	}
 }

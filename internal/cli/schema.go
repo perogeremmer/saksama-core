@@ -10,7 +10,7 @@ const planJSONSchema = `{
   "$id": "https://saksama.dev/schema/plan-v1.json",
   "title": "Saksama plan",
   "type": "object",
-  "required": ["contract_version", "generated_at", "target", "alter", "server", "schema", "schema_fingerprint", "operations", "recommendation", "checks", "duration", "disk", "recovery", "verification", "engines"],
+  "required": ["contract_version", "generated_at", "target", "alter", "server", "schema", "schema_fingerprint", "operations", "recommendation", "checks", "duration", "disk", "recovery", "verification", "engines", "table_facts"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 1 },
@@ -83,6 +83,8 @@ const planJSONSchema = `{
       "required": ["engine", "fallbacks", "reasons", "blocked", "blockers", "warnings", "infos"],
       "additionalProperties": false,
       "properties": {
+        "analyzer": { "enum": ["native", "gh-ost", "pt-osc", "none"] },
+        "engine_source": { "type": "string" },
         "engine": { "enum": ["native", "gh-ost", "pt-osc", "none"] },
         "fallbacks": { "type": "array", "items": { "enum": ["native", "gh-ost", "pt-osc", "none"] } },
         "reasons": { "type": "array", "items": { "type": "string" } },
@@ -152,6 +154,19 @@ const planJSONSchema = `{
         }
       }
     },
+    "table_facts": {
+      "description": "Observed schema facts the advice is based on.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fact", "effect"],
+        "additionalProperties": false,
+        "properties": {
+          "fact": { "type": "string" },
+          "effect": { "type": "string" }
+        }
+      }
+    },
     "engines": {
       "description": "Suitability of every execution path for this specific change, including paths this build cannot run yet.",
       "type": "array",
@@ -161,21 +176,38 @@ const planJSONSchema = `{
         "additionalProperties": false,
         "properties": {
           "engine": { "enum": ["native", "gh-ost", "pt-osc", "none"] },
-          "verdict": { "enum": ["suitable", "blocked", "not_executable"] },
+          "verdict": { "enum": ["suitable", "unsuitable"] },
           "summary": { "type": "string" },
           "executable": { "type": "boolean" },
-          "blocked_by": { "type": "array", "items": { "type": "string" } },
+          "installed": { "type": "boolean" },
+          "wrapped": { "type": "boolean" },
+          "install": { "type": "string" },
+          "command": { "type": "string" },
+          "pros": { "type": "array", "items": { "type": "string" } },
+          "cons": { "type": "array", "items": { "type": "string" } },
+          "steps": { "type": "array", "items": { "type": "string" } },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["fact", "effect"],
+              "additionalProperties": false,
+              "properties": {
+                "fact": { "type": "string" },
+                "effect": { "type": "string" }
+              }
+            }
+          },
           "notes": { "type": "array", "items": { "type": "string" } },
           "requirements": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["name", "met", "blocking", "detail"],
+              "required": ["name", "met", "detail"],
               "additionalProperties": false,
               "properties": {
                 "name": { "type": "string" },
                 "met": { "type": "boolean" },
-                "blocking": { "type": "boolean" },
                 "detail": { "type": "string" }
               }
             }

@@ -12,13 +12,18 @@
 
 ## 1. Ringkasan satu paragraf
 
-Fase 1 (analyzer murni) dan Fase 2 (introspection live, eksekusi native, session durable, event contract, redaction, approval) **selesai dan terverifikasi terhadap MySQL 8.0.46 sungguhan**, bukan hanya unit test. Total **160 test**: 138 unit test + 22 integration test terhadap server nyata. Integration test menemukan **6 bug asli** di kode produksi — termasuk satu bug yang membuat setiap apply pada tabel ber-FK melaporkan kegagalan palsu, dan satu yang membuat `ALGORITHM=INSTANT` selalu ditolak MySQL. Semua sudah diperbaiki dan diberi test regresi.
+Fase 1 (analyzer murni) dan Fase 2 (introspection live, eksekusi native, session durable, event contract, redaction, approval) **selesai dan terverifikasi terhadap MySQL 8.0.46 sungguhan**, bukan hanya unit test. Total **183 test**: 160 unit test + 23 integration test terhadap server nyata. Integration test menemukan **6 bug asli** di kode produksi — termasuk satu bug yang membuat setiap apply pada tabel ber-FK melaporkan kegagalan palsu, dan satu yang membuat `ALGORITHM=INSTANT` selalu ditolak MySQL. Semua sudah diperbaiki dan diberi test regresi.
 
 ---
 
 ## 2. Yang bisa dilakukan tool ini sekarang
 
 ```bash
+# -1. Pilih sendiri engine-nya (kita yang menjalankan)
+saksama engine list
+saksama engine set gh-ost -d shop -t orders --note "alasan saya"
+saksama engine show -d shop -t orders
+
 # 0. Tanya dulu: tabel ini cocoknya gh-ost atau Percona Toolkit?
 saksama advise --live -h db.prod -d shop -t orders -a "MODIFY COLUMN ..."
 
@@ -174,6 +179,7 @@ Integration test bukan formalitas — ia menemukan bug yang unit test tidak mung
 | 4 | `status s1 --json` mencetak teks manusia | Script/CI pengguna rusak diam-diam; flag setelah argumen posisional diabaikan `flag` stdlib | Run manual | flag `--json` diekstrak sebelum parse |
 | 5 | Daftar operasi kosong menghasilkan plan "ready" | **Fail-open paling berbahaya**: CI gate hijau padahal tidak ada yang dipahami | Ditemukan sendiri saat review Fase 1, dikunci dengan test | Safety net analyzer + `OpUnknown` sintetis di CLI |
 | 6 | Plan menulis `RESULT ready` untuk engine yang belum diimplementasikan (gh-ost pada tabel tanpa FK) | Plan card bilang siap, lalu `apply` menolak — janji palsu tepat pada saat pengguna paling butuh kepastian | Run manual `advise` + pengecekan konsistensi matrix vs verdict | `Recommendation.Executable` + `ExecutableReason`; plan card menulis "fits, but not executable in this build" |
+| 8 | `saksama engine set gh-ost -d shop -t orders` mengabaikan `-d/-t/--note` karena `flag.Parse` berhenti di argumen posisional | Pilihan engine tersimpan ke scope yang salah tanpa peringatan — orang mengira sudah memilih untuk satu tabel, padahal jadi default global | Uji manual | `extractPositionals` memisahkan argumen posisional dari flag dengan sadar mana flag yang butuh nilai |
 | 7 | Makefile health-check menunggu socket, test menghubung lewat TCP | Seluruh integration suite **skip** tanpa gagal, sehingga CI hijau padahal tidak ada yang diuji — kelas bug yang sama berbahayanya dengan #5 | `make test-integration` dijalankan dari container kosong | Probe TCP di dalam container (`mysql -h127.0.0.1 -P3306`) |
 
 Bug #5 adalah alasan eksplisit kenapa `TestEmptyOperationListIsNeverReady` dan `TestUnparseableAlterIsNeverReady` ada: keduanya menjaga satu-satunya kegagalan yang tidak boleh terjadi.
@@ -222,9 +228,11 @@ Aturan yang dijaga kode:
 | `internal/analyzer` | 2009 | 547 | capability matrix, 34 check, routing engine, estimasi, fingerprint |
 | `internal/introspect` | 957 | (integration) | `information_schema`/`performance_schema` → model + runtime + FK charset + duplikat |
 | `internal/cred` | 323 | 211 | my.cnf, env, prompt; menolak file kredensial yang world-readable |
-| `internal/state` | 332 | 223 | session JSON atomik, event log, lock per tabel |
+| `internal/state` | 450 | 260 | session JSON atomik, event log, lock per tabel, pilihan engine |
 | `internal/engine` | 113 | — | kontrak engine (`Statements/Preflight/Execute/Verify`) |
 | `internal/engine/native` | 330 | 168 | DDL eksplisit, preflight recheck, verifikasi via information_schema |
+| `internal/engine/copyeng` | 420 | 250 | adapter gh-ost & pt-osc: argv, subprocess, progress dari DB, verifikasi |
+| `internal/engine/process` | 115 | — | runner subprocess: stream output, timeout, exit code |
 | `internal/probe` | 118 | 30 | deteksi binary gh-ost / pt-osc / perl + versinya |
 | `internal/events` | 198 | 160 | envelope, redaction rekursif, rate limit progres 1/detik |
 | `internal/core` | 520 | (integration) | orkestrasi + approval + audit |
@@ -295,6 +303,7 @@ Tidak ada password di argv. Urutan pembacaan kredensial: `--defaults-extra-file`
 ## 10. Rekomendasi langkah berikutnya
 
 1. **Fase 3 (gh-ost)** — matriks engine sudah menjawab "cocok atau tidak"; langkah berikutnya membuat jawaban `NOT EXECUTABLE HERE` berubah menjadi bisa dijalankan. `--postpone-cutover-flag-file` adalah fitur yang paling dicari target user (gerbang verifikasi sebelum swap).
-2. **Profil throughput lokal** — setelah beberapa migrasi, estimasi durasi bisa naik dari heuristic ke angka mesin pengguna sendiri. Ini juga yang membuat plan card layak dipercaya.
+2. **Cut-over pause dan cancel yang benar-benar berhenti** — argv `--hold-cutover` sudah ada; menghentikan engine di tengah dan membersihkan artefaknya belum.
+3. **Profil throughput lokal** — setelah beberapa migrasi, estimasi durasi bisa naik dari heuristic ke angka mesin pengguna sendiri. Ini juga yang membuat plan card layak dipercaya.
 3. **TUI** — setelah core stabil, karena TUI hanya membaca `Plan` dan event yang sama.
 4. **Soak test di staging** — PRD §15.3 mensyaratkan ini sebelum klaim "safe for production"; sekarang yang terbukti adalah correctness, bukan ketahanan pada beban produksi.

@@ -15,6 +15,7 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/parser"
 	"github.com/perogeremmer/saksama-core/internal/probe"
 	"github.com/perogeremmer/saksama-core/internal/render"
+	"github.com/perogeremmer/saksama-core/internal/state"
 )
 
 type adviseOpts struct {
@@ -51,6 +52,9 @@ func cmdAdvise(args []string, stdout, stderr io.Writer) int {
 	} else {
 		fs.StringVar(&o.ddlPath, "ddl", "", "SHOW CREATE TABLE output, or - for stdin")
 		fs.StringVar(&o.schemaPath, "schema", "", "table JSON produced by plan --dump-schema")
+		// Accepted offline too, so a recorded engine choice can be reported.
+		fs.StringVar(&o.database, "d", "", "database (for the recorded engine choice)")
+		fs.StringVar(&o.database, "database", "", "database")
 	}
 
 	fs.StringVar(&o.table, "t", "", "table (also: --table)")
@@ -180,8 +184,26 @@ func adviseOffline(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdo
 		return code
 	}
 
+	choice, _ := loadEngineChoice(o.database, o.table)
 	plan := analyzer.Analyze(in)
-	return writeAdvise(o, plan, stdout, stderr)
+	return writeAdvise(o, plan, chosenLabel(choice), stdout, stderr)
+}
+
+// loadEngineChoice reads the recorded decision for a target, and falls back to
+// the default choice.
+func loadEngineChoice(database, table string) (*state.EngineChoice, error) {
+	store, err := newStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ResolveEngine(database, table)
+}
+
+func chosenLabel(c *state.EngineChoice) string {
+	if c == nil {
+		return ""
+	}
+	return c.Engine
 }
 
 func adviseLive(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdout, stderr io.Writer) int {
@@ -234,10 +256,11 @@ func adviseLive(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdout,
 	}
 	defer prep.Close()
 
-	return writeAdvise(o, prep.Plan, stdout, stderr)
+	choice, _ := loadEngineChoice(o.database, o.table)
+	return writeAdvise(o, prep.Plan, chosenLabel(choice), stdout, stderr)
 }
 
-func writeAdvise(o adviseOpts, plan analyzer.Plan, stdout, stderr io.Writer) int {
+func writeAdvise(o adviseOpts, plan analyzer.Plan, chosen string, stdout, stderr io.Writer) int {
 	if o.jsonOut {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -249,7 +272,7 @@ func writeAdvise(o adviseOpts, plan analyzer.Plan, stdout, stderr io.Writer) int
 			return ExitInternal
 		}
 	} else {
-		if err := render.EngineMatrix(stdout, plan); err != nil {
+		if err := render.EngineMatrix(stdout, plan, chosen); err != nil {
 			fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 			return ExitInternal
 		}

@@ -42,6 +42,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdPlan(args[1:], stdout, stderr)
 	case "advise":
 		return cmdAdvise(args[1:], stdout, stderr)
+	case "engine":
+		return cmdEngine(args[1:], stdout, stderr)
 	case "apply":
 		return cmdApply(args[1:], stdout, stderr)
 	case "status":
@@ -79,6 +81,7 @@ Usage:
   saksama plan --live -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama advise --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
   saksama advise --live -h <host> -d <db> -t <table> -a "<ALTER>"
+  saksama engine list|set|show|clear   choose the engine yourself
   saksama apply  -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama status [<session>] [--json]
   saksama events <session>
@@ -103,6 +106,11 @@ Connection options (plan --live, apply):
   --no-defaults            ignore ~/.my.cnf
   --tls <mode>             preferred|true|false|skip-verify
 
+Engine options:
+  saksama engine set gh-ost -d <db> -t <table>   record your decision
+  saksama engine list                            what is installed, what is chosen
+  saksama engine show -d <db> -t <table>         what apply would use now
+
 Advise options:
   --live                   read the table from the server instead of a file
   --no-probe               skip detecting gh-ost / pt-online-schema-change on PATH
@@ -115,6 +123,9 @@ Apply options:
   --engine <name>          native|gh-ost|pt-osc (only native executes today)
   --force                  downgrade selected preflight aborts
   --lock-wait-timeout <n>  session lock_wait_timeout in seconds (default 10)
+  --hold-cutover           pause before the swap so you can verify (gh-ost)
+  --allow-argv-password    let an engine without an option file take the password
+                           in argv (visible in ps); off by default
   --json                   machine-readable output
 
 Plan options:
@@ -287,13 +298,20 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		Ignored:      ignored,
 		FreeDisk:     o.freeDisk,
 	}
+	// Engine precedence: flag, then the choice recorded for this table, then the
+	// analyzer's recommendation.
 	if o.engine != "" {
-		switch strings.ToLower(o.engine) {
-		case "native", "gh-ost", "pt-osc":
-			in.EngineHint = analyzer.Engine(strings.ToLower(o.engine))
-		default:
-			fmt.Fprintf(stderr, "saksama plan: unknown engine %q (want native, gh-ost, or pt-osc)\n", o.engine)
+		e, err := parseEngine(o.engine)
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama plan: %v\n", err)
 			return ExitUsage
+		}
+		in.EngineHint = e
+		in.EngineHintSource = "flag"
+	} else if choice, err := loadEngineChoice(tbl.Schema, tbl.Name); err == nil && choice != nil {
+		if e, err := parseEngine(choice.Engine); err == nil {
+			in.EngineHint = e
+			in.EngineHintSource = "recorded"
 		}
 	}
 

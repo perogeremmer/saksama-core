@@ -164,3 +164,29 @@ Tiga verdict dibedakan secara tegas:
 - `Plan.Engines []EngineAssessment` masuk ke kontrak JSON (aditif, pre-1.0).
 - `Recommendation.Executable` + `ExecutableReason` wajib ada: plan **tidak boleh** menulis `RESULT ready` untuk engine yang belum diimplementasikan.
 - Probe binary (`gh-ost`, `pt-online-schema-change`, `perl`) berjalan di package `internal/probe`, bukan di analyzer.
+
+---
+
+## D15 — Kita wrapper: analyzer menyarankan, operator memilih, tool menjalankan
+
+**Status:** Disepakati
+**Alasan:** Tugas produk ini adalah **menjalankan** migrasi, bukan sekadar menasihati. Tapi keputusan engine bukan milik analyzer: ia milik orang yang menanggung risikonya. Karena itu ada pemisahan tegas antara tiga hal:
+
+1. **Suitability** (`verdict`) — apakah engine ini *mampu* melakukan perubahan ini pada tabel ini. Ini fakta tentang engine (gh-ost tidak bisa FK, gh-ost butuh PK satu kolom, pt-osc butuh key).
+2. **Availability** (`installed`, `wrapped`) — apakah binary-nya ada di mesin ini, dan apakah build ini punya adapter. Ini fakta tentang kita.
+3. **Choice** — apa yang dipilih operator, direkam di `engine set`.
+
+Mencampur ketiganya ke dalam satu verdict adalah kesalahan yang membuat orang menyalahkan schema-nya sendiri atas batasan tool, atau menyalahkan tool atas paket yang belum diinstal.
+
+**Precedence:** `--engine` flag → pilihan tercatat untuk `db.table` → pilihan default tercatat → rekomendasi analyzer. Rekomendasi analyzer **selalu tetap terlihat** (`Recommendation.Analyzer`) sehingga override tidak pernah senyap.
+
+**Alternatif ditolak:**
+- *Analyzer langsung mengeksekusi pilihannya sendiri* — menghilangkan kontrol operator pada operasi yang berisiko.
+- *Hanya menasihati, tidak mengeksekusi* — memindahkan pekerjaan (dan kesempatan salah) ke pengguna; produk jadi tidak berguna sebagai wrapper.
+- *Menganggap semua engine setara* — menyembunyikan bahwa gh-ost dan pt-osc punya batasan yang sangat berbeda.
+
+**Implikasi:**
+- `saksama engine set|show|list|clear`, disimpan di state dir (`0600`), tercatat aktor + alasan.
+- Adapter `internal/engine/copyeng` menjalankan gh-ost dan pt-osc sebagai subprocess; progress **dipoll dari database**, bukan dari output engine.
+- Kredensial: pt-osc memakai `--defaults-file` sementara (`0600`); gh-ost tidak punya opsi itu, jadi password di argv ditolak kecuali `--allow-argv-password` diberikan secara sadar.
+- Memilih copy engine padahal native cukup adalah legal tapi mahal → check `R7` memperingatkan.

@@ -90,13 +90,19 @@ type OpPlan struct {
 
 // Recommendation is the routing decision.
 type Recommendation struct {
-	Engine    Engine   `json:"engine"`
-	Fallbacks []Engine `json:"fallbacks"`
-	Reasons   []string `json:"reasons"`
-	Blocked   bool     `json:"blocked"`
-	Blockers  int      `json:"blockers"`
-	Warnings  int      `json:"warnings"`
-	Infos     int      `json:"infos"`
+	// Analyzer is what the rules would pick on their own.
+	Analyzer Engine `json:"analyzer"`
+	// Engine is what will actually run: the analyzer's pick unless the operator
+	// recorded a choice.
+	Engine Engine `json:"engine"`
+	// EngineSource says where Engine came from: recommendation | flag | recorded.
+	EngineSource string   `json:"engine_source"`
+	Fallbacks    []Engine `json:"fallbacks"`
+	Reasons      []string `json:"reasons"`
+	Blocked      bool     `json:"blocked"`
+	Blockers     int      `json:"blockers"`
+	Warnings     int      `json:"warnings"`
+	Infos        int      `json:"infos"`
 	// Executable reports whether this build can actually run the recommended
 	// engine. A plan can be safe and still not executable, and saying so is the
 	// difference between a tool you trust and a tool that lies.
@@ -152,22 +158,31 @@ type Plan struct {
 	Recovery          Recovery           `json:"recovery"`
 	Verification      []Verification     `json:"verification"`
 	Engines           []EngineAssessment `json:"engines"`
-	Notes             []string           `json:"notes,omitempty"`
+	// TableFacts are the observed schema facts the advice is based on, stated
+	// once so every conclusion is traceable to something real.
+	TableFacts []Evidence `json:"table_facts"`
+	Notes      []string   `json:"notes,omitempty"`
 }
 
 // Input is everything the analyzer needs. No database handle, ever.
 type Input struct {
-	Server       model.Server
-	Table        model.Table
-	Ops          []model.Op
-	RawAlter     string
-	Algorithm    string
-	Lock         string
-	Host         string
+	Server    model.Server
+	Table     model.Table
+	Ops       []model.Op
+	RawAlter  string
+	Algorithm string
+	Lock      string
+	Host      string
+	// DBUser and DBPort appear in generated engine commands.
+	DBUser       string
+	DBPort       string
 	Production   bool
 	SchemaSource string   // live | ddl | json
 	Ignored      []string // schema fragments the parser could not model
-	EngineHint   Engine   // user override; empty means auto
+	EngineHint   Engine   // resolved override; empty means auto
+	// EngineHintSource records whether the override came from a flag or a
+	// recorded decision, so the audit trail can tell them apart.
+	EngineHintSource string
 	// Binaries are the engine executables found on this machine, injected so the
 	// analyzer never spawns a process.
 	Binaries map[string]EngineBinary
@@ -263,10 +278,15 @@ func Analyze(in Input) Plan {
 	p.Checks = append(p.Checks, checksForeignKeys(in, projected)...)
 	p.Checks = append(p.Checks, checksOperational(in, anyRebuild)...)
 	p.Checks = append(p.Checks, liveChecks(in, projected)...)
-	p.Checks = append(p.Checks, routingChecks(in, anyRebuild, projected)...)
+
+	// Engine suitability drives routing, so it must be computed first.
+	p.Engines = AssessEngines(in, projected)
+	p.TableFacts = (&AdviceInput{Input: in, Projected: projected}).schemaFacts()
 
 	// Routing.
-	rec := route(in, anyRebuild, anyNative, anyBlocked, projected)
+	rec := route(in, p.Engines, anyRebuild, anyNative, anyBlocked, projected)
+	p.Checks = append(p.Checks, engineChecks(p.Engines, rec)...)
+	p.Checks = append(p.Checks, engineWarnings(in, p.Engines, rec)...)
 	for _, c := range p.Checks {
 		switch c.Severity {
 		case SeverityBlocker:
@@ -277,14 +297,44 @@ func Analyze(in Input) Plan {
 			rec.Infos++
 		}
 	}
+	// A blocker erases the engine when the change itself cannot run: an unknown
+	// operation, an impossible index, a touched constrained column. The exception
+	// is "engine not installed" (R3): that must keep naming the engine, because
+	// install this and retry is the whole answer.
+	hardBlockers := 0
+	for _, c := range p.Checks {
+		if c.Severity != SeverityBlocker || c.ID == chkEngineNotInstalled {
+			continue
+		}
+		hardBlockers++
+	}
 	if rec.Blockers > 0 {
 		rec.Blocked = true
-		rec.Engine = EngineNone
-		rec.Reasons = append(rec.Reasons, fmt.Sprintf("%d blocker(s) prevent execution", rec.Blockers))
+		if hardBlockers > 0 {
+			rec.Engine = EngineNone
+			rec.Reasons = append(rec.Reasons, fmt.Sprintf("%d blocker(s) prevent any engine from running this change", hardBlockers))
+		} else {
+			rec.Reasons = append(rec.Reasons, fmt.Sprintf("%d blocker(s) prevent execution", rec.Blockers))
+		}
+	}
+
+	// Whether the effective engine can actually be driven is a property of the
+	// assessment, not of the safety rules. Keeping them apart is what stops
+	// "unsuitable" and "not installed" from being conflated.
+	if a, ok := findAssessment(p.Engines, rec.Engine); ok {
+		rec.Executable = a.Runnable() && !rec.Blocked
+		switch {
+		case a.Verdict != VerdictSuitable:
+			rec.ExecutableReason = "the engine cannot perform this change"
+		case !a.Installed:
+			rec.ExecutableReason = "the engine binary is not installed on this machine"
+		case !a.Wrapped:
+			rec.ExecutableReason = "this build has no adapter for the engine"
+		case rec.Blocked:
+			rec.ExecutableReason = fmt.Sprintf("%d blocker(s) must be resolved first", rec.Blockers)
+		}
 	}
 	p.Recommendation = rec
-
-	p.Engines = AssessEngines(in, projected)
 
 	p.Duration = estimateDuration(in, projected, rec.Engine)
 	p.Disk = estimateDisk(projected, rec.Engine)
@@ -296,6 +346,15 @@ func Analyze(in Input) Plan {
 	})
 
 	return p
+}
+
+func hasCheckID(checks []Check, id string) bool {
+	for _, c := range checks {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func severityRank(s Severity) int {
