@@ -234,6 +234,7 @@ type applyOpts struct {
 	freeDisk          int64
 	diskTotal         int64
 	session           string
+	detach            bool
 }
 
 func cmdApply(args []string, stdout, stderr io.Writer) int {
@@ -253,6 +254,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
 	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
 	fs.StringVar(&o.session, "session", "", "execute the plan stored in this session instead of planning again")
+	fs.BoolVar(&o.detach, "detach", false, "run the engine in its own process group, so closing this terminal does not stop it")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
 	fs.StringVar(&o.confirm, "confirm", "", "must equal the host name when --production is set")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "build statements and approvals without executing")
@@ -311,6 +313,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		FreeDisk:               o.freeDisk,
 		DiskTotal:              o.diskTotal,
 		ForExecution:           true,
+		Detach:                 o.detach,
 		Actor:                  currentActor(),
 		Binaries:               binariesOrNil(*noProbe),
 		Progress: func(p engine.Progress) {

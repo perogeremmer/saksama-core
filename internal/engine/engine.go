@@ -92,6 +92,14 @@ type Engine interface {
 	Verify(ctx context.Context) ([]VerifyResult, error)
 }
 
+// Detachable is implemented by engines that run as a child process and can
+// therefore survive their client.
+type Detachable interface {
+	// SetDetach puts the engine in its own process group and reports the child PID
+	// as soon as it exists.
+	SetDetach(detach bool, onStart func(pid int))
+}
+
 // Options carries what every engine needs.
 type Options struct {
 	Schema     string

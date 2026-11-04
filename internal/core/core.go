@@ -49,6 +49,9 @@ type Request struct {
 	ForExecution bool
 	// ResumedFrom names the session whose plan this execution follows.
 	ResumedFrom string
+	// Detach runs the copy engine in its own process group, so a dropped SSH
+	// session does not kill it. `saksama cancel` stops it by recorded PID.
+	Detach bool
 
 	LockWaitTimeoutSeconds int
 	LongQueryThreshold     int64
@@ -417,6 +420,22 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 
 	sess.Phase = "ddl"
 	r.emit(prep, events.TypePhaseStarted, map[string]any{"phase": "ddl"})
+
+	// Detach is opt-in through the request, because a user watching a short
+	// migration in a terminal expects ctrl-c to reach it.
+	if req.Detach {
+		if d, ok := eng.(engine.Detachable); ok {
+			d.SetDetach(true, func(pid int) {
+				sess.EnginePID = pid
+				sess.LastSeq = prep.emitter.Seq()
+				_ = r.Store.Save(sess)
+				r.emit(prep, events.TypeEngineStarted, map[string]any{
+					"engine": sess.Engine, "pid": pid,
+					"note": "detached: closing this terminal will not stop the migration",
+				})
+			})
+		}
+	}
 
 	exec, execErr := eng.Execute(ctx, func(p engine.Progress) {
 		if req.Progress != nil {

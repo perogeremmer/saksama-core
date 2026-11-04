@@ -87,6 +87,9 @@ type Engine struct {
 	now   func() time.Time
 	lines func(process.Line)
 
+	detach         bool
+	onProcessStart func(pid int)
+
 	// defaultsFile is a temporary 0600 option file used instead of argv
 	// credentials. It is removed when the run finishes.
 	defaultsFile string
@@ -348,7 +351,15 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 	}
 
 	start := e.now()
-	res, runErr := process.Run(ctx, process.Spec{Argv: stmts[0].Argv}, collect)
+	res, runErr := process.Run(ctx, process.Spec{
+		Argv:   stmts[0].Argv,
+		Detach: e.detach,
+		OnStart: func(pid int) {
+			if e.onProcessStart != nil {
+				e.onProcessStart(pid)
+			}
+		},
+	}, collect)
 	close(stop)
 
 	ex.Statements = append(ex.Statements, engine.StatementResult{
@@ -429,6 +440,12 @@ func (e *Engine) tableRows(ctx context.Context, table string) int64 {
 		return 0
 	}
 	return n
+}
+
+// SetDetach implements engine.Detachable.
+func (e *Engine) SetDetach(detach bool, onStart func(pid int)) {
+	e.detach = detach
+	e.onProcessStart = onStart
 }
 
 // Verify checks the result through information_schema.

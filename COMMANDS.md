@@ -146,6 +146,7 @@ saksama apply --session s3 --confirm db.prod
 | `--force` | downgrade selected preflight aborts; never bypasses an invariant blocker |
 | `--lock-wait-timeout <n>` | session `lock_wait_timeout` in seconds, default 10 |
 | `--session <id>` | execute the plan stored in that session instead of planning again |
+| `--detach` | run the engine in its own process group, so closing the terminal does not stop it |
 | `--hold-cutover` | ask the engine to pause before the swap, where it supports that |
 | `--free-disk <bytes>` | free space on the data volume, when it cannot be measured from here |
 | `--disk-total <bytes>` | volume size, so the 10 percent floor can be applied |
@@ -235,6 +236,30 @@ saksama apply ... --free-disk 500GB --disk-total 1TB
 
 or run Saksama on the database host, where `@@datadir` can actually be read.
 `--force` downgrades this one blocker and records that it did.
+
+---
+
+## `saksama attach` and `saksama cancel`
+
+A migration should survive the terminal that started it. Two commands make that
+practical without a background daemon:
+
+```bash
+saksama apply ... --detach        # engine runs in its own process group
+saksama attach s3                 # follow the event log, ctrl-c to detach
+saksama cancel s3                 # SIGTERM the recorded engine pid
+```
+
+`attach` reads the append-only event log on disk, so it works from another
+terminal, after a reconnect, or hours later. Detaching does not stop anything on
+the server, and `attach` says so when you leave.
+
+`cancel` signals the process id recorded in the session. If the engine had not cut
+over, the production table was never swapped; `status` and `cleanup` handle what it
+left behind.
+
+The limit worth knowing: a native `ALTER` is owned by the MySQL server, so there is
+no process to cancel. The tool says that instead of pretending.
 
 ---
 

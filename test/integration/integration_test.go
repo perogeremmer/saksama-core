@@ -35,6 +35,7 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
 	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/cred"
+	"github.com/perogeremmer/saksama-core/internal/engine/process"
 	"github.com/perogeremmer/saksama-core/internal/introspect"
 	"github.com/perogeremmer/saksama-core/internal/model"
 	"github.com/perogeremmer/saksama-core/internal/state"
@@ -1334,5 +1335,84 @@ func TestApplyFromSessionRunsAFreshPlan(t *testing.T) {
 		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
 		schema); n == 0 {
 		t.Fatal("the index was not created")
+	}
+}
+
+// --- durable sessions: detached engine, attach, cancel ---------------------
+
+// A killed client must not kill the migration. The engine runs in its own process
+// group and its pid is recorded, so `cancel` can stop it later from anywhere.
+func TestCopyEngineRunsDetachedAndCanBeCancelled(t *testing.T) {
+	// No real engine needed here: the plan's verified path is what runs, so a stub
+	// is enough to prove detachment and cancellation.
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	// A stand-in engine that sleeps long enough to be cancelled, and records its
+	// own command line so we can see it really started.
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "argv.txt")
+	bin := filepath.Join(dir, "pt-online-schema-change")
+	// A long-lived process that does not spawn a long-lived child, so a kill
+	// closes the output pipe promptly and the test stays fast.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + capture + "\nwhile :; do sleep 0.2; done\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	runner, store := newRunner(t)
+	runner.DB = db
+	req := applyRequest(schema, "t", "ADD COLUMN `note` varchar(64) NULL")
+	req.EngineHint = analyzer.EnginePtOSC
+	req.EngineHintSource = "recorded"
+	req.ForExecution = true
+	req.Detach = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+	req.Binaries = map[string]analyzer.EngineBinary{
+		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: bin, Version: "stub"},
+	}
+
+	done := make(chan struct{})
+	var sess *state.Session
+	go func() {
+		sess, _ = runner.Apply(context.Background(), req)
+		close(done)
+	}()
+
+	// Wait until the pid is recorded, which is the moment the engine exists.
+	var pid int
+	for i := 0; i < 100; i++ {
+		time.Sleep(50 * time.Millisecond)
+		sessions, _ := store.List()
+		if len(sessions) > 0 && sessions[0].EnginePID > 0 {
+			pid = sessions[0].EnginePID
+			break
+		}
+	}
+	if pid == 0 {
+		t.Fatal("no engine pid was recorded, so cancel could not work")
+	}
+	if !process.Alive(pid) {
+		t.Fatalf("recorded pid %d is not running", pid)
+	}
+	if _, err := os.Stat(capture); err != nil {
+		t.Fatalf("the engine never started: %v", err)
+	}
+
+	// Cancelling from another "client" is just a signal to the recorded pid.
+	if err := process.Stop(pid, 15*time.Second); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if process.Alive(pid) {
+		t.Fatal("the engine survived a cancel")
+	}
+
+	<-done
+	if sess != nil && sess.State == state.StateDone {
+		t.Fatalf("a cancelled run must not be reported as done: %+v", sess)
 	}
 }

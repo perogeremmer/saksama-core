@@ -97,6 +97,11 @@ type Session struct {
 	Approvals    []Approval        `json:"approvals,omitempty"`
 	Verification []VerifyRecord    `json:"verification,omitempty"`
 
+	// EnginePID is the copy engine's process id, so another command can stop it
+	// even after the client that started it is gone.
+	EnginePID int `json:"engine_pid,omitempty"`
+	// CutoverFlagFile is the gate the engine waits on before swapping tables.
+	CutoverFlagFile string `json:"cutover_flag_file,omitempty"`
 	// ResumedFrom records that this execution followed an earlier plan.
 	ResumedFrom string `json:"resumed_from,omitempty"`
 	LastSeq     int64  `json:"last_seq"`
