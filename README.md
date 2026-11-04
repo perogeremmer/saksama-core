@@ -184,7 +184,8 @@ The MySQL Clone Plugin is deliberately absent: it clones an instance, not a tabl
 | pt-osc adapter, verified against 3.0.13 and 3.7.2 | done |
 | Engine choice with table, database, and global scope | done |
 | Session state, table lock, event log, audit export | done |
-| Cutover pause, cancel, cleanup, daemon, TUI | not built |
+| Cutover gate, cancel, cleanup with ownership, attach, reconcile | done |
+| Daemon with a socket, TUI | not built |
 
 Commands that are not implemented exit `2` with an explicit message. They are
 never stubbed into something that looks like it works.
@@ -214,13 +215,13 @@ claim something this repository does not do.
 ## Development
 
 ```bash
-make test               # 202 unit tests
+make test               # 205 unit tests
 make lint               # go vet plus a gofmt check
 make cover              # per-package coverage
 make demo               # two plan cards, no database needed
 
 make integration-up     # disposable MySQL 8.0 in docker on :33306
-make test-integration   # 32 tests against a real server, or 28 when no copy engine is installed
+make test-integration   # 39 tests against a real server, 4 more when pt-osc or gh-ost is installed
 make integration-down
 
 make compat-doc         # regenerate docs/COMPATIBILITY.md

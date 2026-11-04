@@ -329,6 +329,28 @@ saksama export s3 --format json
 
 ---
 
+## `saksama reconcile`
+
+Lists sessions that never reached a terminal state, and reports what the database
+shows for the objects each one owns.
+
+```
+saksama reconcile
+saksama reconcile --json
+```
+
+A crashed session is neither obviously failed nor obviously running, so this reports
+the observation rather than a verdict the tool cannot support:
+
+| What it finds | Next step it suggests |
+|---|---|
+| the engine process is still alive | `attach` to watch it, or `cancel` it |
+| the engine is gone but objects remain | check the table, then `cleanup` |
+| nothing remains | re-plan; the previous attempt did not finish |
+
+Nothing is changed by this command. The point is that nobody touches a half-finished
+migration without looking at it first.
+
 ## `saksama cleanup`
 
 Drops the objects a session **recorded as its own**, and nothing else.

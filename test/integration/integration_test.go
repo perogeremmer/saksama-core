@@ -1602,3 +1602,86 @@ func TestCutoverRefusesWhenNothingIsHeld(t *testing.T) {
 		t.Fatalf("unhelpful error: %v", err)
 	}
 }
+
+// --- reconcile --------------------------------------------------------------
+
+// After a crash, a session is neither obviously failed nor obviously running. What
+// reconcile reports is the observation, plus what exists in the database.
+func TestReconcileReportsUnfinishedSessionsAndLeftovers(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		// A leftover that a session claims, and one it does not.
+		"CREATE TABLE `_t_gho` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+	)
+
+	runner, store := newRunner(t)
+	runner.DB = db
+
+	// An unfinished session with a recorded artifact that still exists.
+	stale := &state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateRunning,
+		Database: schema, Table: "t", Engine: "gh-ost",
+	}
+	stale.RecordArtifact("table", "_t_gho", "gh-ost", "ghost table")
+	if err := store.Save(stale); err != nil {
+		t.Fatal(err)
+	}
+
+	// A finished session must not appear at all.
+	done := &state.Session{
+		ID: "s2", CreatedAt: "2026-01-02T00:00:00Z", State: state.StateDone,
+		Database: schema, Table: "t", Engine: "native",
+	}
+	if err := store.Save(done); err != nil {
+		t.Fatal(err)
+	}
+
+	findings, err := runner.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("got %d findings, want 1 (only the unfinished session): %+v", len(findings), findings)
+	}
+
+	f := findings[0]
+	if f.Session != "s1" {
+		t.Fatalf("wrong session: %q", f.Session)
+	}
+	if f.EngineAlive {
+		t.Fatal("no engine pid was recorded, so it cannot be alive")
+	}
+	if len(f.Observed) != 1 || !strings.Contains(f.Observed[0], "_t_gho") {
+		t.Fatalf("the leftover was not observed: %v", f.Observed)
+	}
+	if !f.Actionable {
+		t.Fatal("a session with leftovers should suggest cleanup")
+	}
+	if !strings.Contains(f.Verdict, "left") {
+		t.Fatalf("verdict should name the situation: %q", f.Verdict)
+	}
+}
+
+func TestReconcileIsQuietWhenEverythingFinished(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	_ = schema
+
+	runner, store := newRunner(t)
+	runner.DB = db
+	if err := store.Save(&state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateDone,
+		Database: "shop", Table: "t", Engine: "native",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	findings, err := runner.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected nothing to reconcile, got %+v", findings)
+	}
+}

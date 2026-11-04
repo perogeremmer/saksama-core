@@ -56,6 +56,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdCancel(args[1:], stdout, stderr)
 	case "cutover":
 		return cmdCutover(args[1:], stdout, stderr)
+	case "reconcile":
+		return cmdReconcile(args[1:], stdout, stderr)
 	case "events":
 		return cmdEvents(args[1:], stdout, stderr)
 	case "export":
@@ -98,6 +100,7 @@ Usage:
   saksama attach <session>                 follow the event log, detach with ctrl-c
   saksama cancel <session>                 stop a running copy engine by pid
   saksama cutover <session>                release a held cutover, allowing the swap
+  saksama reconcile                        sessions that never finished, and what is left
   saksama events <session>
   saksama export <session>
   saksama cleanup <session>
