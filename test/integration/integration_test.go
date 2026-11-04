@@ -1642,13 +1642,17 @@ func TestHoldCutoverCreatesAndReleasesTheGate(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait until the session records the gate, which happens before the engine runs.
+	// Wait until the session records the gate AND the engine has started. Releasing
+	// the gate before the engine is running is a real race: the file is written
+	// first, and a stub that checks for it at startup would then find it gone and
+	// exit 3. An operator would not release a cutover before `status` showed a pid
+	// either.
 	var gate string
 	var sessionID string
 	for i := 0; i < 100; i++ {
 		time.Sleep(50 * time.Millisecond)
 		sessions, _ := store.List()
-		if len(sessions) > 0 && sessions[0].CutoverFlagFile != "" {
+		if len(sessions) > 0 && sessions[0].CutoverFlagFile != "" && sessions[0].EnginePID != 0 {
 			gate = sessions[0].CutoverFlagFile
 			sessionID = sessions[0].ID
 			break

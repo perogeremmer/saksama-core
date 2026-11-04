@@ -266,3 +266,39 @@ func TestExecuteRunsTheEngineWithTheBuiltArgv(t *testing.T) {
 		}
 	}
 }
+
+// gh-ost refuses to start when performance_schema.metadata_locks is missing:
+// "bailing out because metadata lock instrument not enabled". That table arrived in
+// MySQL 5.7, so on 5.6 the flag is not optional - without it the engine exits
+// before copying anything, and recommending gh-ost there would be advice nobody
+// could follow.
+func TestGhOstSkipsTheMetadataLockCheckOnlyWhereTheInstrumentIsMissing(t *testing.T) {
+	cases := []struct {
+		version string
+		want    bool
+	}{
+		{"5.6.51", true},
+		{"5.6.51-log", true},
+		{"5.7.44", false},
+		{"8.0.46", false},
+		{"8.4.13", false},
+		{"", true}, // unparseable: assume absent, the plan explains why
+	}
+
+	for _, c := range cases {
+		opts := testOptions()
+		opts.Plan.Server.Version = c.version
+		e := &Engine{spec: GhOst(), opts: opts}
+		argv, cleanup, err := e.argv()
+		if cleanup != "" {
+			defer os.Remove(cleanup)
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", c.version, err)
+		}
+		got := strings.Contains(strings.Join(argv, " "), "--skip-metadata-lock-check")
+		if got != c.want {
+			t.Errorf("server %q: --skip-metadata-lock-check present=%v, want %v", c.version, got, c.want)
+		}
+	}
+}

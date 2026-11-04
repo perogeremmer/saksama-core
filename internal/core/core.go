@@ -7,6 +7,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -347,7 +348,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	// starts: the engine waits for the file to disappear, so the file must be there.
 	cutoverGate := ""
 	if req.HoldCutover {
-		cutoverGate = filepath.Join(os.TempDir(), fmt.Sprintf("saksama-%s.cutover", sess.ID))
+		cutoverGate = cutoverGatePath(r.Store.Dir(), sess.ID)
 		if err := os.WriteFile(cutoverGate, []byte("held by session "+sess.ID+"\n"), 0o600); err != nil {
 			sess.State = state.StateFailed
 			sess.Error = fmt.Sprintf("cannot create the cutover gate: %v", err)
@@ -477,18 +478,22 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 
 	// Detach is opt-in through the request, because a user watching a short
 	// migration in a terminal expects ctrl-c to reach it.
-	if req.Detach {
-		if d, ok := eng.(engine.Detachable); ok {
-			d.SetDetach(true, func(pid int) {
-				sess.EnginePID = pid
-				sess.LastSeq = prep.emitter.Seq()
-				_ = r.Store.Save(sess)
-				r.emit(prep, events.TypeEngineStarted, map[string]any{
-					"engine": sess.Engine, "pid": pid,
-					"note": "detached: closing this terminal will not stop the migration",
-				})
+	// The pid is recorded whether or not the run is detached: `status` should show
+	// it, and `cancel` from another terminal should find it. Detaching only changes
+	// who owns the process group, not whether the process has an identity.
+	if d, ok := eng.(engine.Detachable); ok {
+		d.SetDetach(req.Detach, func(pid int) {
+			sess.EnginePID = pid
+			sess.LastSeq = prep.emitter.Seq()
+			_ = r.Store.Save(sess)
+			note := "closing this terminal stops the engine"
+			if req.Detach {
+				note = "detached: closing this terminal will not stop the migration"
+			}
+			r.emit(prep, events.TypeEngineStarted, map[string]any{
+				"engine": sess.Engine, "pid": pid, "note": note,
 			})
-		}
+		})
 	}
 
 	exec, execErr := eng.Execute(ctx, func(p engine.Progress) {
@@ -800,6 +805,17 @@ func (r *Runner) ApplyFromSession(ctx context.Context, sessionID string, req Req
 	req.ResumedFrom = sessionID
 
 	return r.Apply(ctx, req)
+}
+
+// cutoverGatePath is where gh-ost waits before swapping.
+//
+// The session id alone is not unique: two state directories both start at s1, and
+// two runs sharing /tmp/saksama-s1.cutover would let one session release the
+// other's cut-over. The directory is folded into the name so the file belongs to
+// exactly one session record.
+func cutoverGatePath(stateDir, sessionID string) string {
+	sum := sha256.Sum256([]byte(stateDir))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("saksama-%x-%s.cutover", sum[:4], sessionID))
 }
 
 // recordExpectedArtifacts names what the engine will create, so cleanup has

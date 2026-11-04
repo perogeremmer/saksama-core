@@ -2,6 +2,7 @@ package core
 
 import (
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
@@ -59,5 +60,23 @@ func TestRecordedArtifactsMatchWhatTheEnginesCreate(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+// Two state directories both start at "s1". A cut-over gate named after the
+// session alone would let one run release the other's swap, and a late cleanup
+// from the first would delete the second's gate file while its engine waited.
+func TestCutoverGatePathIsUniquePerStateDirectory(t *testing.T) {
+	a := cutoverGatePath("/home/a/.local/state/saksama", "s1")
+	b := cutoverGatePath("/home/b/.local/state/saksama", "s1")
+	if a == b {
+		t.Fatalf("two state directories produced the same gate path: %s", a)
+	}
+	if !strings.Contains(a, "s1") {
+		t.Errorf("the session id must stay readable in the path: %s", a)
+	}
+	// Stable for the same inputs, or `cutover` could not find the file it recorded.
+	if a != cutoverGatePath("/home/a/.local/state/saksama", "s1") {
+		t.Error("the gate path must be stable for one session")
 	}
 }

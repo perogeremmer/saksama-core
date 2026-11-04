@@ -187,6 +187,15 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 			// needs to be told that the mismatch is expected.
 			argv = append(argv, "--skip-port-validation")
 		}
+		if !metadataLockInstrument(e.opts) {
+			// gh-ost bails out on a server without performance_schema.metadata_locks,
+			// which is every MySQL before 5.7: "bailing out because metadata lock
+			// instrument not enabled". Without this flag gh-ost simply cannot run
+			// there, so recommending it on 5.6 would have been advice nobody could
+			// follow. The plan says the same thing in its own words, and E5b asks the
+			// operator to accept the blind spot.
+			argv = append(argv, "--skip-metadata-lock-check")
+		}
 		// gh-ost has no option-file support. A password would have to go in argv,
 		// which puts it in the process list, so this is opt-in and loud.
 		if e.conn.Password != "" {
@@ -271,6 +280,20 @@ const (
 	maxLoadThreads      = 50
 	criticalLoadThreads = 100
 )
+
+// metadataLockInstrument reports whether the server has the table gh-ost uses to
+// verify that its cut-over can acquire the metadata lock immediately. It arrived
+// in MySQL 5.7; before that gh-ost refuses to run unless told to skip the check.
+func metadataLockInstrument(o engine.Options) bool {
+	v, err := model.ParseVersion(o.Plan.Server.Version)
+	if err != nil {
+		// An unparseable version never reaches an execution path - the capability
+		// matrix refuses it first - but if it ever does, assume the instrument is
+		// absent and let the plan's own E5b explain the blind spot.
+		return false
+	}
+	return v.AtLeast(5, 7, 0)
+}
 
 func chunkSize(o engine.Options) int {
 	if o.ChunkSize > 0 {

@@ -1397,3 +1397,38 @@ func TestPlanNamesAMissingIndexColumn(t *testing.T) {
 		}
 	}
 }
+
+// gh-ost refuses to start on a server without performance_schema.metadata_locks
+// ("bailing out because metadata lock instrument not enabled"), so the wrapper has
+// to pass --skip-metadata-lock-check there. The plan must say the same thing: an
+// engine running with its lock check switched off is a blind spot, not a detail.
+func TestGhOstOnMySQL56AdmitsItCannotCheckTheLockQueue(t *testing.T) {
+	fk := func(t *model.Table) {
+		t.ForeignKeys = nil
+		t.Indexes[0].Parts = []model.IndexPart{{Column: "id"}}
+		t.Columns = append(t.Columns, model.Column{Name: "status", DataType: "varchar", Type: "varchar(32)"})
+	}
+	binaries := map[string]EngineBinary{
+		"gh-ost": {Name: "gh-ost", Available: true, Version: "1.1.11"},
+	}
+	in := Input{
+		Server:   model.Server{Version: "5.6.51", Vendor: "mysql"},
+		Table:    fleetTable("plain", fk),
+		Ops:      []model.Op{{Kind: model.OpModifyColumn}},
+		Binaries: binaries,
+		Settings: SettingsFromMap(binlogOn()),
+	}
+	p := Analyze(in)
+	if p.Recommendation.Engine != EngineGhOst {
+		t.Fatalf("expected gh-ost on 5.6 with binlog on, got %q", p.Recommendation.Engine)
+	}
+	if !hasCheck(p, "R11", SeverityWarn) {
+		t.Fatalf("a gh-ost plan on 5.6 must carry R11: %+v", p.Checks)
+	}
+	// The same plan on 5.7 must not carry it: the instrument exists there.
+	in.Server = model.Server{Version: "5.7.44", Vendor: "mysql"}
+	p57 := Analyze(in)
+	if p57.Recommendation.Engine == EngineGhOst && hasCheck(p57, "R11", SeverityWarn) {
+		t.Errorf("gh-ost on 5.7 can check the lock queue and must not warn about it")
+	}
+}

@@ -195,14 +195,22 @@ func TestKilledCopyLeavesOnlyOwnedDebris(t *testing.T) {
 			}
 			id, pid, finished := startSlowCopy(t, db, store, slowCopyRequest(schema, eng.name, eng.hint), eng, "t")
 
+			t.Logf("before the kill (pid %d): %v", pid, describeObjects(db))
 			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-				t.Fatalf("kill engine pid %d: %v", pid, err)
+				sess, _ := store.Load(id)
+				t.Fatalf("kill engine pid %d: %v.\nsession state=%s error=%q\nobjects now: %v",
+					pid, err, sess.State, sess.Error, describeObjects(db))
 			}
 			select {
 			case <-finished:
 			case <-time.After(60 * time.Second):
 				t.Fatal("the wrapper did not notice the killed engine")
 			}
+			// Snapshot immediately: this is the state the incident left, and the
+			// assertion below is about owning it. Anything that changes afterwards is
+			// this test's own cleanup, not evidence about the crash.
+			afterKill := realArtifacts(db, eng)
+			t.Logf("after the kill: %v", describeObjects(db))
 
 			// 1. Honest recovery starts with the production table being untouched.
 			if n := countRows(t, db, "SELECT COUNT(*) FROM `t`"); n == 0 {
@@ -213,13 +221,14 @@ func TestKilledCopyLeavesOnlyOwnedDebris(t *testing.T) {
 			}
 
 			// 2. The debris is real, and every piece of it must be owned.
-			real := realArtifacts(db, eng)
-			if len(real) == 0 {
-				t.Fatalf("%s left no visible artifacts; the test is not exercising a crash", eng.name)
-			}
 			sess, err := store.Load(id)
 			if err != nil {
 				t.Fatal(err)
+			}
+			real := afterKill
+			if len(real) == 0 {
+				t.Fatalf("%s left no visible artifacts; the test is not exercising a crash.\nsession state=%s error=%q\nobjects now: %v",
+					eng.name, sess.State, sess.Error, describeObjects(db))
 			}
 			recorded := map[string]bool{}
 			for _, a := range sess.Artifacts {
@@ -359,6 +368,35 @@ func createCopyFixture(t *testing.T, db *sql.DB, rows int) {
 	if n := countRows(t, db, "SELECT COUNT(*) FROM `t`"); n < rows {
 		t.Fatalf("fixture has %d rows, want at least %d", n, rows)
 	}
+}
+
+// describeObjects is the failure message's evidence: what the schema holds right
+// now, so a test that says "no artifacts" also says what it did see.
+func describeObjects(db *sql.DB) []string {
+	var out []string
+	rows, err := db.Query(`SELECT TABLE_NAME FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME`)
+	if err == nil {
+		for rows.Next() {
+			var n string
+			if rows.Scan(&n) == nil {
+				out = append(out, "table "+n)
+			}
+		}
+		rows.Close()
+	}
+	rows, err = db.Query(`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS
+		WHERE TRIGGER_SCHEMA = DATABASE() ORDER BY TRIGGER_NAME`)
+	if err == nil {
+		for rows.Next() {
+			var n string
+			if rows.Scan(&n) == nil {
+				out = append(out, "trigger "+n)
+			}
+		}
+		rows.Close()
+	}
+	return out
 }
 
 func keysOf(m map[string]bool) []string {

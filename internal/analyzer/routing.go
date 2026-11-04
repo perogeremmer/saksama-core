@@ -174,12 +174,36 @@ func engineChecks(in Input, assessments []EngineAssessment, rec Recommendation) 
 
 // engineWarnings reports caveats that matter when a copy engine is running but
 // do not change the go/no-go decision.
+// hasMetadataLockInstrument reports whether the server has the table gh-ost uses to
+// verify its cut-over lock.
+func hasMetadataLockInstrument(srv model.Server) bool {
+	v, err := model.ParseVersion(srv.Version)
+	if err != nil {
+		return false
+	}
+	return v.AtLeast(5, 7, 0)
+}
+
 func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation) []Check {
 	var out []Check
 
 	effective, ok := findAssessment(assessments, rec.Engine)
 	if !ok || effective.Verdict != VerdictSuitable {
 		return nil
+	}
+
+	if rec.Engine == EngineGhOst && !hasMetadataLockInstrument(in.Server) {
+		// gh-ost verifies the cut-over's metadata lock through
+		// performance_schema.metadata_locks and refuses to start without it. On 5.6
+		// the wrapper passes --skip-metadata-lock-check so the run can happen at
+		// all, which means gh-ost cannot warn about a lock queue either. Saying so
+		// is the difference between a blind spot and a hidden one.
+		out = append(out, Check{
+			ID: "R11", Severity: SeverityWarn,
+			Title:       "gh-ost cannot check the metadata lock queue on this server",
+			Detail:      "performance_schema.metadata_locks does not exist before MySQL 5.7, so gh-ost runs with --skip-metadata-lock-check and will not detect a pending lock queue at cut-over",
+			Remediation: "check SHOW PROCESSLIST and INFORMATION_SCHEMA.INNODB_TRX immediately before applying, or run this migration on 5.7 or newer",
+		})
 	}
 
 	if rec.Engine == EnginePtOSC && len(in.Table.ForeignKeys) > 0 {
