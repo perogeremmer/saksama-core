@@ -1273,3 +1273,82 @@ func TestPlanRefusesMySQL56(t *testing.T) {
 		t.Fatalf("5.7 must not be caught by the 5.6 refusal: %+v", p.Recommendation)
 	}
 }
+
+// A rebuild engine that fits the table but cannot run on this machine is a
+// recommendation nobody can follow, so the two facts are reported apart.
+func TestAssessSchemaSaysWhenTheEngineIsNotInstalled(t *testing.T) {
+	tables := []model.Table{fleetTable("plain", nil)}
+
+	got := AssessSchema(tables, model.Server{Version: "8.0.36", Vendor: "mysql"},
+		map[string]EngineBinary{
+			"gh-ost":                  {Name: "gh-ost", Available: false},
+			"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Version: "3.5.1"},
+		}, binlogOn())
+
+	if len(got) != 1 {
+		t.Fatalf("got %d assessments", len(got))
+	}
+	a := got[0]
+	if a.RebuildEngine != EngineGhOst {
+		t.Fatalf("the engine that fits must stay gh-ost, got %q", a.RebuildEngine)
+	}
+	if a.RebuildReady {
+		t.Fatal("gh-ost is not installed, so it cannot be ready")
+	}
+	if a.RebuildBlocked != "not installed" {
+		t.Errorf("got %q, want \"not installed\"", a.RebuildBlocked)
+	}
+	if !strings.Contains(a.RebuildFix, "gh-ost") {
+		t.Errorf("the fix must name the binary, got %q", a.RebuildFix)
+	}
+}
+
+// --no-probe means nobody looked. Unknown is not a pass.
+func TestAssessSchemaReportsUnprobedBinariesAsUnproven(t *testing.T) {
+	got := AssessSchema([]model.Table{fleetTable("plain", nil)},
+		model.Server{Version: "8.0.36", Vendor: "mysql"}, nil, binlogOn())
+
+	if got[0].RebuildReady {
+		t.Fatal("an unprobed binary cannot be reported as ready")
+	}
+	if got[0].RebuildBlocked != "not probed" {
+		t.Errorf("got %q, want \"not probed\"", got[0].RebuildBlocked)
+	}
+}
+
+// The native question is answered by the version gated matrix, so a server that
+// the matrix refuses cannot be promised native DDL.
+func TestNativeIndexPathFollowsTheCapabilityMatrix(t *testing.T) {
+	ok := []model.Server{
+		{Version: "8.0.46", Vendor: "mysql"},
+		{Version: "8.4.13", Vendor: "mysql"},
+		{Version: "5.7.44", Vendor: "mysql"},
+	}
+	for _, srv := range ok {
+		yes, detail := NativeIndexPath(srv)
+		if !yes {
+			t.Errorf("%s: expected native index DDL, got %q", srv.Version, detail)
+		}
+		if !strings.Contains(detail, "INPLACE") || !strings.Contains(detail, "LOCK=NONE") {
+			t.Errorf("%s: detail must cite the algorithm and the lock: %q", srv.Version, detail)
+		}
+	}
+
+	no := []model.Server{
+		{Version: "5.4.4", Vendor: "mysql"},
+		{Version: "5.6.51", Vendor: "mysql"},
+		{Version: "5.5.62", Vendor: "mysql"},
+		{Version: "10.11.6-MariaDB-log", Vendor: "mariadb"},
+		{Version: "", Vendor: "mysql"},
+		{Version: "not-a-version", Vendor: "mysql"},
+	}
+	for _, srv := range no {
+		yes, detail := NativeIndexPath(srv)
+		if yes {
+			t.Errorf("%s: claimed native DDL the matrix does not cover", srv.Version)
+		}
+		if detail == "" {
+			t.Errorf("%s: a refusal needs a reason", srv.Version)
+		}
+	}
+}

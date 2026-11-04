@@ -104,6 +104,21 @@ type EngineBinary struct {
 	Error     string
 }
 
+// Install commands for the copy engines. These are the commands, not a link,
+// because a verdict that says "gh-ost is not installed" is only useful if the
+// next thing on screen can be pasted.
+//
+// pt-osc is a single Perl file. The toolkit package installs dozens of tools
+// this project never calls, and COMMANDS.md documents the single-file route CI
+// itself uses, so the hint must not contradict it.
+//
+// gh-ost ships per-architecture tarballs; both URLs below were fetched and run
+// against the published releases before being written down.
+const (
+	GhOstInstall = "curl -fsSL https://github.com/github/gh-ost/releases/latest/download/gh-ost-linux-amd64.tar.gz | tar xz -C /usr/local/bin gh-ost"
+	PtOSCInstall = "curl -fsSL -o /usr/local/bin/pt-online-schema-change https://raw.githubusercontent.com/percona/percona-toolkit/v3.7.2/bin/pt-online-schema-change && chmod +x /usr/local/bin/pt-online-schema-change"
+)
+
 // AdviceInput is everything the engine matrix needs.
 type AdviceInput struct {
 	Input     Input
@@ -444,7 +459,7 @@ func (a *AdviceInput) assessGhOst() EngineAssessment {
 	// gh-ost needs row-based binlog for the copy to be consistent.
 	x.require("row-based binlog", true, "gh-ost verifies binlog_format=ROW at startup and stops if it is not")
 
-	bin := x.binary(in, "gh-ost", "install: https://github.com/github/gh-ost/releases")
+	bin := x.binary(in, "gh-ost", "install: "+GhOstInstall)
 	if bin != nil && bin.Available {
 		x.Notes = append(x.Notes, "found locally: "+bin.Path+" ("+bin.Version+")")
 	}
@@ -527,7 +542,7 @@ func (a *AdviceInput) assessPtOSC() EngineAssessment {
 			fmt.Sprintf("%d incoming constraint(s): add --alter-foreign-keys-method=auto", len(t.ReferencedBy)))
 	}
 
-	bin := x.binary(in, "pt-online-schema-change", "install: apt install percona-toolkit")
+	bin := x.binary(in, "pt-online-schema-change", "install: "+PtOSCInstall)
 	if bin != nil && bin.Available {
 		x.Notes = append(x.Notes, "found locally: "+bin.Path+" ("+bin.Version+")")
 		if strings.HasPrefix(bin.Version, "2.") {

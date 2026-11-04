@@ -114,6 +114,17 @@ ENGINE SUITABILITY for schema shop
 | users      | 410.0k |   88 MB | id bigint unsigned   | 0/0 | yes    | yes    | gh-ost       |
 +------------+--------+---------+----------------------+-----+--------+--------+--------------+
 
+VERDICT for schema shop
+  index-only change   no engine, no copy: ADD INDEX = INPLACE, LOCK=NONE on MySQL 8.0.46
+  if a rebuild is needed
+    gh-ost   2 tables: sessions, users                      ready
+    pt-osc   2 tables: m2m, orders                          ready
+  no engine           1 table: audit_log  (no primary key or unique key to chunk by)
+
+  run this next
+    decide a statement   saksama advise --live -d shop -t orders -a "<ALTER>"
+    record the engine    saksama engine set pt-osc -d shop -t orders
+
 TABLES NO ENGINE CAN COPY
   audit_log
     - no primary key or unique key to chunk by

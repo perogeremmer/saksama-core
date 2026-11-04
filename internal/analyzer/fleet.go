@@ -27,6 +27,15 @@ type TableAssessment struct {
 	// RebuildEngine is the engine to use if this table ever needs a rebuild, or
 	// "none" when no engine can copy it.
 	RebuildEngine Engine `json:"rebuild_engine"`
+	// RebuildReady reports whether that engine can actually run here. A
+	// recommendation nobody can execute is not a recommendation, so the fit and
+	// the ability to run are reported separately rather than merged into one
+	// cell that lies when the binary is missing.
+	RebuildReady bool `json:"rebuild_ready"`
+	// RebuildBlocked is the phrase that explains a false RebuildReady.
+	RebuildBlocked string `json:"rebuild_blocked,omitempty"`
+	// RebuildFix is the action that clears it, when there is one.
+	RebuildFix string `json:"rebuild_fix,omitempty"`
 	// Blockers explains a "none", in the operator's words.
 	Blockers []string `json:"blockers,omitempty"`
 	GhOst    Verdict  `json:"gh_ost"`
@@ -50,7 +59,9 @@ func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]En
 		}
 
 		in := Input{Server: srv, Table: t, Binaries: binaries, Settings: env}
+		byEngine := map[Engine]EngineAssessment{}
 		for _, assess := range AssessEngines(in, t) {
+			byEngine[assess.Engine] = assess
 			switch assess.Engine {
 			case EngineGhOst:
 				a.GhOst = assess.Verdict
@@ -76,6 +87,11 @@ func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]En
 			a.Blockers = rebuildBlockers(t)
 		}
 
+		if a.RebuildEngine != EngineNone {
+			a.RebuildReady, a.RebuildBlocked, a.RebuildFix =
+				rebuildReadiness(byEngine[a.RebuildEngine], binaries != nil)
+		}
+
 		if t.Partitioned {
 			a.Notes = append(a.Notes, "partitioned")
 		}
@@ -91,6 +107,52 @@ func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]En
 
 	sort.Slice(out, func(i, j int) bool { return out[i].SizeBytes > out[j].SizeBytes })
 	return out
+}
+
+// rebuildReadiness turns an engine assessment into the three facts the report
+// needs: can it run, what stops it, and what clears that.
+//
+// probed is false when binaries were never checked (--no-probe). Unknown is not
+// a pass here either, so an unprobed binary is reported as unproven rather than
+// assumed present.
+func rebuildReadiness(x EngineAssessment, probed bool) (ready bool, blocked, fix string) {
+	if !probed {
+		return false, "not probed", "run without --no-probe to check for the binary"
+	}
+	if !x.Installed {
+		return false, "not installed", x.Install
+	}
+	if !x.Wrapped {
+		return false, "no adapter in this build", ""
+	}
+
+	var unmet []string
+	for _, r := range x.Environment {
+		if !r.Met {
+			unmet = append(unmet, r.Name)
+		}
+	}
+	if len(unmet) > 0 {
+		return false, "server not configured: " + strings.Join(unmet, ", "), "see SERVER SETTINGS"
+	}
+	return true, "", ""
+}
+
+// NativeIndexPath reports whether an index-only change on this server needs no
+// engine at all, and says why not when it does.
+//
+// The answer comes from the same version-gated matrix the planner uses, so this
+// report cannot claim native support on a server that does not have it. MySQL
+// 5.6 and older are refused outright by the matrix, MariaDB is declined rather
+// than guessed at, and an unparseable version is a refusal, not a default.
+func NativeIndexPath(srv model.Server) (bool, string) {
+	// The storage-engine rule is per table and already reported per row; the
+	// question here is what this server's DDL algorithm can do.
+	c := capabilityFor(model.Op{Kind: model.OpAddIndex}, srv, model.Table{Engine: "InnoDB"})
+	if c.Native && !c.Rebuild && !c.Blocked {
+		return true, fmt.Sprintf("ADD INDEX = %s, LOCK=%s on MySQL %s", c.Method, c.Lock, srv.Version)
+	}
+	return false, c.Reason
 }
 
 // ghOstEnvReady reports whether the server is configured for gh-ost. Table shape

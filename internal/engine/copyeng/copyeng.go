@@ -244,9 +244,9 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 
 func (e *Engine) installHint() string {
 	if e.spec.Kind == KindGhOst {
-		return "install it from https://github.com/github/gh-ost/releases"
+		return "install it with: " + analyzer.GhOstInstall
 	}
-	return "install it with: apt install percona-toolkit"
+	return "install it with: " + analyzer.PtOSCInstall
 }
 
 // CutoverGate implements engine.HoldsCutover. gh-ost waits until this file is

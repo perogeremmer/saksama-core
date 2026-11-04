@@ -233,7 +233,12 @@ func TestSchemaReportExplainsBlockedTables(t *testing.T) {
 	rows := []analyzer.TableAssessment{
 		{Table: "orders", Rows: 59_000_000, SizeBytes: 20 << 30, PrimaryKey: "id bigint",
 			FKOut: 2, GhOst: analyzer.VerdictUnsuitable, PtOSC: analyzer.VerdictSuitable,
-			RebuildEngine: analyzer.EnginePtOSC, Notes: []string{"pt-osc only: gh-ost cannot handle this table"}},
+			RebuildEngine: analyzer.EnginePtOSC, RebuildReady: true,
+			Notes: []string{"pt-osc only: gh-ost cannot handle this table"}},
+		{Table: "sessions", Rows: 2_100_000, SizeBytes: 640 << 20, PrimaryKey: "uuid char(36)",
+			GhOst: analyzer.VerdictSuitable, PtOSC: analyzer.VerdictSuitable,
+			RebuildEngine: analyzer.EngineGhOst, RebuildReady: false,
+			RebuildBlocked: "not installed", RebuildFix: "install: https://github.com/github/gh-ost/releases"},
 		{Table: "audit_log", PrimaryKey: "(none)",
 			GhOst: analyzer.VerdictUnsuitable, PtOSC: analyzer.VerdictUnsuitable,
 			RebuildEngine: analyzer.EngineNone,
@@ -241,7 +246,8 @@ func TestSchemaReportExplainsBlockedTables(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := SchemaReport(&buf, "shop", rows, nil); err != nil {
+	srv := model.Server{Version: "8.0.46", Vendor: "mysql"}
+	if err := SchemaReport(&buf, "shop", rows, nil, srv); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -253,12 +259,30 @@ func TestSchemaReportExplainsBlockedTables(t *testing.T) {
 		"TABLES NO ENGINE CAN COPY",
 		"no primary key or unique key to chunk by",
 		"NOTES",
-		"saksama engine set",
+		// The verdict, and the claim inside it read from the matrix.
+		"VERDICT for schema shop",
+		"no engine, no copy: ADD INDEX = INPLACE, LOCK=NONE on MySQL 8.0.46",
+		// An engine that fits but is not installed must not read as usable.
+		"gh-ost (unavailable)",
+		"not installed",
+		"install: https://github.com/github/gh-ost/releases",
+		// Commands derived from this schema, not a hardcoded example.
+		"run this next",
+		"saksama advise --live -d shop -t orders -a \"<ALTER>\"",
+		"saksama engine set pt-osc -d shop -t orders",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
+
+	// The old NEXT block hardcoded gh-ost regardless of what fit the tables: on
+	// this schema that command cannot work, and copying it would record an engine
+	// the operator's table cannot use.
+	if strings.Contains(out, "engine set gh-ost -d <db>") || strings.Contains(out, "engine set gh-ost -d shop -t orders") {
+		t.Errorf("verdict suggests an engine that does not fit the table:\n%s", out)
+	}
+
 	for _, r := range out {
 		if r > 127 {
 			t.Fatalf("non-ASCII rune %q in schema report", r)
@@ -266,9 +290,40 @@ func TestSchemaReportExplainsBlockedTables(t *testing.T) {
 	}
 }
 
+// The native claim is version gated, so an old or unverified server must not get
+// one. This is the case that used to be prose in the renderer: "an index-only
+// change needs no engine at all on MySQL 8.0" was printed for every server.
+func TestSchemaReportDoesNotPromiseNativeOnAnOldServer(t *testing.T) {
+	rows := []analyzer.TableAssessment{
+		{Table: "orders", Rows: 10, SizeBytes: 1024, PrimaryKey: "id bigint",
+			GhOst: analyzer.VerdictSuitable, PtOSC: analyzer.VerdictSuitable,
+			RebuildEngine: analyzer.EnginePtOSC, RebuildReady: true},
+	}
+
+	servers := []model.Server{
+		{Version: "5.4.4", Vendor: "mysql"},
+		{Version: "5.6.51", Vendor: "mysql"},
+		{Version: "10.11.6-MariaDB-log", Vendor: "mariadb"},
+		{Version: "", Vendor: "mysql"},
+	}
+	for _, srv := range servers {
+		var buf bytes.Buffer
+		if err := SchemaReport(&buf, "shop", rows, nil, srv); err != nil {
+			t.Fatal(err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "not native on this server") {
+			t.Errorf("server %q: expected the refusal:\n%s", srv.Version, out)
+		}
+		if strings.Contains(out, "no engine, no copy") {
+			t.Errorf("server %q: claimed native DDL without matrix support:\n%s", srv.Version, out)
+		}
+	}
+}
+
 func TestSchemaReportHandlesEmptySchema(t *testing.T) {
 	var buf bytes.Buffer
-	if err := SchemaReport(&buf, "empty", nil, nil); err != nil {
+	if err := SchemaReport(&buf, "empty", nil, nil, model.Server{Version: "8.0.46"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "no tables found") {

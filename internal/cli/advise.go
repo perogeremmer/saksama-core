@@ -179,7 +179,7 @@ func adviseOffline(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdo
 				"tables": rows, "artifacts": introspect.FindArtifacts([]model.Table{tbl})})
 			return ExitOK
 		}
-		if err := render.SchemaReportStyled(stdout, tbl.Schema, rows, introspect.FindArtifacts([]model.Table{tbl}), !o.plain); err != nil {
+		if err := render.SchemaReportStyled(stdout, tbl.Schema, rows, introspect.FindArtifacts([]model.Table{tbl}), srv, !o.plain); err != nil {
 			fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 			return ExitInternal
 		}
@@ -368,7 +368,7 @@ func adviseSchema(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdou
 		return ExitInternal
 	}
 	fmt.Fprintln(stdout)
-	if err := render.SchemaReportStyled(stdout, o.database, rows, artifacts, !o.plain); err != nil {
+	if err := render.SchemaReportStyled(stdout, o.database, rows, artifacts, srv, !o.plain); err != nil {
 		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 		return ExitInternal
 	}

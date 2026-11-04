@@ -85,8 +85,19 @@ saksama advise --schema <file>                             offline, from dumped 
 | `--json` | machine-readable output |
 | `--rows`, `--data-bytes`, `--index-bytes` | sizing facts for the offline estimate |
 
-Output has three parts: the server settings doctor, the engine matrix for the
-chosen scope, and a list of leftover artifacts from previous migrations.
+Output has four parts: the server settings doctor, the engine matrix for the
+chosen scope, a verdict, and a list of leftover artifacts from previous
+migrations.
+
+The verdict is the part you read first. It states what an index-only change needs
+on this server (the answer comes from the version-gated capability matrix, so a
+server the matrix refuses never gets a native claim), which engine each rebuild
+would use, whether that engine can actually run on this machine, and the exact
+command to type next. An engine that fits the table but is not installed shows as
+`gh-ost (unavailable)` with its install command, never as a silent suggestion.
+
+`--no-probe` skips the binary check, so the verdict reports `not probed` rather
+than assuming the engine is there. Unknown is not a pass.
 
 With no `-t`, every table in the database is scanned in a handful of bulk queries
 and listed largest first. `--json` returns the same data under
