@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/perogeremmer/saksama-core/internal/engine"
@@ -37,4 +38,19 @@ func dropArtifactsForTest(t *testing.T, db *sql.DB, database string, sess *state
 	}
 	_ = io.Discard
 	return dropped, failed
+}
+
+// requireBinlog skips a test whose subject cannot happen on a server that
+// gh-ost cannot start on. Binary logging is a server configuration, not a
+// Saksama setting, and a 5.6 box with it off is a real and common production
+// state: the honest answer there is pt-osc, not a failed assertion.
+func requireBinlog(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var name, value string
+	if err := db.QueryRow("SHOW GLOBAL VARIABLES LIKE 'log_bin'").Scan(&name, &value); err != nil {
+		t.Skipf("cannot read log_bin: %v", err)
+	}
+	if !strings.EqualFold(value, "ON") {
+		t.Skip("log_bin is off on this server, so gh-ost cannot run here")
+	}
 }

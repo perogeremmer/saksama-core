@@ -161,13 +161,17 @@ jobs:
           done
           echo "MySQL 5.7 did not become ready"; exit 1
 
+      # 5.6 gets binary logging for the same reason 5.7 does: the suite has to
+      # exercise gh-ost, not just pt-osc. A 5.6 box with log_bin off is the other
+      # real production state, and there the right answer is pt-osc; the routing
+      # test asserts whichever answer this server's own log_bin value implies.
       - name: Start MySQL 5.6
         run: |
           docker run -d --name mysql-56 \
             -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
             -e MYSQL_DATABASE=shop \
             -p 33309:3306 mysql:5.6 \
-            --skip-ssl
+            --log-bin=mysql-bin --server-id=1 --binlog-format=ROW --skip-ssl
           for i in $(seq 1 60); do
             if docker exec mysql-56 mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
               echo ready; exit 0

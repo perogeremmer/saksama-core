@@ -1072,8 +1072,27 @@ func TestIntrospectSchemaTablesReadsEveryTable(t *testing.T) {
 	if byTable["orders"].RebuildEngine != analyzer.EnginePtOSC {
 		t.Errorf("orders rebuild engine = %q, want pt-osc", byTable["orders"].RebuildEngine)
 	}
-	if byTable["users"].RebuildEngine != analyzer.EngineGhOst {
-		t.Errorf("users rebuild engine = %q, want gh-ost", byTable["users"].RebuildEngine)
+	// Which engine a plain table gets depends on whether this server can run
+	// gh-ost at all, and that is a property of the server, not of the test. A 5.6
+	// container started without --log-bin must route to pt-osc and say why.
+	wantPlain := analyzer.EnginePtOSC
+	if strings.EqualFold(settings["log_bin"], "ON") {
+		wantPlain = analyzer.EngineGhOst
+	}
+	if byTable["users"].RebuildEngine != wantPlain {
+		t.Errorf("users rebuild engine = %q, want %q (log_bin=%q)",
+			byTable["users"].RebuildEngine, wantPlain, settings["log_bin"])
+	}
+	if wantPlain == analyzer.EnginePtOSC {
+		var said bool
+		for _, note := range byTable["users"].Notes {
+			if strings.Contains(note, "not configured") || strings.Contains(note, "gh-ost") {
+				said = true
+			}
+		}
+		if !said {
+			t.Errorf("routing to pt-osc without a reason: %v", byTable["users"].Notes)
+		}
 	}
 	if byTable["audit"].RebuildEngine != analyzer.EngineNone {
 		t.Errorf("audit rebuild engine = %q, want none", byTable["audit"].RebuildEngine)
@@ -1563,6 +1582,9 @@ func TestLiveSessionArtifactsAreNotDeletable(t *testing.T) {
 // without needing gh-ost's own cutover behaviour.
 func TestHoldCutoverCreatesAndReleasesTheGate(t *testing.T) {
 	schema, db := fixtureSchema(t)
+	// Holding the swap is a gh-ost feature: pt-osc swaps the moment the copy
+	// finishes, and there is nothing to hold.
+	requireBinlog(t, db)
 	mustExec(t, db,
 		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
 			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
