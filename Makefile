@@ -84,6 +84,13 @@ demo: build
 		--mysql-version 8.0.36 --host db.prod \
 		--rows 59000000 --data-bytes 18000000000 --index-bytes 4000000000 || true
 
+# Cut a release locally, without publishing. Useful to check the artefacts and the
+# version stamp before pushing a tag.
+release-snapshot:
+	@goreleaser release --snapshot --clean --skip=publish 2>/dev/null || \
+		{ echo "goreleaser is not installed: https://goreleaser.com/install/"; exit 1; }
+	@ls -1 dist/*.tar.gz 2>/dev/null | head
+
 # Regenerate the compatibility document from internal/support. A test fails when
 # the committed file is stale, so this cannot drift.
 compat-doc: build

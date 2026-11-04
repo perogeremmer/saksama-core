@@ -66,6 +66,9 @@ trade-offs, and then runs the engine you chose.
 go install github.com/perogeremmer/saksama-core/cmd/saksama@latest
 ```
 
+Or take a static binary from the [releases page](https://github.com/perogeremmer/saksama-core/releases):
+Linux and macOS, amd64 and arm64, with checksums and an SBOM.
+
 Ask first. This only reads:
 
 ```bash
