@@ -569,10 +569,11 @@ func TestApplyRefusesNonNativeEngine(t *testing.T) {
 	)
 
 	runner, _ := newRunner(t)
-	// A TEXT index without a prefix is blocked; but even a valid rebuild request
-	// must not silently pretend gh-ost ran.
-	req := applyRequest(schema, "t", "ADD INDEX ix_b (b(16))")
-	req.EngineHint = "gh-ost"
+	// An engine the core does not implement must be refused, not executed as
+	// native and certainly not reported as a success. Real engines like gh-ost
+	// are exercised elsewhere; this one only claims to exist.
+	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
+	req.EngineHint = "definitely-not-an-engine"
 	sess, err := runApply(t, runner, db, req)
 	if err == nil {
 		t.Fatal("expected an error for an unimplemented engine")
