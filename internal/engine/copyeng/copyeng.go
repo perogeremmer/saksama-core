@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -165,8 +166,8 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 			"--table=" + e.opts.Table,
 			"--alter=" + alter,
 			fmt.Sprintf("--chunk-size=%d", chunkSize(e.opts)),
-			"--max-load=Threads_running=50",
-			"--critical-load=Threads_running=100",
+			fmt.Sprintf("--max-load=Threads_running=%d", maxLoadThreads),
+			fmt.Sprintf("--critical-load=Threads_running=%d", criticalLoadThreads),
 			"--assume-rbr",
 			"--initially-drop-ghost-table",
 			"--initially-drop-old-table",
@@ -216,8 +217,8 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 		argv = append(argv,
 			"--alter", alter,
 			"--chunk-size", fmt.Sprint(chunkSize(e.opts)),
-			"--max-load", "Threads_running=50",
-			"--critical-load", "Threads_running=100",
+			"--max-load", fmt.Sprintf("Threads_running=%d", maxLoadThreads),
+			"--critical-load", fmt.Sprintf("Threads_running=%d", criticalLoadThreads),
 			// pt-osc throttles on replica lag with --max-lag, in seconds.
 			"--max-lag", "5",
 			// Never let the tool reach out to check for a newer version: a CI run
@@ -261,6 +262,15 @@ func (e *Engine) CutoverGate() string {
 func (e *Engine) cutoverFile() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("saksama-%s-%s.cutover", e.opts.Schema, e.opts.Table))
 }
+
+// The load thresholds both engines are told about. They are constants because the
+// progress report compares the observed server load against the same numbers the
+// engine was given: two spellings would let a copy report "not throttled" while
+// the engine had already stopped.
+const (
+	maxLoadThreads      = 50
+	criticalLoadThreads = 100
+)
 
 func chunkSize(o engine.Options) int {
 	if o.ChunkSize > 0 {
@@ -426,9 +436,17 @@ func (e *Engine) pollProgress(ctx context.Context, onProgress func(engine.Progre
 				p.Percent = 99
 			}
 		}
-		var threads int
-		_ = e.db.QueryRowContext(ctx, `SHOW GLOBAL STATUS LIKE 'Threads_running'`).Scan(new(string), new(string))
-		_ = threads
+		// The load the engine is being throttled against, reported from the same
+		// server the engine reads it from. This used to be queried and then thrown
+		// away into a pair of new(string), so Progress.ThreadsRunning was always
+		// zero and a viewer could not tell a quiet copy from a struggling one.
+		var name, value string
+		if err := e.db.QueryRowContext(ctx, `SHOW GLOBAL STATUS LIKE 'Threads_running'`).Scan(&name, &value); err == nil {
+			if n, convErr := strconv.Atoi(strings.TrimSpace(value)); convErr == nil {
+				p.ThreadsRunning = n
+			}
+		}
+		p.Throttled = p.ThreadsRunning >= maxLoadThreads
 		onProgress(p)
 	}
 }

@@ -111,6 +111,8 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jsonOut := fs.Bool("json", false, "JSON output")
+	force := fs.Bool("force-kill", false,
+		"send SIGKILL if the engine ignores SIGTERM; the engine then cannot drop its own shadow table")
 	positional, flagArgs := extractPositionals(args, nil)
 	if err := fs.Parse(flagArgs); err != nil {
 		return ExitUsage
@@ -127,7 +129,7 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 	}
 
 	runner := &core.Runner{Store: store}
-	res, err := runner.Cancel(context.Background(), positional[0])
+	res, err := runner.Cancel(context.Background(), positional[0], *force)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama cancel: %v\n", err)
 		return ExitUsage

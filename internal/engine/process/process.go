@@ -168,6 +168,52 @@ func Stop(pid int, wait time.Duration) error {
 }
 
 // Alive reports whether a process id is still running.
+// StopForce is Stop with an escalation: after the graceful window it sends SIGKILL.
+//
+// SIGKILL is not the default anywhere. A copy engine that is killed outright
+// leaves its shadow table, its triggers, and its changelog behind, and it never
+// gets the chance to drop them; asking is the difference between a tool that
+// cleans up and a tool that hides debris. It exists for the case a graceful stop
+// cannot fix: a process wedged in a metadata lock wait.
+func StopForce(pid int, wait time.Duration) (forced bool, err error) {
+	if pid <= 0 {
+		return false, fmt.Errorf("no process id recorded")
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false, fmt.Errorf("process %d is gone: %w", pid, err)
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		return false, fmt.Errorf("cannot signal process %d: %w", pid, err)
+	}
+	if waitForExit(p, pid, wait) {
+		return false, nil
+	}
+	if err := p.Signal(syscall.SIGKILL); err != nil {
+		return true, fmt.Errorf("cannot kill process %d: %w", pid, err)
+	}
+	if waitForExit(p, pid, stopKillWindow) {
+		return true, nil
+	}
+	return true, fmt.Errorf("process %d did not die even after SIGKILL; it is likely stuck in the kernel", pid)
+}
+
+// stopKillWindow is how long SIGKILL is given. A killed process is reaped almost
+// immediately; anything longer means it is unkillable, and waiting is pointless.
+const stopKillWindow = 5 * time.Second
+
+func waitForExit(p *os.Process, pid int, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if p.Signal(syscall.Signal(0)) != nil || isZombie(pid) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return p.Signal(syscall.Signal(0)) != nil || isZombie(pid)
+}
+
+// Alive reports whether a process id is still running.
 func Alive(pid int) bool {
 	if pid <= 0 {
 		return false

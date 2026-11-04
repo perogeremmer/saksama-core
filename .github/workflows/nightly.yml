@@ -1,0 +1,67 @@
+name: Nightly
+
+# The tests that are too slow, or too dependent on the machine, for every pull
+# request. They exist because the claims they cover are the ones that hurt when
+# they are wrong: a copy that loses a committed write, or a copy that ignores the
+# load ceiling it was given.
+on:
+  schedule:
+    # 18:00 UTC is 01:00 in Jakarta: the quiet hour for whoever reads the failure.
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  volume:
+    name: Volume and concurrency (200k rows, live writes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      # A 16 MB buffer pool for a 130k-row table means the copy does real I/O
+      # instead of fitting in memory and finishing before the writer can race it.
+      - name: Start MySQL with a buffer pool that makes the copy work
+        run: |
+          docker run -d --name mysql-volume \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
+            -e MYSQL_DATABASE=shop \
+            -p 33306:3306 mysql:8.0 --skip-ssl \
+            --innodb-buffer-pool-size=24M
+          for i in $(seq 1 90); do
+            if docker exec mysql-volume mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
+              echo ready; exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready"; exit 1
+
+      # gh-ost is the engine the ladder reaches for first, so it is the one worth
+      # holding to the no-lost-writes claim.
+      - name: Download gh-ost 1.1.11
+        run: |
+          curl -fsSL -o /tmp/gh-ost.tgz \
+            https://github.com/github/gh-ost/releases/download/v1.1.11/gh-ost-linux-amd64.tar.gz
+          mkdir -p /tmp/ghost && tar xzf /tmp/gh-ost.tgz -C /tmp/ghost
+          chmod +x /tmp/ghost/gh-ost
+          /tmp/ghost/gh-ost --version
+
+      - name: A copy under live writes loses nothing and respects the load ceiling
+        env:
+          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
+          SAKSAMA_VOLUME_TESTS: "1"
+          PATH: /tmp/ghost:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+        run: |
+          go test -tags=integration -count=1 -timeout 30m -v \
+            -run 'TestCopyWithConcurrentWrites' ./test/integration/
+
+      - name: Container logs when it fails
+        if: failure()
+        run: docker logs mysql-volume --tail 100 || true

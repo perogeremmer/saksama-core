@@ -845,7 +845,14 @@ func (w *Wizard) sessions() {
 	case "1":
 		w.follow(id)
 	case "2":
-		res, err := w.b.Cancel(context.Background(), id)
+		// SIGKILL is offered as a second step, not as the default: an engine that
+		// is killed outright cannot drop its own shadow table and triggers.
+		force, err := w.p.Confirm(
+			"If it ignores SIGTERM, kill it (SIGKILL)? The engine will leave debris behind.", false)
+		if err != nil {
+			return
+		}
+		res, err := w.b.Cancel(context.Background(), id, force)
 		if err != nil {
 			w.fail(err)
 			return

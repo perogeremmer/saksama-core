@@ -29,7 +29,7 @@ func TestCancelOnAFinishedSessionChangesNothing(t *testing.T) {
 	store := newTestStore(t)
 	saveSession(t, store, &state.Session{ID: "s1", State: state.StateDone, Database: "shop", Table: "orders"})
 
-	res, err := (&Runner{Store: store}).Cancel(context.Background(), "s1")
+	res, err := (&Runner{Store: store}).Cancel(context.Background(), "s1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestCancelWithoutAnEngineSaysSoInsteadOfPretending(t *testing.T) {
 	store := newTestStore(t)
 	saveSession(t, store, &state.Session{ID: "s2", State: state.StateRunning, Database: "shop", Table: "orders"})
 
-	res, err := (&Runner{Store: store}).Cancel(context.Background(), "s2")
+	res, err := (&Runner{Store: store}).Cancel(context.Background(), "s2", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestCancelOnADeadPIDIsNotReportedAsStopped(t *testing.T) {
 		ID: "s3", State: state.StateRunning, Database: "shop", Table: "orders", EnginePID: 999_999,
 	})
 
-	res, err := (&Runner{Store: store}).Cancel(context.Background(), "s3")
+	res, err := (&Runner{Store: store}).Cancel(context.Background(), "s3", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestCancelStopsTheProcessAndRecordsTheOutcome(t *testing.T) {
 		EnginePID: cmd.Process.Pid, Actor: "tester",
 	})
 
-	res, err := (&Runner{Store: store}).Cancel(context.Background(), "s4")
+	res, err := (&Runner{Store: store}).Cancel(context.Background(), "s4", false)
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestCancelStopsTheProcessAndRecordsTheOutcome(t *testing.T) {
 }
 
 func TestCancelWithoutAStateDirectoryIsARefusal(t *testing.T) {
-	if _, err := (&Runner{}).Cancel(context.Background(), "s1"); err == nil {
+	if _, err := (&Runner{}).Cancel(context.Background(), "s1", false); err == nil {
 		t.Fatal("expected an error without a store")
 	}
 }
@@ -208,5 +208,38 @@ func TestCleanupRefusesAnUnknownArtifactKind(t *testing.T) {
 	}
 	if !strings.Contains(stmt, "`shop`.`_orders_new`") {
 		t.Fatalf("identifiers must be quoted: %s", stmt)
+	}
+}
+
+// A session that finished is not the end of the story: an engine killed mid-copy
+// is recorded as failed, which is terminal, while its shadow table is still on the
+// primary. Reconcile has to say so, or the operator is told the incident is over
+// while pt-osc triggers keep firing on every write.
+func TestReconcileReportsAFinishedSessionThatLeftObjects(t *testing.T) {
+	sess := &state.Session{
+		ID: "s9", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateFailed,
+		Database: "shop", Table: "orders", Engine: "pt-osc",
+	}
+	sess.RecordArtifact("table", "_orders_new", "pt-osc", "shadow table")
+
+	r := &Runner{}
+	findings := r.reconcileSessions(context.Background(), []*state.Session{sess},
+		func(_ *state.Session, a state.ArtifactRecord) bool { return a.Name == "_orders_new" })
+	if len(findings) != 1 {
+		t.Fatalf("a finished session with leftover objects must be reported, got %+v", findings)
+	}
+	if !findings[0].Actionable {
+		t.Error("cleanup is the next step, so the finding must be actionable")
+	}
+	if !strings.Contains(findings[0].Verdict, "still here") {
+		t.Errorf("verdict must say the objects remain: %q", findings[0].Verdict)
+	}
+
+	// And a finished session with nothing left stays quiet: that is the property
+	// that makes a nightly reconcile usable.
+	quiet := r.reconcileSessions(context.Background(), []*state.Session{sess},
+		func(*state.Session, state.ArtifactRecord) bool { return false })
+	if len(quiet) != 0 {
+		t.Fatalf("a clean finish must not be reported, got %+v", quiet)
 	}
 }

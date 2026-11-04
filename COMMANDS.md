@@ -149,6 +149,7 @@ saksama advise --schema <file>                             offline, from dumped 
 | `--mysql-version <v>` | server version, required offline |
 | `--no-probe` | skip detecting installed engine binaries |
 | `--accept-unknown-mdl` | proceed on MySQL 5.6 in production, where the metadata lock queue cannot be read |
+| `--chunk-size <n>` | rows per copy chunk; `0` keeps the engine default of 1000 |
 | `--plain` | borderless output, for scripts and logs |
 | `--json` | machine-readable output |
 | `--rows`, `--data-bytes`, `--index-bytes` | sizing facts for the offline estimate |
@@ -381,6 +382,7 @@ saksama attach s3 --follow=false  # print what is already logged and exit
 saksama attach s3 --json          # raw JSONL, for piping
 saksama attach s3 --since 12      # only events after sequence 12
 saksama cancel s3                 # SIGTERM the recorded engine pid
+saksama cancel s3 --force-kill    # SIGKILL it if SIGTERM is ignored
 ```
 
 `attach` reads the append-only event log on disk, so it works from another
@@ -393,6 +395,12 @@ outcome: the session becomes `cancelled`, the cancellation is appended to the ev
 log, and the artifacts are marked deletable. `--json` prints the outcome
 (`stopped`, `already-ended`, `no-engine`, `not-running`). A pid that is already gone
 is reported as `not-running` with a pointer to `reconcile`, not as a success.
+
+`--force-kill` escalates to SIGKILL after the graceful window. It is not the
+default, and the note says why: an engine killed outright cannot drop its own
+shadow table, triggers, or changelog, so the debris becomes `reconcile`'s job.
+Verified against real engines: a graceful stop lets gh-ost and pt-osc clean up
+after themselves, which is why the gentle signal is tried first.
 
 The limit worth knowing: a native `ALTER` is owned by the MySQL server, so there is
 no process to cancel. The tool says that instead of pretending.
@@ -468,7 +476,11 @@ saksama export s3 --format json
 ## `saksama reconcile`
 
 Lists sessions that never reached a terminal state, and reports what the database
-shows for the objects each one owns.
+shows for the objects each one owns. A session that *did* finish also appears if
+its objects are still on the primary: an engine killed mid-copy is recorded as
+failed - terminal - while its shadow table and changelog sit on the disk, and
+pt-osc's triggers keep firing on every write. Reporting only unfinished sessions
+would let this command say "nothing to do" while the database carried the debris.
 
 ```
 saksama reconcile
@@ -483,6 +495,7 @@ the observation rather than a verdict the tool cannot support:
 | the engine process is still alive | `attach` to watch it, or `cancel` it |
 | the engine is gone but objects remain | check the table, then `cleanup` |
 | nothing remains | re-plan; the previous attempt did not finish |
+| the session finished, but objects remain | `cleanup` drops what it owns |
 
 Nothing is changed by this command. The point is that nobody touches a half-finished
 migration without looking at it first.

@@ -147,7 +147,7 @@ func (f *fakeBackend) ApplyFromSession(ctx context.Context, id string, req core.
 	return f.lastSess, f.applyErr
 }
 
-func (f *fakeBackend) Cancel(ctx context.Context, id string) (core.CancelResult, error) {
+func (f *fakeBackend) Cancel(ctx context.Context, id string, force bool) (core.CancelResult, error) {
 	f.cancelled = append(f.cancelled, id)
 	return core.CancelResult{ID: id, Outcome: core.CancelAlreadyEnded, Note: "already ended"}, nil
 }

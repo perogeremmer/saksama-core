@@ -224,6 +224,7 @@ type applyOpts struct {
 	confirm           string
 	dryRun            bool
 	lockWait          int
+	chunkSize         int
 	holdCutover       bool
 	allowArgvPassword bool
 	freeDisk          int64
@@ -256,6 +257,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.confirm, "confirm", "", "must equal the host name when --production is set")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "build statements and approvals without executing")
 	fs.IntVar(&o.lockWait, "lock-wait-timeout", 10, "session lock_wait_timeout in seconds")
+	fs.IntVar(&o.chunkSize, "chunk-size", 0, "rows per copy chunk (0 keeps the engine default of 1000)")
 	fs.BoolVar(&o.holdCutover, "hold-cutover", false, "pause before the swap so you can verify first (engine permitting)")
 	fs.BoolVar(&o.allowArgvPassword, "allow-argv-password", false, "permit engines with no option file to receive the password in argv (visible in ps)")
 	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
@@ -306,6 +308,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		Force:                  o.force,
 		DryRun:                 o.dryRun,
 		LockWaitTimeoutSeconds: o.lockWait,
+		ChunkSize:              o.chunkSize,
 		HoldCutover:            o.holdCutover,
 		AllowArgvPassword:      o.allowArgvPassword,
 		FreeDisk:               o.freeDisk,

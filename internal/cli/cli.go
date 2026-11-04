@@ -195,6 +195,7 @@ Advise options:
 Apply options:
   --production             require --confirm <host> before any mutation
   --accept-unknown-mdl     allow 5.6 in production: the lock queue cannot be seen
+  --force-kill             cancel: SIGKILL an engine that ignores SIGTERM
   --confirm <host>         must equal the target host name when --production
   --dry-run                build statements and stop
   --engine <name>          native|gh-ost|pt-osc; overrides the recorded choice
@@ -217,6 +218,7 @@ Plan options:
   --engine <name>        force native|gh-ost|pt-osc (still subject to blockers)
   --production           mark the target as production
   --accept-unknown-mdl   proceed on 5.6 where the lock queue cannot be observed
+  --chunk-size <n>       rows per copy chunk (default 1000)
   --free-disk <bytes>    free space on the data volume, for the disk check
   --disk-total <bytes>   volume size, so the 10 percent floor can be applied
   --rows <n>             estimated row count (improves the duration range)

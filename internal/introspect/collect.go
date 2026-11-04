@@ -652,7 +652,8 @@ func (c *Collector) artifacts(ctx context.Context) []Artifact {
 		SELECT TABLE_NAME FROM information_schema.TABLES
 		WHERE TABLE_SCHEMA = ?
 		  AND (TABLE_NAME LIKE '\\_%\\_new' OR TABLE_NAME LIKE '\\_%\\_old'
-		       OR TABLE_NAME LIKE '\\_%\\_gho' OR TABLE_NAME LIKE '\\_%\\_del')
+		       OR TABLE_NAME LIKE '\\_%\\_gho' OR TABLE_NAME LIKE '\\_%\\_ghc'
+		       OR TABLE_NAME LIKE '\\_%\\_ghk' OR TABLE_NAME LIKE '\\_%\\_del')
 		ORDER BY TABLE_NAME
 	`, c.Schema)
 	if err == nil {
@@ -668,7 +669,7 @@ func (c *Collector) artifacts(ctx context.Context) []Artifact {
 	rows, err = c.Q.QueryContext(ctx, `
 		SELECT TRIGGER_NAME FROM information_schema.TRIGGERS
 		WHERE TRIGGER_SCHEMA = ?
-		  AND (TRIGGER_NAME LIKE 'pt\\_osc\\_%' OR TRIGGER_NAME LIKE 'ghost\\_%')
+		  AND TRIGGER_NAME LIKE 'pt\\_osc\\_%' 
 		ORDER BY TRIGGER_NAME
 	`, c.Schema)
 	if err == nil {

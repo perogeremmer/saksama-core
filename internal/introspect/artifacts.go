@@ -26,10 +26,12 @@ var artifactPatterns = []struct {
 }
 
 // triggerPatterns are the trigger names copy engines create.
+//
+// Only pt-osc appears here, and that is not an omission: gh-ost is triggerless by
+// design and reads the binary log instead. A pattern for triggers it never creates
+// would only ever match somebody else's object.
 var triggerPatterns = []struct{ prefix, owner string }{
 	{"pt_osc_", "pt-osc"},
-	{"ghost_", "gh-ost"},
-	{"gst_", "gh-ost"},
 }
 
 // FindArtifacts reports leftover objects from previous migrations.

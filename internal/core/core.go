@@ -60,6 +60,11 @@ type Request struct {
 
 	LockWaitTimeoutSeconds int
 	LongQueryThreshold     int64
+	// ChunkSize is how many rows the copy engine takes per chunk. Zero keeps the
+	// engine default (1000). It is the dial that decides whether a very large
+	// table is copied gently or quickly, and the one a recovery test uses to keep
+	// a copy alive long enough to kill.
+	ChunkSize int
 
 	// Approve is called before any mutation. Returning an error aborts.
 	Approve func(ApprovalRequest) (state.Approval, error)
@@ -368,6 +373,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		HoldCutover:               req.HoldCutover,
 		CutoverGate:               cutoverGate,
 		AllowArgvPassword:         req.AllowArgvPassword,
+		ChunkSize:                 req.ChunkSize,
 		HasReplica:                prep.Snapshot.Runtime.ReplicaConfigured,
 	}
 
@@ -802,11 +808,15 @@ func recordExpectedArtifacts(sess *state.Session, eng analyzer.Engine, req Reque
 	t := sess.Table
 	switch eng {
 	case analyzer.EngineGhOst:
+		// gh-ost is triggerless by design: it reads the binary log instead of
+		// adding triggers, and that is why the ladder prefers it. Recording trigger
+		// names here would have cleanup report dropping three objects that never
+		// existed, and the changelog table - which gh-ost really does leave behind -
+		// would stay unowned and undeleted. Verified against gh-ost 1.1.11: a live
+		// copy creates _t_gho and _t_ghc and no triggers at all.
 		sess.RecordArtifact("table", "_"+t+"_gho", "gh-ost", "ghost table, present only while copying")
-		sess.RecordArtifact("table", "_"+t+"_del", "gh-ost", "pre-migration table, kept after cutover")
-		for _, suffix := range []string{"_ins", "_upd", "_del"} {
-			sess.RecordArtifact("trigger", "ghost_"+t+suffix, "gh-ost", "copy trigger")
-		}
+		sess.RecordArtifact("table", "_"+t+"_ghc", "gh-ost", "gh-ost changelog table, kept after a crash")
+		sess.RecordArtifact("table", "_"+t+"_del", "gh-ost", "pre-migration table, present only after a cut-over")
 	case analyzer.EnginePtOSC:
 		sess.RecordArtifact("table", "_"+t+"_new", "pt-osc", "shadow table, present only while copying")
 		sess.RecordArtifact("table", "_"+t+"_old", "pt-osc", "pre-migration table during the swap")

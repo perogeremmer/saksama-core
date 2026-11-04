@@ -72,6 +72,9 @@ func (req Request) CommandLineFor(verb string) string {
 	if req.LockWaitTimeoutSeconds > 0 && req.LockWaitTimeoutSeconds != 10 {
 		args = append(args, "--lock-wait-timeout", fmt.Sprint(req.LockWaitTimeoutSeconds))
 	}
+	if req.ChunkSize > 0 {
+		args = append(args, "--chunk-size", fmt.Sprint(req.ChunkSize))
+	}
 	if req.HoldCutover {
 		args = append(args, "--hold-cutover")
 	}
