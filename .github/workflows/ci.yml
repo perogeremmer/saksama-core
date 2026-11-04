@@ -148,11 +148,24 @@ jobs:
             --alter "ADD INDEX ix_created (created_at)" \
             --mysql-version 8.0.36 --json | jq -e '.recommendation.blockers == 0'
 
-      - name: Rebuild with foreign keys must be refused
+      # A rebuild on a table with foreign keys is not a dead end: gh-ost cannot do
+      # it, pt-osc can. The plan must say pt-osc and must not refuse.
+      - name: Rebuild with foreign keys must route to pt-osc
+        run: |
+          ./bin/saksama plan --ddl testdata/orders.sql \
+            --alter "MODIFY COLUMN status varchar(64) NOT NULL" \
+            --mysql-version 8.0.36 --json > /tmp/routed.json
+          jq -e '.recommendation.blocked == false' /tmp/routed.json
+          jq -e '.recommendation.engine == "pt-osc"' /tmp/routed.json
+          jq -e '.engines[] | select(.engine == "gh-ost") | .verdict == "unsuitable"' /tmp/routed.json
+
+      # An impossible change must still be refused, and with a non-zero exit that a
+      # pipeline can gate on. A TEXT column cannot be indexed without a prefix.
+      - name: Impossible change must be refused
         run: |
           set +e
           ./bin/saksama plan --ddl testdata/orders.sql \
-            --alter "MODIFY COLUMN status varchar(64) NOT NULL" \
+            --alter "ADD INDEX ix_note (note)" \
             --mysql-version 8.0.36 --json > /tmp/blocked.json
           code=$?
           set -e
