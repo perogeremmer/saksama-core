@@ -178,7 +178,7 @@ of three places, and they are never conflated:
 
 | Source | When |
 |---|---|
-| `filesystem` | `@@datadir` exists on this machine, so the volume is read with `statfs` |
+| `filesystem` | the server's `@@hostname` matches this machine and `@@datadir` exists here, so the volume is read with `statfs` |
 | `operator` | `--free-disk` and `--disk-total` were supplied |
 | unmeasured | a managed service or a remote host, with no flags |
 

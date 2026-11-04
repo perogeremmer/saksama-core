@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -403,9 +404,17 @@ func (c *Collector) Runtime(ctx context.Context) (Runtime, error) {
 		rt.LockWaitTimeout = lwt.Int64
 	}
 
+	// The data directory is needed to say anything about disk space, so read it
+	// here rather than depending on the caller to inject it.
+	if c.DataDir == "" {
+		var dir sql.NullString
+		if err := c.Q.QueryRowContext(ctx, `SELECT @@datadir`).Scan(&dir); err == nil {
+			c.DataDir = dir.String
+		}
+	}
 	if c.DataDir != "" {
 		rt.DataDir = c.DataDir
-		rt.Disk = ReadDiskSpace(c.DataDir)
+		rt.Disk = c.diskSpace(ctx)
 	}
 
 	return rt, nil
@@ -779,4 +788,28 @@ func truncate(s string, n int) string {
 
 func escapeIdent(s string) string {
 	return strings.ReplaceAll(s, "`", "``")
+}
+
+// diskSpace measures the volume holding the data directory, but only when the
+// server is plausibly on this machine.
+//
+// The path alone is not proof: a CI runner that has MySQL preinstalled also has
+// /var/lib/mysql, so a container's data directory can look local while the free
+// space belongs to a completely different filesystem. Comparing hostnames is a
+// heuristic, and it is the conservative one: a mismatch means "do not measure",
+// which makes the operator supply the numbers rather than trusting a wrong one.
+func (c *Collector) diskSpace(ctx context.Context) DiskSpace {
+	local, _ := os.Hostname()
+
+	var serverHost sql.NullString
+	_ = c.Q.QueryRowContext(ctx, `SELECT @@hostname`).Scan(&serverHost)
+
+	if local != "" && serverHost.String != "" && !strings.EqualFold(local, serverHost.String) {
+		return DiskSpace{
+			Path: c.DataDir,
+			Reason: fmt.Sprintf("the server reports hostname %q and this machine is %q, so its data directory is not on this host",
+				serverHost.String, local),
+		}
+	}
+	return ReadDiskSpace(c.DataDir)
 }

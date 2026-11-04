@@ -213,7 +213,7 @@ states for it, and treats them differently:
 
 | State | How it happens | `plan` | `apply` |
 |---|---|---|---|
-| measured | the data directory exists on this machine, so the volume is read directly | judged | judged |
+| measured | the server reports this machine's hostname and the data directory exists here | judged | judged |
 | supplied | `--free-disk` and `--disk-total` were given | judged | judged |
 | unknown | a managed service, a remote host, no flags | `WARN` | **refused** |
 
@@ -234,7 +234,10 @@ line each:
 saksama apply ... --free-disk 500GB --disk-total 1TB
 ```
 
-or run Saksama on the database host, where `@@datadir` can actually be read.
+or run Saksama on the database host, where `@@datadir` can actually be read. A path
+that merely exists is not enough: the server's `@@hostname` must match this machine,
+because a CI runner with MySQL preinstalled also has `/var/lib/mysql`, and measuring
+that would report somebody else's free space.
 `--force` downgrades this one blocker and records that it did.
 
 ---

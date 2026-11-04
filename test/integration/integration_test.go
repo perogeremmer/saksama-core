@@ -1144,6 +1144,16 @@ func TestDiskSpaceIsMeasuredOrHonestlyUnmeasured(t *testing.T) {
 // a migration that fills the volume takes the whole server down with it.
 func TestApplyRefusesWhenDiskIsUnknown(t *testing.T) {
 	schema, db := fixtureSchema(t)
+
+	// The server runs in a container, so its data directory is not on this
+	// machine. If the environment makes it look local anyway, this test cannot
+	// assert the refusal without inventing a situation, so say so and stop.
+	if snap, err := introspect.NewCollector(db, schema, "").Collect(context.Background()); err == nil {
+		if snap.Runtime.Disk.Measured {
+			t.Skipf("the server's data directory was measured directly (%s); this case needs it unmeasured",
+				snap.Runtime.Disk.Path)
+		}
+	}
 	mustExec(t, db,
 		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
 			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
@@ -1165,6 +1175,44 @@ func TestApplyRefusesWhenDiskIsUnknown(t *testing.T) {
 		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
 		schema); n != 0 {
 		t.Fatal("the index was created despite the refusal")
+	}
+}
+
+// A server on a different host must not be measured from here, even when the same
+// path happens to exist locally. A CI runner with MySQL preinstalled has
+// /var/lib/mysql, which is somebody else's filesystem.
+func TestDiskIsNotMeasuredForAServerOnAnotherHost(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db, "CREATE TABLE `t` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	collector := introspect.NewCollector(db, schema, "t")
+	settings, err := collector.Settings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings["datadir"] == "" {
+		t.Skip("server did not report a datadir")
+	}
+
+	var serverHost string
+	if err := db.QueryRow("SELECT @@hostname").Scan(&serverHost); err != nil {
+		t.Fatal(err)
+	}
+	local, _ := os.Hostname()
+	if strings.EqualFold(local, serverHost) {
+		t.Skip("the server reports this machine's hostname, so measuring is correct here")
+	}
+
+	snap, err := collector.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Runtime.Disk.Measured {
+		t.Fatalf("measured %s for a server on %q while this machine is %q",
+			snap.Runtime.Disk.Path, serverHost, local)
+	}
+	if snap.Runtime.Disk.Reason == "" {
+		t.Fatal("an unmeasured disk must say why")
 	}
 }
 

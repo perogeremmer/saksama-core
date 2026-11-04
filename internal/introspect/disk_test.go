@@ -61,3 +61,21 @@ func TestFreeDiskReturnsZeroWhenUnmeasurable(t *testing.T) {
 		t.Fatalf("expected 0 for an unmeasurable path, got %d", got)
 	}
 }
+
+// The hostname check exists because a path can be misleading: a CI runner with
+// MySQL preinstalled also has /var/lib/mysql, so a container's data directory can
+// look local while the free space belongs to a different filesystem.
+func TestDiskSpaceReasonNamesTheHostnameMismatch(t *testing.T) {
+	dir := t.TempDir()
+	// A local directory is measurable, which is the case the guard must not block.
+	d := ReadDiskSpace(dir)
+	if !d.Measured {
+		t.Fatalf("a local directory should be measurable: %s", d.Reason)
+	}
+	// The guard itself lives in Collector.diskSpace, which needs a server; the
+	// integration suite covers it there.
+	d = ReadDiskSpace(filepath.Join(dir, "absent"))
+	if d.Measured || d.Reason == "" {
+		t.Fatalf("expected an explained refusal, got %+v", d)
+	}
+}
