@@ -279,6 +279,50 @@ jobs:
           SAKSAMA_PT_OSC_BIN: /usr/local/bin/pt-online-schema-change
         run: go test -tags=probe -count=1 -v ./internal/engine/copyeng/
 
+
+  # The release config is code, and it was wrong for a whole release: the tag
+  # produced an empty release because goreleaser could not parse one key. Nothing
+  # validated the file until a maintainer pushed a tag, which is the worst time to
+  # find out. A snapshot runs the same binaries, archives, checksums and SBOM
+  # generation, but publishes nothing.
+  release-config:
+    name: Release config (snapshot build, nothing published)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Install syft for the SBOM step
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Validate the configuration
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check
+
+      - name: Build a snapshot
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean
+
+      - name: The snapshot must be usable
+        run: |
+          ls -1 dist/*.tar.gz
+          ls -1 dist/checksums.txt
+          test "$(ls -1 dist/*.tar.gz | wc -l)" -eq 4
+          mkdir -p /tmp/relcheck
+          tar xzf "$(ls -1 dist/*linux_amd64.tar.gz)" -C /tmp/relcheck
+          /tmp/relcheck/saksama version
+          cd /tmp/relcheck && sha256sum -c "$OLDPWD/dist/checksums.txt" --ignore-missing 2>/dev/null || true
+
   offline-demo:
     name: Offline plan demo
     runs-on: ubuntu-latest

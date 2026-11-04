@@ -36,9 +36,11 @@ archives:
 checksum:
   name_template: checksums.txt
 
-sbom:
-  - DOCUMENT
-  - SPDX
+# goreleaser v2 spells this "sboms" and shells out to syft. The key here used to be
+# "sbom" with two bare words, which is not a field in v2 at all: the release job
+# failed instantly on an unmarshal error and published nothing.
+sboms:
+  - artifacts: archive
 
 changelog:
   use: github

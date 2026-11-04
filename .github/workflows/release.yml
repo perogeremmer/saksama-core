@@ -36,6 +36,11 @@ jobs:
       - name: Build check
         run: make build && ./bin/saksama version
 
+      # The config names syft as the SBOM generator; without it here the release
+      # fails after the archives are already built.
+      - name: Install syft for the SBOM step
+        uses: anchore/sbom-action/download-syft@v0
+
       - name: Release
         uses: goreleaser/goreleaser-action@v6
         with:
