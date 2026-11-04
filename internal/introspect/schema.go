@@ -43,7 +43,7 @@ func (c *Collector) SchemaTables(ctx context.Context, includeViews bool) ([]mode
 			Name:        name.String,
 			Engine:      engine.String,
 			RowFormat:   strings.ToUpper(rowFormat.String),
-			Collation:   strings.ToLower(collation.String),
+			Collation:   strings.ToLower(normalizeCollation(collation.String)),
 			Rows:        rowCount.Int64,
 			DataLength:  dataLen.Int64,
 			IndexLength: indexLen.Int64,
@@ -96,7 +96,7 @@ func (c *Collector) attachCharsets(ctx context.Context, tables map[string]*model
 	for rows.Next() {
 		var collation, charset sql.NullString
 		if rows.Scan(&collation, &charset) == nil {
-			byCollation[strings.ToLower(collation.String)] = strings.ToLower(charset.String)
+			byCollation[strings.ToLower(normalizeCollation(collation.String))] = strings.ToLower(normalizeCharset(charset.String))
 		}
 	}
 	for _, t := range tables {
@@ -107,9 +107,15 @@ func (c *Collector) attachCharsets(ctx context.Context, tables map[string]*model
 }
 
 func (c *Collector) attachColumns(ctx context.Context, tables map[string]*model.Table) error {
+	// MySQL 5.6 has no GENERATION_EXPRESSION; selecting it there aborts the
+	// introspection before any other fact is read.
+	genExpr := "''"
+	if c.generationExpressions(ctx) {
+		genExpr = "GENERATION_EXPRESSION"
+	}
 	rows, err := c.Q.QueryContext(ctx, `
 		SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, CHARACTER_SET_NAME,
-		       COLLATION_NAME, IS_NULLABLE, EXTRA, GENERATION_EXPRESSION
+		       COLLATION_NAME, IS_NULLABLE, EXTRA, `+genExpr+`
 		FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = ?
 		ORDER BY TABLE_NAME, ORDINAL_POSITION
@@ -133,8 +139,8 @@ func (c *Collector) attachColumns(ctx context.Context, tables map[string]*model.
 			Name:      name.String,
 			Type:      strings.ToLower(colType.String),
 			DataType:  strings.ToLower(dataType.String),
-			Charset:   strings.ToLower(charset.String),
-			Collation: strings.ToLower(collation.String),
+			Charset:   strings.ToLower(normalizeCharset(charset.String)),
+			Collation: strings.ToLower(normalizeCollation(collation.String)),
 			Nullable:  strings.EqualFold(nullable.String, "YES"),
 			Extra:     strings.ToLower(extra.String),
 			Generated: gen.String != "",

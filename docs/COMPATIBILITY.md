@@ -18,9 +18,9 @@ Every row states how much evidence backs it:
 | 8.0.x | yes | INSTANT add column (8.0.12+), INSTANT drop column (8.0.29+), INPLACE index | 8.0.46 via mysql:8.0 container: 24/24 integration tests pass, including a real gh-ost migration |
 | 8.0.29+ | yes | INSTANT drop column | rule R-DROP-COLUMN-INSTANT-8029, covered by unit tests for both sides of the boundary |
 | 8.0.12 - 8.0.28 | claimed | INSTANT add column, appended only | rule R-ADD-COLUMN-INSTANT-8012; unit tested, not run against a server this old |
-| 5.7.x | claimed | INPLACE index only; every column change is a rebuild | needs gh-ost 1.x or pt-osc for a rebuild; the integration suite targets 8.0+ and has not run here |
-| 5.6.x | claimed | INPLACE index; no INSTANT at all | pt-osc 2.x era; plan only, never executed by this repository |
-| MariaDB (any) | no | refused | capability matrix is not verified for MariaDB, so check E1 blocks every plan |
+| 5.7.44 | yes | INPLACE add/drop index; every column change is a rebuild | 43 of 44 integration tests pass (the INSTANT ones skip); with pt-osc 3.7.2 the full suite runs, and gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows |
+| 5.6.51 | no | refused | end of life and its INFORMATION_SCHEMA lacks the reported fact the plan is built on; check E5 blocks every plan (verified against mysql:5.6) |
+| MariaDB 10.11 | no | refused | check E1 blocks every plan; verified against mariadb:10.11 (plan runs, then refuses with a clear error) |
 
 Native DDL is the cheapest path and the one Saksama prefers. It needs neither a copy
 engine nor extra disk, but it still takes the metadata lock at the end, so a long
@@ -31,8 +31,9 @@ statement can queue the whole server.
 | Engine | Version | Verified | Detail |
 |---|---|---|---|
 | native | 8.0.46, 8.4.13 | yes | ADD INDEX, DROP INDEX, ADD COLUMN, DROP COLUMN executed with explicit ALGORITHM and LOCK, then verified through information_schema |
-| gh-ost | 1.1.11 | yes | real migration: ADD COLUMN on a table with rows, --allow-on-master, copy plus cut-over plus verification |
-| gh-ost | 1.1.x (older) | claimed | the wrapper only uses flags that exist across 1.1.x, but older builds have not been run here |
+| gh-ost | 1.1.11 | yes | real migrations through the wrapper: ADD COLUMN on a table with rows on 8.0.46 and on 5.7.44, plus the flag probe (CI job engine-flag-matrix) checking every emitted flag against the binary with --check-flag |
+| gh-ost | 1.1.2 - 1.1.7 | claimed | the flags the wrapper emits by default all exist; --skip-port-validation (added 1.1.8) is the only gap, and it is emitted only when connecting through a mapped port |
+| gh-ost | older than 1.1.2 | no | --skip-port-validation is absent whenever the port is mapped; the flag probe refuses the run |
 | pt-osc | 3.7.2 | yes | real migrations: ADD COLUMN on a plain table, a table with a foreign key (ON DELETE CASCADE preserved), and a composite primary key that gh-ost cannot chunk. Rows and constraints verified afterwards |
 | pt-osc | 3.0.13 | yes | same suite; behavioural difference worth knowing: some builds keep an underscore prefix on foreign key constraint names, so Saksama verifies constraints by columns and referenced table rather than by name |
 | pt-osc | 2.x | no | no --resume, narrower ALTER grammar; percona-toolkit 3.x is required |

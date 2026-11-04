@@ -21,6 +21,9 @@ type Collector struct {
 	// LongQueryThreshold is the age, in seconds, at which a running statement is
 	// reported as a metadata-lock hazard.
 	LongQueryThreshold int64
+	// hasGeneration is a cache for generationExpressions, which asks the server
+	// itself whether information_schema.COLUMNS carries a GENERATION_EXPRESSION.
+	hasGeneration *bool
 	// TrxThreshold is the age, in seconds, at which a transaction is reported.
 	TrxThreshold int64
 	// DataDir, when it exists on this machine, is used to measure free space.
@@ -51,8 +54,8 @@ func (c *Collector) Server(ctx context.Context) (model.Server, error) {
 
 	srv.Version = version.String
 	srv.VersionCmt = comment.String
-	srv.DefaultChar = charset.String
-	srv.DefaultColl = collation.String
+	srv.DefaultChar = normalizeCharset(charset.String)
+	srv.DefaultColl = normalizeCollation(collation.String)
 	srv.Port = int(port.Int64)
 	srv.Vendor = detectVendor(version.String, comment.String)
 	return srv, nil
@@ -72,6 +75,51 @@ func detectVendor(version, comment string) string {
 		return "percona"
 	}
 	return "mysql"
+}
+
+// generationExpressions reports whether information_schema.COLUMNS carries a
+// GENERATION_EXPRESSION column on this server.
+//
+// The column exists on MySQL 5.7.6+, MariaDB 10.2+ (where it was already used), and
+// everything newer. MySQL 5.6 does not have it, and naming it there fails the whole
+// introspection with "Unknown column 'GENERATION_EXPRESSION'". The server is asked
+// directly, through the metadata that is always present, so no version parsing and
+// no vendor table has to stay in sync with reality.
+func (c *Collector) generationExpressions(ctx context.Context) bool {
+	if c.hasGeneration != nil {
+		return *c.hasGeneration
+	}
+	var n int
+	err := c.Q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = 'information_schema'
+		  AND TABLE_NAME = 'COLUMNS'
+		  AND COLUMN_NAME = 'GENERATION_EXPRESSION'
+	`).Scan(&n)
+	truth := err == nil && n > 0
+	c.hasGeneration = &truth
+	return truth
+}
+
+// normalizeCharset unifies the MySQL 5.7 alias "utf8" with the modern name
+// "utf8mb3", and follows the collation through. Checks rely on exact string
+// comparison across FKs; an alias used on one side and the explicit name on the
+// other would read as a mismatch that the server itself accepts. 5.7 reports
+// whichever spelling the DDL used, so introspection folds both onto utf8mb3.
+func normalizeCharset(name string) string {
+	if strings.EqualFold(name, "utf8") {
+		return "utf8mb3"
+	}
+	return name
+}
+
+// utf8CollationRewrite renames only collations of the old alias, e.g.
+// "utf8_general_ci" becomes "utf8mb3_general_ci"; utf8mb4_* collations pass through.
+func normalizeCollation(name string) string {
+	if strings.HasPrefix(name, "utf8_") {
+		return "utf8mb3_" + name[len("utf8_"):]
+	}
+	return name
 }
 
 // Table reads the full table model.
@@ -97,7 +145,7 @@ func (c *Collector) Table(ctx context.Context) (model.Table, error) {
 
 	tbl.Engine = engine.String
 	tbl.RowFormat = strings.ToUpper(rowFormat.String)
-	tbl.Collation = strings.ToLower(collation.String)
+	tbl.Collation = strings.ToLower(normalizeCollation(collation.String))
 	tbl.Rows = rows.Int64
 	tbl.DataLength = dataLen.Int64
 	tbl.IndexLength = indexLen.Int64
@@ -166,9 +214,15 @@ func (c *Collector) isPartitioned(ctx context.Context) (bool, error) {
 }
 
 func (c *Collector) columns(ctx context.Context) ([]model.Column, error) {
+	// MySQL 5.6 has no GENERATION_EXPRESSION; selecting it there aborts the
+	// introspection before any other fact is read.
+	genExpr := "''"
+	if c.generationExpressions(ctx) {
+		genExpr = "GENERATION_EXPRESSION"
+	}
 	rows, err := c.Q.QueryContext(ctx, `
 		SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, CHARACTER_SET_NAME, COLLATION_NAME,
-		       IS_NULLABLE, COLUMN_DEFAULT, EXTRA, GENERATION_EXPRESSION
+		       IS_NULLABLE, COLUMN_DEFAULT, EXTRA, `+genExpr+`
 		FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION
@@ -190,8 +244,8 @@ func (c *Collector) columns(ctx context.Context) ([]model.Column, error) {
 			Name:      name.String,
 			Type:      strings.ToLower(colType.String),
 			DataType:  strings.ToLower(dataType.String),
-			Charset:   strings.ToLower(charset.String),
-			Collation: strings.ToLower(collation.String),
+			Charset:   strings.ToLower(normalizeCharset(charset.String)),
+			Collation: strings.ToLower(normalizeCollation(collation.String)),
 			Nullable:  strings.EqualFold(nullable.String, "YES"),
 			Extra:     strings.ToLower(extra.String),
 			Generated: gen.String != "",
@@ -738,8 +792,8 @@ func (c *Collector) columnsOf(ctx context.Context, schema, table string) (map[st
 			Name:      name.String,
 			Type:      strings.ToLower(colType.String),
 			DataType:  strings.ToLower(dataType.String),
-			Charset:   strings.ToLower(charset.String),
-			Collation: strings.ToLower(collation.String),
+			Charset:   strings.ToLower(normalizeCharset(charset.String)),
+			Collation: strings.ToLower(normalizeCollation(collation.String)),
 		}
 	}
 	return out, rows.Err()

@@ -48,6 +48,7 @@ const (
 	chkMariaDB            = "E1"
 	chkEngineNotInnoDB    = "E2"
 	chkVersionUnparseable = "E3"
+	chkOldServer          = "E5"
 
 	// Engine routing.
 	chkNoEngineFits           = "R1"
@@ -94,6 +95,22 @@ func checksCapability(in Input, ops []model.Op, anyBlocked, anyRebuild bool) []C
 			Detail:      fmt.Sprintf("version %q did not parse", in.Server.Version),
 			Remediation: "provide the server version explicitly with --mysql-version",
 		})
+	}
+
+	// E5: anything older than 5.7 is refused outright, before the engine matrix
+	// is consulted. 5.6 and older are past end of life, and their
+	// information_schema lacks the facts (generated column expressions, altered
+	// column reporting) a verified migration is built on.
+	if v, err := model.ParseVersion(in.Server.Version); err == nil {
+		if v.Major < 5 || (v.Major == 5 && v.Minor < 7) {
+			out = append(out, Check{
+				ID:          chkOldServer,
+				Severity:    SeverityBlocker,
+				Title:       "MySQL older than 5.7 is not a verified target",
+				Detail:      fmt.Sprintf("server reports %d.%d.%d, which is past end of life and its INFORMATION_SCHEMA lacks the facts this plan is built on", v.Major, v.Minor, v.Patch),
+				Remediation: "upgrade to MySQL 5.7 or newer; for older servers use the copy engine directly under a reviewed procedure",
+			})
+		}
 	}
 
 	if e := in.Table.Engine; e != "" && !strings.EqualFold(e, "InnoDB") {

@@ -73,19 +73,19 @@ var MySQL = []MySQLRow{
 		Detail: "rule R-ADD-COLUMN-INSTANT-8012; unit tested, not run against a server this old",
 	},
 	{
-		Version: "5.7.x", Status: Claimed,
-		Native: "INPLACE index only; every column change is a rebuild",
-		Detail: "needs gh-ost 1.x or pt-osc for a rebuild; the integration suite targets 8.0+ and has not run here",
+		Version: "5.7.44", Status: Verified,
+		Native: "INPLACE add/drop index; every column change is a rebuild",
+		Detail: "43 of 44 integration tests pass (the INSTANT ones skip); with pt-osc 3.7.2 the full suite runs, and gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows",
 	},
 	{
-		Version: "5.6.x", Status: Claimed,
-		Native: "INPLACE index; no INSTANT at all",
-		Detail: "pt-osc 2.x era; plan only, never executed by this repository",
-	},
-	{
-		Version: "MariaDB (any)", Status: Unsupported,
+		Version: "5.6.51", Status: Unsupported,
 		Native: "refused",
-		Detail: "capability matrix is not verified for MariaDB, so check E1 blocks every plan",
+		Detail: "end of life and its INFORMATION_SCHEMA lacks the reported fact the plan is built on; check E5 blocks every plan (verified against mysql:5.6)",
+	},
+	{
+		Version: "MariaDB 10.11", Status: Unsupported,
+		Native: "refused",
+		Detail: "check E1 blocks every plan; verified against mariadb:10.11 (plan runs, then refuses with a clear error)",
 	},
 }
 
@@ -97,11 +97,15 @@ var Engines = []EngineRow{
 	},
 	{
 		Engine: "gh-ost", Version: "1.1.11", Status: Verified,
-		Detail: "real migration: ADD COLUMN on a table with rows, --allow-on-master, copy plus cut-over plus verification",
+		Detail: "real migrations through the wrapper: ADD COLUMN on a table with rows on 8.0.46 and on 5.7.44, plus the flag probe (CI job engine-flag-matrix) checking every emitted flag against the binary with --check-flag",
 	},
 	{
-		Engine: "gh-ost", Version: "1.1.x (older)", Status: Claimed,
-		Detail: "the wrapper only uses flags that exist across 1.1.x, but older builds have not been run here",
+		Engine: "gh-ost", Version: "1.1.2 - 1.1.7", Status: Claimed,
+		Detail: "the flags the wrapper emits by default all exist; --skip-port-validation (added 1.1.8) is the only gap, and it is emitted only when connecting through a mapped port",
+	},
+	{
+		Engine: "gh-ost", Version: "older than 1.1.2", Status: Unsupported,
+		Detail: "--skip-port-validation is absent whenever the port is mapped; the flag probe refuses the run",
 	},
 	{
 		Engine: "pt-osc", Version: "3.7.2", Status: Verified,

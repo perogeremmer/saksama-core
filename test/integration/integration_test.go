@@ -94,6 +94,20 @@ func fixtureSchema(t *testing.T) (string, *sql.DB) {
 	return name, db
 }
 
+// utf8mb4Collation returns a collation the running server actually has.
+// utf8mb4_0900_ai_ci appeared in MySQL 8.0; on 5.7 the equivalent default is
+// utf8mb4_general_ci. Fixtures ask rather than assume, so one suite covers both.
+func utf8mb4Collation(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var v string
+	if err := db.QueryRow("SELECT @@version").Scan(&v); err == nil {
+		if !strings.HasPrefix(v, "8.") && !strings.HasPrefix(v, "9.") && !strings.HasPrefix(v, "10.") {
+			return "COLLATE=utf8mb4_general_ci"
+		}
+	}
+	return "COLLATE=utf8mb4_0900_ai_ci"
+}
+
 func mustExec(t *testing.T, db *sql.DB, statements ...string) {
 	t.Helper()
 	for _, s := range statements {
@@ -190,7 +204,7 @@ func TestIntrospectReadsEverythingTheAnalyzerNeeds(t *testing.T) {
 			"KEY `ix_status` (`status`),"+
 			"CONSTRAINT `fk_orders_parent` FOREIGN KEY (`parent_id`) REFERENCES `parents` (`id`) "+
 			"ON DELETE CASCADE ON UPDATE SET NULL"+
-			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC",
+			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 "+utf8mb4Collation(t, db)+" ROW_FORMAT=DYNAMIC",
 		"CREATE TRIGGER `trg_orders_noop` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.`status` = NEW.`status`",
 	)
 
@@ -271,10 +285,10 @@ func TestIntrospectReadsEverythingTheAnalyzerNeeds(t *testing.T) {
 func TestIntrospectFKCharsetCompatibility(t *testing.T) {
 	schema, db := fixtureSchema(t)
 	mustExec(t, db,
-		"CREATE TABLE `p` (`id` varchar(36) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+		"CREATE TABLE `p` (`id` varchar(36) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 "+utf8mb4Collation(t, db),
 		"CREATE TABLE `c` (`pid` varchar(36) NOT NULL, KEY `ix` (`pid`), "+
 			"CONSTRAINT `fk_c_p` FOREIGN KEY (`pid`) REFERENCES `p` (`id`)) "+
-			"ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+			"ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 "+utf8mb4Collation(t, db),
 	)
 
 	c := introspect.NewCollector(db, schema, "c")
@@ -386,6 +400,15 @@ func TestApplyAddIndexEndToEnd(t *testing.T) {
 
 func TestApplyAddColumnUsesInstant(t *testing.T) {
 	schema, db := fixtureSchema(t)
+
+	// INSTANT add column begins at 8.0.12. On an older server the same change is
+	// a rebuild and belongs to the copy engine, which is its own tests.
+	var srvVersion string
+	_ = db.QueryRow("SELECT @@version").Scan(&srvVersion)
+	if !strings.HasPrefix(srvVersion, "8.") && !strings.HasPrefix(srvVersion, "9.") {
+		t.Skipf("running %s; INSTANT add column is an 8.0+ behaviour, not a 5.7 one", srvVersion)
+	}
+
 	mustExec(t, db,
 		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 	)
