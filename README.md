@@ -96,6 +96,10 @@ saksama engine doctor gh-ost -h db.prod -u deployer
 
 Nothing installs itself: `plan`, `advise`, and `apply` never touch a binary.
 
+Nothing to remember? `saksama` on a terminal opens a numbered menu that calls the
+same commands, prints the equivalent command line before it acts, and records a
+plan only when you ask. On a pipe it prints this page instead of waiting for input.
+
 Ask first. This only reads:
 
 ```bash
@@ -161,7 +165,8 @@ VERIFICATION
   [ok  ] foreign_key_present  fk_orders_spot  constraint fk_orders_spot intact
 ```
 
-Every command, flag, and exit code: **[COMMANDS.md](COMMANDS.md)**.
+Every command, flag, and exit code: **[COMMANDS.md](COMMANDS.md)**. The interactive
+menu is `saksama wizard` (or just `saksama`).
 
 ## What it will not do
 

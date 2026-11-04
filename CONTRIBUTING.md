@@ -9,6 +9,21 @@ Thanks for taking a look. This project has an unusually strict bar because a bug
 3. **The analyzer stays pure.** `internal/analyzer` takes a model and returns a plan. Database access belongs in `internal/introspect`.
 4. **Fail closed.** Unknown operations are blocked, never guessed.
 5. **Never widen what the tool will do** without also extending `docs/CHECKS.md` and the decision log.
+6. **A frontend holds no policy.** `internal/cli` and `internal/wizard` render and prompt; they call `internal/core` for everything that decides, records, or executes. If a frontend needs to know whether a change is safe, that knowledge belongs in the analyzer.
+
+## Layers
+
+```
+cmd/saksama      -> internal/cli -> internal/wizard -> internal/core
+internal/app     -> connection and state directory wiring, used by both
+internal/core    -> analyzer, introspect, engine, state, events, stream
+```
+
+Import rules, enforced by review:
+
+- `core` never imports `cli` or `wizard`.
+- `wizard` never imports `cli` (otherwise the dispatch is circular).
+- A read-only question calls `core.Analyze`; only a decision anyone asked to keep calls `core.Prepare`. Advise and previews must not write sessions.
 
 ## Getting started
 

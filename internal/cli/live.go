@@ -13,9 +13,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
-
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
+	"github.com/perogeremmer/saksama-core/internal/app"
 	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/cred"
 	"github.com/perogeremmer/saksama-core/internal/engine"
@@ -60,21 +59,11 @@ func (c *connFlags) resolve() (cred.Conn, error) {
 	})
 }
 
+// openDB is the CLI's spelling of app.Connect. It stays a function so every
+// command keeps one call site, and so the wizard and an agent can use the same
+// connection logic without going through the CLI.
 func openDB(c cred.Conn) (*sql.DB, error) {
-	db, err := sql.Open("mysql", c.DSN())
-	if err != nil {
-		return nil, fmt.Errorf("opening connection: %w", err)
-	}
-	db.SetMaxOpenConns(4)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("connecting to %s as %s: %w", c.RedactedDSN(), c.User, err)
-	}
-	return db, nil
+	return app.Connect(c)
 }
 
 func currentActor() string {
@@ -87,8 +76,11 @@ func currentActor() string {
 	return "unknown"
 }
 
+// newStore honours the global --state-dir flag, and otherwise the default
+// location. Every command resolves it the same way, so a session recorded by one
+// command is the session the next command reads.
 func newStore() (*state.Store, error) {
-	return state.NewStore(state.DefaultDir())
+	return app.Store(stateDir)
 }
 
 // --- plan (live) ------------------------------------------------------------
@@ -102,7 +94,6 @@ type livePlanOpts struct {
 	engine           string
 	force            bool
 	jsonOut          bool
-	storeDir         string
 	freeDisk         int64
 	diskTotal        int64
 }
@@ -122,7 +113,6 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.engine, "engine", "", "force native|gh-ost|pt-osc")
 	fs.BoolVar(&o.force, "force", false, "downgrade selected preflight aborts (never capability blockers)")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
-	fs.StringVar(&o.storeDir, "state-dir", "", "state directory (default: ~/.local/state/saksama)")
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
 	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
 	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
@@ -180,7 +170,7 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	}
 
 	ctx := context.Background()
-	prep, err := runner.PlanOnly(ctx, req)
+	prep, err := runner.Prepare(ctx, req)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama plan: %v\n", err)
 		return ExitInternal
@@ -353,7 +343,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 			enc.SetIndent("", "  ")
 			_ = enc.Encode(sess)
 		} else {
-			renderSession(stdout, sess)
+			_ = render.Session(stdout, sess)
 		}
 	}
 	if err != nil {
@@ -364,57 +354,6 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		return ExitInternal
 	}
 	return ExitOK
-}
-
-func renderSession(w io.Writer, s *state.Session) {
-	fmt.Fprintf(w, "SESSION    %s\n", s.ID)
-	fmt.Fprintf(w, "STATE      %s", s.State)
-	if s.Phase != "" {
-		fmt.Fprintf(w, " (%s)", s.Phase)
-	}
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "TARGET     %s.%s @ %s\n", s.Database, s.Table, s.Host)
-	fmt.Fprintf(w, "ALTER      %s\n", s.Alter)
-	fmt.Fprintf(w, "ENGINE     %s\n", s.Engine)
-
-	if len(s.Statements) > 0 {
-		fmt.Fprintln(w, "\nSTATEMENTS")
-		for i, st := range s.Statements {
-			fmt.Fprintf(w, "  %d. %s\n", i+1, st.SQL)
-			if st.DurationMS > 0 || st.Error != "" {
-				fmt.Fprintf(w, "     %dms, %d rows affected\n", st.DurationMS, st.RowsAffected)
-			}
-			if st.Error != "" {
-				fmt.Fprintf(w, "     error: %s\n", st.Error)
-			}
-		}
-	}
-
-	if len(s.Verification) > 0 {
-		fmt.Fprintln(w, "\nVERIFICATION")
-		for _, v := range s.Verification {
-			mark := "ok  "
-			if !v.OK {
-				mark = "FAIL"
-			}
-			fmt.Fprintf(w, "  [%s] %-20s %s  %s\n", mark, v.Kind, v.Name, v.Detail)
-		}
-	}
-
-	if len(s.Artifacts) > 0 {
-		fmt.Fprintln(w, "\nOWNED ARTIFACTS")
-		for _, a := range s.Artifacts {
-			state := "kept for recovery"
-			if a.SafeToDelete {
-				state = "deletable"
-			}
-			fmt.Fprintf(w, "  %-8s %-32s %s (%s)\n", a.Kind, a.Name, state, a.Engine)
-		}
-	}
-
-	if s.Error != "" {
-		fmt.Fprintf(w, "\nERROR      %s\n", s.Error)
-	}
 }
 
 // --- status -----------------------------------------------------------------
@@ -484,7 +423,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		_ = enc.Encode(sess)
 		return ExitOK
 	}
-	renderSession(stdout, sess)
+	_ = render.Session(stdout, sess)
 	if sess.State == state.StateBlocked {
 		return ExitBlocked
 	}

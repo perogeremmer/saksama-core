@@ -153,6 +153,20 @@ func (wr *Writer) WithClock(now func() time.Time) *Writer {
 	return wr
 }
 
+// WithSeq continues numbering from an earlier writer.
+//
+// A session's event log can be appended to by more than one process: `cancel`
+// records the stop, an agent records a reconciliation, and the run that started
+// the engine recorded everything before that. Sequence numbers only stay
+// meaningful (and replayable from a known point) if each appender picks up where
+// the last one stopped.
+func (wr *Writer) WithSeq(last int64) *Writer {
+	wr.mu.Lock()
+	defer wr.mu.Unlock()
+	wr.seq = last
+	return wr
+}
+
 // Seq returns the last emitted sequence number.
 func (wr *Writer) Seq() int64 {
 	wr.mu.Lock()

@@ -133,10 +133,13 @@ func (p *Prepared) Close() {
 	}
 }
 
-// Prepare collects live state, parses the ALTER, and produces a plan.
+// Analyze observes the server and decides what a change costs. It writes
+// nothing: no session, no event log, nothing in the state directory.
 //
-// Nothing is mutated here. This is the function a CI gate uses.
-func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
+// This is what a preview, a wizard, a CI gate, or a web request that is only
+// asking a question must call. Prepare builds on it when a durable record is
+// actually wanted.
+func (r *Runner) Analyze(ctx context.Context, req Request) (*Prepared, error) {
 	if r.DB == nil {
 		return nil, errors.New("no database connection")
 	}
@@ -212,7 +215,25 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		ForExecution:     req.ForExecution,
 	}
 
-	plan := analyzer.Analyze(input)
+	return &Prepared{Snapshot: snap, Plan: analyzer.Analyze(input), Alter: alter}, nil
+}
+
+// Prepare is Analyze plus the durable record: a session, its append-only event
+// log, and the plan exactly as it was decided.
+//
+// Everything that can refuse a change has already refused it by the time this
+// returns. A session is a record of a decision, not a claim that the decision
+// will be executed.
+func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
+	if r.Store == nil {
+		return nil, errors.New("no state directory")
+	}
+
+	p, err := r.Analyze(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	snap, plan := p.Snapshot, p.Plan
 
 	id, err := r.Store.NextID()
 	if err != nil {
@@ -244,7 +265,7 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		sess.State = state.StateBlocked
 	}
 
-	p := &Prepared{Snapshot: snap, Plan: plan, Alter: alter, Session: sess}
+	p.Session = sess
 
 	// Open the event log and emit everything known so far.
 	f, err := r.Store.OpenEventLog(id)
@@ -277,7 +298,7 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 			"detail": c.Detail, "remediation": c.Remediation, "mysql_error": c.MySQLError,
 		})
 	}
-	p.Session.LastSeq = p.emitter.Seq()
+	sess.LastSeq = p.emitter.Seq()
 
 	if err := r.Store.Save(sess); err != nil {
 		return p, err
@@ -547,11 +568,6 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	_ = r.Store.Save(sess)
 
 	return sess, nil
-}
-
-// PlanOnly runs the analyze phase and returns the plan without mutating anything.
-func (r *Runner) PlanOnly(ctx context.Context, req Request) (*Prepared, error) {
-	return r.Prepare(ctx, req)
 }
 
 func (r *Runner) emit(p *Prepared, typ string, data map[string]any) {

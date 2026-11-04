@@ -272,7 +272,7 @@ func adviseLive(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdout,
 		req.EngineHint = e
 	}
 
-	prep, err := runner.PlanOnly(context.Background(), req)
+	prep, err := runner.Analyze(context.Background(), req)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 		return ExitInternal
@@ -324,51 +324,34 @@ func adviseSchema(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdou
 	}
 	defer db.Close()
 
-	ctx := context.Background()
-	collector := introspect.NewCollector(db, o.database, o.table)
-	srv, err := collector.Server(ctx)
+	// AdviseSchema is read-only, so the runner needs no state directory. Passing
+	// nil keeps `advise` from creating one just to answer a question.
+	runner := core.New(db, nil)
+	adv, err := runner.AdviseSchema(context.Background(), o.database, o.table, binaries)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 		return ExitInternal
 	}
-	var tables []model.Table
-	if o.table != "" {
-		tbl, err := collector.Table(ctx)
-		if err != nil {
-			fmt.Fprintf(stderr, "saksama advise: %v\n", err)
-			return ExitInternal
-		}
-		tables = append(tables, tbl)
-	} else {
-		tables, err = collector.SchemaTables(ctx, false)
-		if err != nil {
-			fmt.Fprintf(stderr, "saksama advise: %v\n", err)
-			return ExitInternal
-		}
-	}
-
-	settings, _ := collector.Settings(ctx)
-	rows := analyzer.AssessSchema(tables, srv, binaries, settings)
-	artifacts := introspect.FindArtifacts(tables)
 
 	if o.jsonOut {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(map[string]any{
-			"schema":    o.database,
-			"server":    srv.Version,
-			"tables":    rows,
-			"artifacts": artifacts,
+			"schema":    adv.Database,
+			"server":    adv.Server.Version,
+			"tables":    adv.Tables,
+			"artifacts": adv.Artifacts,
+			"settings":  adv.SettingChecks(),
 		})
 		return ExitOK
 	}
 
-	if err := render.Environment(stdout, analyzer.SettingChecks(analyzer.SettingsFromMap(settings)), !o.plain); err != nil {
+	if err := render.Environment(stdout, adv.SettingChecks(), !o.plain); err != nil {
 		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 		return ExitInternal
 	}
 	fmt.Fprintln(stdout)
-	if err := render.SchemaReportStyled(stdout, o.database, rows, artifacts, srv, !o.plain); err != nil {
+	if err := render.SchemaReportStyled(stdout, adv.Database, adv.Tables, adv.Artifacts, adv.Server, !o.plain); err != nil {
 		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 		return ExitInternal
 	}

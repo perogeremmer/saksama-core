@@ -851,7 +851,7 @@ func TestAdviseLiveDetectsForeignKeyAndSuggestsPtOSC(t *testing.T) {
 		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: "/usr/bin/pt-online-schema-change", Version: "3.5.1"},
 	}
 
-	prep, err := runner.PlanOnly(context.Background(), req)
+	prep, err := runner.Analyze(context.Background(), req)
 	if err != nil {
 		t.Fatalf("advise: %v", err)
 	}
@@ -906,7 +906,7 @@ func TestAdviseLiveFavoursNativeForAddIndex(t *testing.T) {
 
 	runner, _ := newRunner(t)
 	runner.DB = db
-	prep, err := runner.PlanOnly(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_at (at)"))
+	prep, err := runner.Analyze(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_at (at)"))
 	if err != nil {
 		t.Fatalf("advise: %v", err)
 	}
@@ -1144,7 +1144,7 @@ func TestSettingsAreReadFromAServerWithoutBinlog(t *testing.T) {
 	mustExec(t, db,
 		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `status` varchar(32) NOT NULL, "+
 			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
-	prep, err := runner.PlanOnly(context.Background(),
+	prep, err := runner.Analyze(context.Background(),
 		applyRequest(schema, "t", "MODIFY COLUMN status varchar(64) NOT NULL"))
 	if err != nil {
 		t.Fatalf("plan: %v", err)
@@ -1304,7 +1304,7 @@ func TestApplyRefusesWhenSchemaChangedAfterPlanning(t *testing.T) {
 
 	// Plan first, against the current shape.
 	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
-	prep, err := runner.PlanOnly(context.Background(), req)
+	prep, err := runner.Analyze(context.Background(), req)
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -1362,8 +1362,8 @@ func TestApplyFromSessionRefusesAStalePlan(t *testing.T) {
 	runner, _ := newRunner(t)
 	runner.DB = db
 
-	// Plan and keep it.
-	prep, err := runner.PlanOnly(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_a (a)"))
+	// Plan and keep it: --session executes a stored plan, so this one is recorded.
+	prep, err := runner.Prepare(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_a (a)"))
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -1406,7 +1406,7 @@ func TestApplyFromSessionRunsAFreshPlan(t *testing.T) {
 	runner, _ := newRunner(t)
 	runner.DB = db
 
-	prep, err := runner.PlanOnly(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_a (a)"))
+	prep, err := runner.Prepare(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_a (a)"))
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}

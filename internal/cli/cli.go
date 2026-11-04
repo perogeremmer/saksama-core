@@ -10,10 +10,13 @@ import (
 	"os"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
 	"github.com/perogeremmer/saksama-core/internal/model"
 	"github.com/perogeremmer/saksama-core/internal/parser"
 	"github.com/perogeremmer/saksama-core/internal/render"
+	"github.com/perogeremmer/saksama-core/internal/wizard"
 )
 
 // Version is the build version, injected with -ldflags. When nothing is
@@ -29,9 +32,24 @@ const (
 	ExitInternal = 3
 )
 
+// stateDir is set once from --state-dir, before any command sees its flags.
+//
+// It is global on purpose: the CLI and the wizard must read and write the same
+// directory, and a per-command flag meant each new command had to remember to
+// accept it (one of them silently did not).
+var stateDir string
+
 // Run dispatches a command line and returns the process exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
+	args, stateDir = extractStateDir(args)
+
 	if len(args) == 0 {
+		// A bare `saksama` on a terminal is someone asking for help, not someone
+		// asking for an error page. Pipes and CI keep the old behaviour, because a
+		// prompt that waits for input in a pipeline is a hang.
+		if isInteractive(stdout) {
+			return wizard.Run(nil, stateDir, stdout, stderr)
+		}
 		usage(stderr)
 		return ExitUsage
 	}
@@ -46,6 +64,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdAdvise(args[1:], stdout, stderr)
 	case "engine":
 		return cmdEngine(args[1:], stdout, stderr)
+	case "wizard", "interactive":
+		return wizard.Run(args[1:], stateDir, stdout, stderr)
 	case "compat":
 		return cmdCompat(args[1:], stdout, stderr)
 	case "apply":
@@ -85,10 +105,39 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// extractStateDir pulls the global --state-dir out of the arguments, in either
+// spelling, so every command supports it without declaring it.
+func extractStateDir(args []string) ([]string, string) {
+	out := make([]string, 0, len(args))
+	dir := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--state-dir" && i+1 < len(args):
+			dir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--state-dir="):
+			dir = strings.TrimPrefix(arg, "--state-dir=")
+		default:
+			out = append(out, arg)
+		}
+	}
+	return out, dir
+}
+
+// isInteractive reports whether stdout is a terminal, which is the only place a
+// prompt is allowed to appear.
+func isInteractive(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
 func usage(w io.Writer) {
 	fmt.Fprint(w, `Saksama - examine before you alter.
 
 Usage:
+  saksama                   interactive menu (on a terminal; otherwise this page)
+  saksama wizard            the same menu, explicitly
   saksama --help            this page
   saksama plan   --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
   saksama plan --live -h <host> -d <db> -t <table> -a "<ALTER>" [options]
@@ -108,6 +157,10 @@ Usage:
   saksama cleanup <session>
   saksama schema
   saksama version
+
+The wizard asks numbered questions, prints the equivalent non-interactive
+command before it does anything, and never invents a decision: every step calls
+the same core function the flag-based command calls.
 
 Offline planning takes the table definition from SHOW CREATE TABLE output, so it
 can run in CI without touching the database. --live plans against the server and

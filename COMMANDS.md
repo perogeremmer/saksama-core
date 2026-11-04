@@ -4,6 +4,8 @@ Full reference for every `saksama` command. For what the tool is and why, see th
 [README](README.md). For architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```
+saksama           the interactive menu, on a terminal (same as `saksama wizard`)
+saksama wizard    numbered menus that call the commands below
 saksama advise    inspect the server and the schema, and say which engine fits
 saksama plan      produce a plan and record it, changing nothing
 saksama apply     execute the chosen engine
@@ -25,6 +27,62 @@ Exit codes are part of the contract:
 | `1` | a plan was produced **with** blockers, safe to use as a CI gate |
 | `2` | usage error |
 | `3` | execution or internal failure |
+
+---
+
+## `saksama wizard`
+
+An interactive menu for people who do not want to remember flags. Every step calls
+the same core function the flag-based command calls, and prints the equivalent
+non-interactive command before it does anything:
+
+```
+saksama                  the menu, when stdout is a terminal
+saksama wizard           the menu, explicitly
+saksama wizard -h db.prod -d shop --free-disk 100000000000 --disk-total 200000000000
+```
+
+```
+  1   Connect to a server
+  2   Inspect the server           settings, engine binaries, disk
+  3   Inspect tables and engines   what a rebuild would cost, per table
+  4   Plan a change                build an ALTER, then read the plan
+  5   Run a planned change         execute a recorded plan, statements shown first
+  6   Sessions                     follow, cancel, cutover, cleanup
+  7   Reconcile                    sessions that never finished
+  0   Exit
+```
+
+The rules it follows:
+
+- **No policy.** The wizard never decides that a change is safe; it renders what
+  the analyzer decided, including the blockers and their remediation.
+- **Nothing hidden.** Before acting it prints the equivalent command, so the menu
+  is a way to learn the flags, not a second interface to maintain.
+- **Preview writes nothing.** Reading a plan calls `Analyze`, which does not create
+  a session. A session is recorded only when you answer yes to
+  "Record this plan so it can be run later?".
+- **Approval shows statements**, not a summary, and a production target still
+  requires typing the host name.
+- **No prompt without a terminal.** On a pipe or in CI it exits `2` and names the
+  non-interactive commands instead of waiting for input.
+
+| Flag | Meaning |
+|---|---|
+| `-h`, `-P`, `-u`, `-d` | prefill the connection; the menu still asks for a password when none is found |
+| `--free-disk`, `--disk-total` | the numbers core cannot measure from here; without them an execution may be refused by the disk check |
+| `--no-probe` | skip detecting installed engine binaries |
+
+---
+
+## Global options
+
+| Flag | Meaning |
+|---|---|
+| `--state-dir <path>` | where sessions and event logs live; default `~/.local/state/saksama`, or `SAKSAMA_STATE_DIR` |
+
+It is accepted by every command, in either position, so the CLI and the wizard
+always read the same directory.
 
 ---
 
@@ -310,16 +368,22 @@ practical without a background daemon:
 ```bash
 saksama apply ... --detach        # engine runs in its own process group
 saksama attach s3                 # follow the event log, ctrl-c to detach
+saksama attach s3 --follow=false  # print what is already logged and exit
+saksama attach s3 --json          # raw JSONL, for piping
+saksama attach s3 --since 12      # only events after sequence 12
 saksama cancel s3                 # SIGTERM the recorded engine pid
 ```
 
 `attach` reads the append-only event log on disk, so it works from another
 terminal, after a reconnect, or hours later. Detaching does not stop anything on
-the server, and `attach` says so when you leave.
+the server, and `attach` says so when you leave. `--since` is what makes a
+reconnect cheap, and it is the same contract a web client needs later.
 
-`cancel` signals the process id recorded in the session. If the engine had not cut
-over, the production table was never swapped; `status` and `cleanup` handle what it
-left behind.
+`cancel` signals the process id recorded in the session, and then records the
+outcome: the session becomes `cancelled`, the cancellation is appended to the event
+log, and the artifacts are marked deletable. `--json` prints the outcome
+(`stopped`, `already-ended`, `no-engine`, `not-running`). A pid that is already gone
+is reported as `not-running` with a pointer to `reconcile`, not as a success.
 
 The limit worth knowing: a native `ALTER` is owned by the MySQL server, so there is
 no process to cancel. The tool says that instead of pretending.
@@ -427,6 +491,7 @@ Ownership is recorded when the engine starts, not inferred from a name pattern. 
 table called `_orders_old` might belong to a migration, or might be something a
 person created deliberately, and the name cannot tell you which.
 
+- `--dry-run` answers from the session alone, so it needs no credentials.
 - While the session is still running, its artifacts may be the only way back, so
   they are kept and cleanup says so.
 - Once the session is terminal, they become deletable.
@@ -507,16 +572,15 @@ can reproduce locally.
 
 ## Not implemented yet
 
-These commands exit `2` with an explicit message rather than pretending to work:
+One command exits `2` with an explicit message rather than pretending to work:
 
 ```
 saksama daemon start|stop|status
-saksama cutover <session>
-saksama cancel <session>
-saksama recover <session>
-saksama attach <session>
 ```
 
-`--hold-cutover` builds the flag for engines that support it, but the stop,
-cleanup, and orphan-recovery paths belong with the daemon, so a held cutover is
-currently released by the engine itself.
+Everything a daemon would otherwise be needed for is handled by the state
+directory instead: `--detach` gives the engine its own process group, `attach`
+follows the log from any terminal, `cancel` stops it by recorded pid, and
+`reconcile` reports what a crash left behind. A long-lived supervisor that owns a
+job queue is the next step, and it will call the same core functions these commands
+call.

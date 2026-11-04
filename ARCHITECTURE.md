@@ -128,6 +128,8 @@ flowchart TD
 3. **Fail closed by default.** An operation that is not understood becomes a blocker, not a guess.
 4. **Never parse engine output for progress.** Poll the database. Engine stderr is for diagnosis only.
 5. **Engines run under the core, never under the UI.** A dropped SSH session must not kill a migration.
+6. **A frontend holds no policy.** The CLI, the wizard, and a future web UI render what the analyzer decided and call the core for everything else. A frontend that decides whether a change is safe is a second, quieter set of rules.
+7. **A question writes nothing.** `Analyze` observes and decides; `Prepare` records. Advise, previews, and a dashboard opening ten tables must use the former, or the state directory fills with sessions nobody asked for.
 
 ---
 
@@ -137,7 +139,7 @@ flowchart TD
 flowchart TD
     subgraph clients["Frontends"]
         CLI["saksama CLI (thin)"]
-        TUI["TUI<br/>phase 4"]
+        WIZ["interactive wizard<br/>saksama / saksama wizard"]
         WEB["Web control plane<br/>phase 6"]
     end
 
@@ -153,10 +155,10 @@ flowchart TD
     end
 
     CLI -->|"commands"| ORCH
-    TUI -->|"commands"| ORCH
+    WIZ -->|"commands"| ORCH
     WEB -->|"commands"| ORCH
     ORCH -->|"JSONL events"| CLI
-    ORCH -->|"JSONL events"| TUI
+    ORCH -->|"JSONL events"| WIZ
     ORCH -->|"JSONL events"| WEB
 
     ORCH -->|"read schema and settings"| INTRO
@@ -238,19 +240,36 @@ Before a cutover, cancel and cleanup are safe: the production table has not been
 
 ---
 
-## 10. TUI realities on a server
+## 10. Interactive frontends on a server
+
+The interactive frontend is a **line-based wizard**, not a full-screen TUI: numbered
+menus, a text prompt, and the equivalent non-interactive command printed before
+anything happens.
+
+```mermaid
+flowchart LR
+    W["wizard menu"] -->|"Analyze (writes nothing)"| A["plan card + blockers"]
+    W -->|"Prepare (records)"| S["session + event log"]
+    W -->|"ApplyFromSession"| R["core.Runner"]
+    W -->|"Approve callback"| R
+    R -->|"events"| L["JSONL log"]
+    W -->|"stream.Follow"| L
+```
 
 | Reality | Implication |
 |---|---|
-| SSH drops | the core owns the engine, not the client |
-| no TTY | headless is mandatory |
-| `TERM=dumb`, locale C | ASCII only, which is why tables use `+ - \|` |
-| 80x24 | panels must degrade, and `--plain` exists |
-| no clipboard | print and save to a file |
-| many admins | one writer, many readers |
-| crash | reconcile on startup before acting |
+| SSH drops | the core owns the engine, not the client; the wizard only reads and asks |
+| no TTY | the wizard exits 2 and names the non-interactive command; it never waits on a pipe |
+| `TERM=dumb`, locale C | line-based prompts, ASCII output, no raw mode, no arrow keys |
+| 80x24 | menus are one line per choice with an optional note, and degrade by truncation |
+| no clipboard | every screen prints the command it is equivalent to |
+| many admins | the wizard reads the same state directory as the CLI, so both see the same sessions |
+| crash | `reconcile` reports what an interrupted session left behind |
 
----
+Why not a full-screen TUI: it adds a rendering runtime, needs a pty to test, and
+changes shape every time the approval or state model does. The wizard is a thin
+layer over commands that already exist, so it is testable with a scripted prompter
+and a fake backend, and it cannot drift from the CLI.
 
 ## 11. Licensing and distribution
 
@@ -277,8 +296,10 @@ Go, for a static binary, `go:embed`, a mature MySQL driver, cheap concurrency fo
 | 0 | decision log, check catalogue, event contract | done |
 | 1 | analyzer, offline plan, JSON and plan card | done |
 | 2 | live introspection, native execution, sessions, events, engine matrix, doctor | done |
-| 3 | daemon, cutover pause, cancel, cleanup, orphan recovery | not built |
-| 4 | TUI | not built |
+| 3 | cutover pause, cancel, cleanup, orphan recovery | done |
+| 3b | long-lived supervisor with a job queue (needed by a web control plane) | not built |
+| 4 | interactive wizard over the core (`saksama`, `saksama wizard`) | done |
+| 4b | full-screen TUI, if ever | deliberately not built: the wizard covers the need |
 | 5 | pt-osc verified against a real binary, broader platform profiles | partially |
 | 6 | web control plane on the same event contract | not started |
 | 7 | PostgreSQL | not started |
