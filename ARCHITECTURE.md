@@ -11,7 +11,7 @@
 
 An open source tool for backend developers and startup founders who:
 
-- have **one server** (a single instance, no replica)
+- have **one MySQL instance** (no replica), on one box shared with the app or on a second VPS of their own
 - **cannot afford** blue-green deployment, in money or in engineering time
 - still need schema migrations with effectively no downtime
 - are **not** MySQL internals experts
@@ -37,7 +37,8 @@ An open source tool for backend developers and startup founders who:
 
 **Target:** a backend developer or startup founder who:
 
-- self-hosts on a VPS, or runs RDS single-AZ
+- runs **one or two VPS**, self-managed: the app and MySQL stacked on one box, or split one app / one database
+- does **not** run managed MySQL: RDS and its equivalents are the bill that got cut first
 - has **no replica**, or has not set one up
 - has **no DBA** and no blue-green
 - needs `ADD INDEX`, `ADD COLUMN`, or `CHANGE COLUMN` on a large production table, for example 59 million rows
@@ -46,9 +47,9 @@ An open source tool for backend developers and startup founders who:
 
 **Why this user exists:**
 
-- Most startups run **one instance**. This is not an edge case, it is the default.
-- Blue-green bills this user twice. **The instance:** a second server, paid every month whether or not a migration is running. **The change:** dual writes, two deploy cycles, traffic switching, a rollback plan, paid in salary or in features that do not ship. This user is short on both, and the cash is the binding constraint.
-- What is actually needed is **online schema change on one instance**. One server, one deploy, a cheap operation, provided it is done correctly.
+- Most startups run **one instance**. This is not an edge case, it is the default. Sometimes everything on one box; more often the app on one VPS and MySQL on another, both self-managed, because managed MySQL is a monthly bill the budget never had.
+- Blue-green bills this user twice. **The instance:** a second server, paid every month whether or not a migration is running. **The change:** dual writes, two deploy cycles, traffic switching, a rollback plan, paid in salary or in features that do not ship. This user is short on both, and the cash is the binding constraint. That is why the only safe route to a large `ALTER` looks like a third server plus a rewrite of the deploy.
+- What is actually needed is **online schema change on the instance they already run**. Same server, same app, one deploy, a cheap operation, provided it is done correctly.
 
 > **Reframing:** "single server, therefore unsafe" is the wrong frame.
 > Online DDL on one instance is not a hack. The hack is a migration with no analysis, no guardrail, and no recovery plan.

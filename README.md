@@ -20,19 +20,30 @@ equally correct.
 
 ## The problem
 
-You have one MySQL instance. No replica. No DBA. A 59-million-row table, and a
-change you have postponed for three months because you do not know whether
-`ALTER TABLE` will lock it for two minutes or two hours.
+The deployment is usually one of these two, and neither is unusual:
 
-Blue-green would solve it, and blue-green bills a small team twice. Once for the
-second instance: a server paid for every month whether or not a migration is
-running. Once for the change itself: dual writes, two deploy cycles, traffic
-switching, a rollback plan, paid in salary or in features that do not ship. The
-second bill is the one that cannot be paid, because the engineer paying it is the
-engineer doing everything else.
+```
+   how it starts                     how it ends up
+   +---------------------+           +-----------+     +-----------+
+   |  app + MySQL        |           |  app      |     |  MySQL    |
+   +---------------------+           +-----------+     +-----------+
+```
 
-So the need is narrower than blue-green: **online schema change on one instance,
-done correctly.** One server, one deploy, no migration project to fund.
+One box carrying both, or two boxes because managed MySQL was the first bill to
+go. Either way: no replica. No DBA. A 59-million-row table, and a change you have
+postponed for three months because you do not know whether `ALTER TABLE` will lock
+it for two minutes or two hours.
+
+Blue-green is the answer everyone gives, and on this deployment it is not a
+pattern you adopt. It is a database you provision: a second MySQL instance to pay
+for and keep in sync, dual writes in the app, two deploy cycles, traffic
+switching, a rollback plan. The instance is a monthly bill; the rest is paid in
+salary or in features that do not ship. Neither is available, and the engineer
+paying is the engineer doing everything else.
+
+So the need is narrower than blue-green: **online schema change on the instance
+you already run.** Same server, same app, one deploy. What has to be correct is
+the procedure, not the topology.
 
 The copy engines already exist and they are good. What is missing is the layer
 above them:
