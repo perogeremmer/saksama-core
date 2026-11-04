@@ -11,6 +11,18 @@ import (
 	"time"
 )
 
+// Scope is how wide an engine choice reaches.
+type Scope string
+
+const (
+	// ScopeGlobal applies to every table on every database.
+	ScopeGlobal Scope = "global"
+	// ScopeDatabase applies to every table in one database.
+	ScopeDatabase Scope = "database"
+	// ScopeTable applies to one table.
+	ScopeTable Scope = "table"
+)
+
 // EngineChoice is a durable record of the operator's decision.
 //
 // The analyzer recommends; the human decides. Recording the decision (rather
@@ -18,11 +30,24 @@ import (
 // audit trail can show that a person chose it on purpose.
 type EngineChoice struct {
 	Engine string `json:"engine"`
-	// Target is "database.table" when scoped to one table, or "" for the default.
-	Target string `json:"target,omitempty"`
-	Actor  string `json:"actor,omitempty"`
-	Note   string `json:"note,omitempty"`
-	SetAt  string `json:"set_at"`
+	Scope  Scope  `json:"scope"`
+	// Database and Table are filled according to Scope.
+	Database string `json:"database,omitempty"`
+	Table    string `json:"table,omitempty"`
+	Actor    string `json:"actor,omitempty"`
+	Note     string `json:"note,omitempty"`
+	SetAt    string `json:"set_at"`
+}
+
+// Label is the human-readable scope, e.g. "global", "shop.*", "shop.orders".
+func (c EngineChoice) Label() string {
+	switch c.Scope {
+	case ScopeDatabase:
+		return c.Database + ".*"
+	case ScopeTable:
+		return c.Database + "." + c.Table
+	}
+	return "global"
 }
 
 // KnownEngines are the values the choice command accepts.
@@ -41,20 +66,60 @@ func NormalizeEngine(s string) (string, error) {
 	return "", fmt.Errorf("unknown engine %q (want one of: %s)", s, strings.Join(KnownEngines, ", "))
 }
 
-// NormalizeTarget canonicalises "db.table" (or empty for the default).
-func NormalizeTarget(database, table string) string {
-	if database == "" && table == "" {
-		return ""
+// NewChoice builds a choice for a scope, validating the arguments.
+func NewChoice(engine string, global bool, database, table string) (EngineChoice, error) {
+	e, err := NormalizeEngine(engine)
+	if err != nil {
+		return EngineChoice{}, err
 	}
-	return strings.ToLower(database) + "." + strings.ToLower(table)
+
+	c := EngineChoice{Engine: e, Database: strings.ToLower(strings.TrimSpace(database)),
+		Table: strings.ToLower(strings.TrimSpace(table))}
+
+	switch {
+	case global:
+		if c.Database != "" || c.Table != "" {
+			return c, errors.New("--global cannot be combined with -d or -t")
+		}
+		c.Scope = ScopeGlobal
+	case c.Database == "" && c.Table == "":
+		// Typing just the engine means everything, the same as --global.
+		c.Scope = ScopeGlobal
+	case c.Database != "" && c.Table == "":
+		c.Scope = ScopeDatabase
+	case c.Database != "" && c.Table != "":
+		c.Scope = ScopeTable
+	default:
+		return c, errors.New("-t requires -d")
+	}
+
+	return c, nil
 }
 
-func (s *Store) engineChoicePath(target string) string {
-	if target == "" {
-		return filepath.Join(s.dir, "engine-default.json")
+func (s *Store) engineChoicePath(c EngineChoice) string {
+	switch c.Scope {
+	case ScopeDatabase:
+		return filepath.Join(s.dir, "engine-db-"+safeKey(c.Database)+".json")
+	case ScopeTable:
+		return filepath.Join(s.dir, "engine-"+safeKey(c.Database)+"."+safeKey(c.Table)+".json")
 	}
-	key := strings.NewReplacer("/", "_", "\\", "_", "..", "_").Replace(target)
-	return filepath.Join(s.dir, "engine-"+key+".json")
+	return filepath.Join(s.dir, "engine-global.json")
+}
+
+// safeKey keeps filenames predictable while escaping anything exotic.
+func safeKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		case r == '.':
+			b.WriteString("_")
+		default:
+			b.WriteString("_")
+		}
+	}
+	return b.String()
 }
 
 // SetEngineChoice persists the operator's choice.
@@ -64,14 +129,13 @@ func (s *Store) SetEngineChoice(c EngineChoice) error {
 		return err
 	}
 	c.Engine = engine
-	c.Target = NormalizeTarget2(c.Target)
 	c.SetAt = time.Now().UTC().Format(time.RFC3339)
 
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := s.engineChoicePath(c.Target)
+	path := s.engineChoicePath(c)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
@@ -79,12 +143,8 @@ func (s *Store) SetEngineChoice(c EngineChoice) error {
 	return os.Rename(tmp, path)
 }
 
-// NormalizeTarget2 lower-cases an already-joined target string.
-func NormalizeTarget2(target string) string { return strings.ToLower(strings.TrimSpace(target)) }
-
-// EngineChoice returns the recorded choice for a target, or nil.
-func (s *Store) EngineChoice(target string) (*EngineChoice, error) {
-	data, err := os.ReadFile(s.engineChoicePath(NormalizeTarget2(target)))
+func (s *Store) loadChoicePath(path string) (*EngineChoice, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -93,29 +153,40 @@ func (s *Store) EngineChoice(target string) (*EngineChoice, error) {
 	}
 	var c EngineChoice
 	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("engine choice file is corrupt: %w", err)
+		return nil, fmt.Errorf("engine choice file %s is corrupt: %w", filepath.Base(path), err)
 	}
 	return &c, nil
 }
 
-// ResolveEngine picks the effective engine: target choice, then the default.
+// ResolveEngine picks the most specific recorded choice:
+// table, then database, then global.
 func (s *Store) ResolveEngine(database, table string) (*EngineChoice, error) {
-	if c, err := s.EngineChoice(NormalizeTarget(database, table)); err != nil || c != nil {
-		return c, err
+	database = strings.ToLower(strings.TrimSpace(database))
+	table = strings.ToLower(strings.TrimSpace(table))
+
+	if database != "" && table != "" {
+		if c, err := s.loadChoicePath(s.engineChoicePath(EngineChoice{Scope: ScopeTable, Database: database, Table: table})); err != nil || c != nil {
+			return c, err
+		}
 	}
-	return s.EngineChoice("")
+	if database != "" {
+		if c, err := s.loadChoicePath(s.engineChoicePath(EngineChoice{Scope: ScopeDatabase, Database: database})); err != nil || c != nil {
+			return c, err
+		}
+	}
+	return s.loadChoicePath(s.engineChoicePath(EngineChoice{Scope: ScopeGlobal}))
 }
 
 // ClearEngineChoice removes a recorded choice.
-func (s *Store) ClearEngineChoice(target string) error {
-	err := os.Remove(s.engineChoicePath(NormalizeTarget2(target)))
+func (s *Store) ClearEngineChoice(c EngineChoice) error {
+	err := os.Remove(s.engineChoicePath(c))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
 }
 
-// ListEngineChoices returns every recorded choice, newest first.
+// ListEngineChoices returns every recorded choice, most specific first.
 func (s *Store) ListEngineChoices() ([]EngineChoice, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -136,6 +207,12 @@ func (s *Store) ListEngineChoices() ([]EngineChoice, error) {
 			out = append(out, c)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SetAt > out[j].SetAt })
+	rank := map[Scope]int{ScopeTable: 0, ScopeDatabase: 1, ScopeGlobal: 2}
+	sort.Slice(out, func(i, j int) bool {
+		if rank[out[i].Scope] != rank[out[j].Scope] {
+			return rank[out[i].Scope] < rank[out[j].Scope]
+		}
+		return out[i].Label() < out[j].Label()
+	})
 	return out, nil
 }

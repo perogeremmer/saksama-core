@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/perogeremmer/saksama-core/internal/probe"
+	"github.com/perogeremmer/saksama-core/internal/render"
 	"github.com/perogeremmer/saksama-core/internal/state"
 )
 
@@ -56,11 +56,17 @@ Usage:
 
 Names: native | gh-ost | pt-osc   (aliases: ghost, pt, percona, ddl)
 
+Scopes, from most to least specific:
+  saksama engine set gh-ost -d shop -t orders   one table
+  saksama engine set pt-osc -d shop             every table in shop
+  saksama engine set pt-osc --global            every table, everywhere
+
 Resolution order for plan/apply:
   1. --engine on the command line
   2. recorded choice for database.table
-  3. recorded default choice
-  4. analyzer recommendation
+  3. recorded choice for the database
+  4. recorded global choice
+  5. analyzer recommendation
 
 Examples:
   saksama advise --live -h db -d shop -t orders -a "MODIFY COLUMN ..."
@@ -74,6 +80,7 @@ func cmdEngineList(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	jsonOut := fs.Bool("json", false, "JSON output")
 	noProbe := fs.Bool("no-probe", false, "skip probing installed binaries")
+	plain := fs.Bool("plain", false, "borderless output, for scripts and logs")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -141,9 +148,14 @@ func cmdEngineList(args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 
-	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ENGINE\tWRAPPED\tINSTALLED\tVERSION\tNOTE")
-	fmt.Fprintf(tw, "native\tyes\tyes\t%s\texecuted by MySQL itself\n", "-")
+	engines := render.Table{
+		Border: !*plain,
+		Columns: []render.Column{
+			{Header: "ENGINE"}, {Header: "WRAPPED"}, {Header: "INSTALLED"},
+			{Header: "VERSION"}, {Header: "NOTE"},
+		},
+	}
+	engines.Add("native", "yes", "yes", "-", "executed by MySQL itself")
 	for _, e := range []struct{ name, bin, note string }{
 		{"gh-ost", "gh-ost", "copy engine, MIT"},
 		{"pt-osc", "pt-online-schema-change", "copy engine, GPL-2, separate install"},
@@ -162,9 +174,9 @@ func cmdEngineList(args []string, stdout, stderr io.Writer) int {
 		if bins == nil {
 			installed = "not probed"
 		}
-		fmt.Fprintf(tw, "%s\tyes\t%s\t%s\t%s\n", e.name, installed, version, e.note)
+		engines.Add(e.name, "yes", installed, version, e.note)
 	}
-	tw.Flush()
+	_ = engines.Render(stdout)
 
 	fmt.Fprintln(stdout)
 	if len(choices) == 0 {
@@ -172,16 +184,17 @@ func cmdEngineList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "record one with:  saksama engine set gh-ost -d <db> -t <table>\n")
 		return ExitOK
 	}
-	tw = tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "SCOPE\tENGINE\tSET AT\tNOTE")
-	for _, c := range choices {
-		scope := c.Target
-		if scope == "" {
-			scope = "(default)"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", scope, c.Engine, c.SetAt, c.Note)
+	recorded := render.Table{
+		Border: !*plain,
+		Columns: []render.Column{
+			{Header: "SCOPE"}, {Header: "APPLIES TO"}, {Header: "ENGINE"},
+			{Header: "SET AT"}, {Header: "NOTE"},
+		},
 	}
-	tw.Flush()
+	for _, c := range choices {
+		recorded.Add(string(c.Scope), c.Label(), c.Engine, c.SetAt, c.Note)
+	}
+	_ = recorded.Render(stdout)
 	return ExitOK
 }
 
@@ -193,6 +206,7 @@ func cmdEngineSet(args []string, stdout, stderr io.Writer) int {
 	table := fs.String("t", "", "table")
 	fs.StringVar(table, "table", "", "table")
 	note := fs.String("note", "", "why you chose it (recorded in the audit trail)")
+	global := fs.Bool("global", false, "apply to every table on every database")
 
 	// The engine name is positional and people type it first, before the flags.
 	positional, flagArgs := extractPositionals(args, map[string]bool{
@@ -206,45 +220,52 @@ func cmdEngineSet(args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 
-	engine, err := state.NormalizeEngine(positional[0])
+	choice, err := state.NewChoice(positional[0], *global, *database, *table)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama engine set: %v\n", err)
 		return ExitUsage
 	}
-	if (*database == "") != (*table == "") {
-		fmt.Fprintln(stderr, "saksama engine set: give both -d and -t, or neither for the default")
-		return ExitUsage
-	}
+	choice.Actor = currentActor()
+	choice.Note = *note
 
 	store, err := newStore()
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama engine set: %v\n", err)
 		return ExitInternal
 	}
-
-	choice := state.EngineChoice{
-		Engine: engine,
-		Target: state.NormalizeTarget(*database, *table),
-		Actor:  currentActor(),
-		Note:   *note,
-	}
 	if err := store.SetEngineChoice(choice); err != nil {
 		fmt.Fprintf(stderr, "saksama engine set: %v\n", err)
 		return ExitInternal
 	}
 
-	scope := choice.Target
-	if scope == "" {
-		scope = "all tables (default)"
-	}
-	fmt.Fprintf(stdout, "engine set to %s for %s\n", engine, scope)
+	fmt.Fprintf(stdout, "engine set to %s for %s\n", choice.Engine, describeScope(choice))
 	fmt.Fprintf(stdout, "state: %s\n", store.Dir())
 	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "check it:  saksama engine show"+
-		iffStr(choice.Target != "", " -d "+*database+" -t "+*table, ""))
-	fmt.Fprintln(stdout, "undo it:   saksama engine clear"+
-		iffStr(choice.Target != "", " -d "+*database+" -t "+*table, ""))
+	flagText := scopeFlags(choice)
+	fmt.Fprintf(stdout, "check it:  saksama engine show%s\n", flagText)
+	fmt.Fprintf(stdout, "undo it:   saksama engine clear%s\n", flagText)
 	return ExitOK
+}
+
+// scopeFlags renders the scope as the flags that reproduce it.
+func scopeFlags(c state.EngineChoice) string {
+	switch c.Scope {
+	case state.ScopeDatabase:
+		return " -d " + c.Database
+	case state.ScopeTable:
+		return " -d " + c.Database + " -t " + c.Table
+	}
+	return " --global"
+}
+
+func describeScope(c state.EngineChoice) string {
+	switch c.Scope {
+	case state.ScopeDatabase:
+		return "every table in " + c.Database
+	case state.ScopeTable:
+		return c.Database + "." + c.Table
+	}
+	return "every table on every database (global)"
 }
 
 func cmdEngineShow(args []string, stdout, stderr io.Writer) int {
@@ -255,8 +276,13 @@ func cmdEngineShow(args []string, stdout, stderr io.Writer) int {
 	table := fs.String("t", "", "table")
 	fs.StringVar(table, "table", "", "table")
 	jsonOut := fs.Bool("json", false, "JSON output")
+	global := fs.Bool("global", false, "ask about the global choice")
 	_, flagArgs := extractPositionals(args, map[string]bool{"d": true, "database": true, "t": true, "table": true})
 	if err := fs.Parse(flagArgs); err != nil {
+		return ExitUsage
+	}
+	if *global && (*database != "" || *table != "") {
+		fmt.Fprintln(stderr, "saksama engine show: --global cannot be combined with -d or -t")
 		return ExitUsage
 	}
 
@@ -279,22 +305,30 @@ func cmdEngineShow(args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 
-	scope := state.NormalizeTarget(*database, *table)
-	if scope == "" {
-		scope = "(default)"
+	asked := "global"
+	switch {
+	case *database != "" && *table != "":
+		asked = *database + "." + *table
+	case *database != "":
+		asked = *database + ".*"
+	default:
+		// Global: report the global record itself, not a resolution.
+		choice, err = store.ResolveEngine("", "")
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama engine: %v\n", err)
+			return ExitInternal
+		}
 	}
 	if choice == nil {
-		fmt.Fprintf(stdout, "scope      %s\n", scope)
-		fmt.Fprintf(stdout, "engine     (not set)\n")
-		fmt.Fprintf(stdout, "behaviour  plan/apply follow the analyzer recommendation\n")
+		fmt.Fprintf(stdout, "asking about  %s\n", asked)
+		fmt.Fprintf(stdout, "engine        (not set)\n")
+		fmt.Fprintf(stdout, "behaviour     plan/apply follow the analyzer recommendation\n")
 		return ExitOK
 	}
-	fmt.Fprintf(stdout, "scope      %s\n", scope)
-	fmt.Fprintf(stdout, "engine     %s\n", choice.Engine)
-	if choice.Target != "" && choice.Target != scope {
-		fmt.Fprintf(stdout, "source     default choice (no table-specific override)\n")
-	}
-	fmt.Fprintf(stdout, "set at     %s\n", choice.SetAt)
+	fmt.Fprintf(stdout, "asking about  %s\n", asked)
+	fmt.Fprintf(stdout, "engine        %s\n", choice.Engine)
+	fmt.Fprintf(stdout, "from           %s choice\n", choice.Scope)
+	fmt.Fprintf(stdout, "set at        %s\n", choice.SetAt)
 	if choice.Actor != "" {
 		fmt.Fprintf(stdout, "by         %s\n", choice.Actor)
 	}
@@ -311,12 +345,15 @@ func cmdEngineClear(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(database, "database", "", "database")
 	table := fs.String("t", "", "table")
 	fs.StringVar(table, "table", "", "table")
+	global := fs.Bool("global", false, "clear the global choice")
 	_, flagArgs := extractPositionals(args, map[string]bool{"d": true, "database": true, "t": true, "table": true})
 	if err := fs.Parse(flagArgs); err != nil {
 		return ExitUsage
 	}
-	if (*database == "") != (*table == "") {
-		fmt.Fprintln(stderr, "saksama engine clear: give both -d and -t, or neither for the default")
+
+	choice, err := state.NewChoice("native", *global, *database, *table)
+	if err != nil {
+		fmt.Fprintf(stderr, "saksama engine clear: %v\n", err)
 		return ExitUsage
 	}
 
@@ -325,16 +362,11 @@ func cmdEngineClear(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "saksama engine clear: %v\n", err)
 		return ExitInternal
 	}
-	target := state.NormalizeTarget(*database, *table)
-	if err := store.ClearEngineChoice(target); err != nil {
+	if err := store.ClearEngineChoice(choice); err != nil {
 		fmt.Fprintf(stderr, "saksama engine clear: %v\n", err)
 		return ExitInternal
 	}
-	scope := target
-	if scope == "" {
-		scope = "the default choice"
-	}
-	fmt.Fprintf(stdout, "cleared %s\n", scope)
+	fmt.Fprintf(stdout, "cleared %s\n", describeScope(choice))
 	return ExitOK
 }
 

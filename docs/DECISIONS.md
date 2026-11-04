@@ -178,7 +178,9 @@ Tiga verdict dibedakan secara tegas:
 
 Mencampur ketiganya ke dalam satu verdict adalah kesalahan yang membuat orang menyalahkan schema-nya sendiri atas batasan tool, atau menyalahkan tool atas paket yang belum diinstal.
 
-**Precedence:** `--engine` flag → pilihan tercatat untuk `db.table` → pilihan default tercatat → rekomendasi analyzer. Rekomendasi analyzer **selalu tetap terlihat** (`Recommendation.Analyzer`) sehingga override tidak pernah senyap.
+**Scope, dari paling spesifik:** tabel → database → global. `--global` eksplisit karena pilihan yang berlaku untuk semua database adalah keputusan yang pantas diketik dengan sadar, bukan efek samping dari lupa menulis `-d`.
+
+**Precedence:** `--engine` flag → pilihan tercatat untuk `db.table` → pilihan database (`db.*`) → pilihan global → rekomendasi analyzer. Rekomendasi analyzer **selalu tetap terlihat** (`Recommendation.Analyzer`) sehingga override tidak pernah senyap.
 
 **Alternatif ditolak:**
 - *Analyzer langsung mengeksekusi pilihannya sendiri* — menghilangkan kontrol operator pada operasi yang berisiko.

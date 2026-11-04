@@ -66,28 +66,45 @@ schema and tells you which engine suits each one, biggest first:
 $ saksama advise --live -h db.prod -d shop
 
 ENGINE SUITABILITY for schema shop
-6 table(s), sorted by size. These are the engines for a rebuild;
+5 table(s), sorted by size. These are the engines for a rebuild;
 an index-only change needs no engine at all on MySQL 8.0.
 
-TABLE      ROWS    SIZE     PRIMARY KEY          FK   GH-OST  PT-OSC  REBUILD WITH
-orders     59.0M   20.5 GB  id bigint unsigned   1/0  no      yes     pt-osc
-m2m        180.0M  44.0 GB  composite(a_id,b_id) 0/0  no      yes     pt-osc
-sessions   2.1M    640 MB   uuid char(36)        0/0  yes     yes     gh-ost
-users      410.0k  88 MB    id bigint unsigned   0/0  yes     yes     gh-ost
-audit_log  180.0M  44.0 GB  (none)               0/0  no      no      none
++------------+--------+---------+----------------------+-----+--------+--------+--------------+
+| TABLE      |   ROWS |    SIZE | PRIMARY KEY          |  FK | GH-OST | PT-OSC | REBUILD WITH |
++------------+--------+---------+----------------------+-----+--------+--------+--------------+
+| m2m        | 180.0M | 44.0 GB | composite(a_id,b_id) | 0/0 | no     | yes    | pt-osc       |
+| audit_log  | 180.0M | 44.0 GB | (none)               | 0/0 | no     | no     | none         |
+| orders     |  59.0M | 20.5 GB | id bigint unsigned   | 1/0 | no     | yes    | pt-osc       |
+| sessions   |   2.1M |  640 MB | uuid char(36)        | 0/0 | yes    | yes    | gh-ost       |
+| users      | 410.0k |   88 MB | id bigint unsigned   | 0/0 | yes    | yes    | gh-ost       |
++------------+--------+---------+----------------------+-----+--------+--------+--------------+
+
+  FK        outgoing/incoming foreign keys
+  GH-OST    yes when gh-ost can copy this table at all
+  PT-OSC    yes when pt-online-schema-change can
+  REBUILD   the engine to choose when this table ever needs a rebuild
 
 TABLES NO ENGINE CAN COPY
   audit_log
     - no primary key or unique key to chunk by
 
 NOTES
-  orders    pt-osc only: gh-ost cannot handle this table
-  m2m       pt-osc only: gh-ost cannot handle this table
+  m2m                      pt-osc only: gh-ost cannot handle this table
+  orders                   pt-osc only: gh-ost cannot handle this table
+
+LEFTOVER ARTIFACTS (from previous migrations, not tables you manage)
+  table            _orders_del                  gh-ost artifact (from orders): old table kept
+                                                after a successful cut-over, 20.5 GB on disk
+  saksama cleanup verifies ownership in the session record before dropping anything.
 
 NEXT
   record your decision per table:  saksama engine set gh-ost -d <db> -t <table>
   inspect one table in detail:     saksama advise --live -d <db> -t <table>
 ```
+
+Borders are ASCII (`+`, `-`, `|`) rather than box-drawing characters, because
+these commands run over SSH on servers with `TERM=dumb` and locale `C`. Pass
+`--plain` for borderless output when piping into another tool.
 
 `--alter` is optional throughout. Give it and the report covers that specific
 change; omit it and the report covers the table's shape, which is what decides
@@ -117,14 +134,29 @@ VERIFICATION
   [ok  ] foreign_key_present  fk_orders_spot  constraint fk_orders_spot intact
 ```
 
-```
-saksama engine list                      engines, versions found locally, recorded choices
-saksama engine set <name> [-d db -t t]   record a decision (default or one table)
-saksama engine show [-d db -t t]         what apply would use right now
-saksama engine clear [-d db -t t]        forget it
+Three scopes, narrowest wins:
+
+```bash
+saksama engine set pt-osc --global              every table, everywhere
+saksama engine set pt-osc -d shop               every table in one database
+saksama engine set gh-ost -d shop -t sessions   one table
 ```
 
-Precedence: `--engine` flag → recorded choice for `db.table` → recorded default → analyzer recommendation. The analyzer's own pick always stays visible, so an override is never silent.
+```
+saksama engine list [--json]              engines, versions found locally, recorded choices
+saksama engine set <name> [scope]         record a decision
+saksama engine show [scope]               what apply would use right now, and where it came from
+saksama engine clear [scope]              forget it
+```
+
+Precedence: `--engine` flag → table choice → database choice → global choice → analyzer recommendation. The analyzer's own pick always stays visible, so an override is never silent.
+
+A typical setup for the target user: set `pt-osc` globally because their tables have foreign keys, then override the one or two tables where `gh-ost` is the better tool:
+
+```bash
+saksama engine set pt-osc --global --note "most of our tables have foreign keys"
+saksama engine set gh-ost -d shop -t sessions
+```
 
 ## Which tool fits? `saksama advise`
 
@@ -385,6 +417,7 @@ MySQL Clone Plugin is deliberately **not** in the ladder: it clones an instance,
 | gh-ost adapter (argv, subprocess, DB-polled progress, verification) | ✅ |
 | pt-osc adapter (same, with `--defaults-file` so no password in argv) | ✅ |
 | Installed-binary probe with version detection | ✅ |
+| Compatibility matrix, generated from code (`saksama compat`) | ✅ |
 | Offline plan, plan card, `--json`, exit codes | ✅ |
 | Live introspection (`information_schema`, `performance_schema`) | ✅ |
 | Native execution with explicit `ALGORITHM`/`LOCK` | ✅ |
@@ -398,6 +431,46 @@ Commands that are not implemented yet (`cutover`, `cancel`, `recover`, `daemon`,
 
 Engine credentials: pt-osc reads a temporary `0600` option file, so its password never reaches argv. gh-ost has no option-file support, so a password must go in argv — that is refused unless you pass `--allow-argv-password`, because a password in argv is visible in `ps`.
 
+## Compatibility: what is verified, and how
+
+```
+$ saksama compat -h db.prod -u app --no-defaults
+
+LOCAL COMPATIBILITY
+  server   MySQL 8.0.46       verified
+  gh-ost   1.1.11             verified
+  pt-online-schema-change     not installed
+
+  the full matrix: docs/COMPATIBILITY.md
+  safe first steps on an unverified combination:
+    saksama advise --live -d <db>        read only
+    saksama apply ... --dry-run          builds the command and stops
+```
+
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) is **generated from
+`internal/support`**, not written by hand, so a row cannot claim something the
+repository does not do. Every row states its evidence:
+
+| Mark | Meaning |
+|---|---|
+| `yes` | a test in this repository ran against it |
+| `claimed` | the version gates encode it, but nothing here has run it end to end |
+| `not yet` | the path exists and is unit tested, but no real binary has touched it |
+| `no` | refused on purpose |
+
+What that currently means, with no rounding up:
+
+- **native DDL**: verified on MySQL 8.0.46 and 8.4.13 (24 integration tests each).
+- **gh-ost 1.1.11**: verified with a real migration, including copy, cut-over, and
+  verification through `information_schema`.
+- **pt-online-schema-change 3.x**: **not yet verified against a real binary.** The
+  adapter is unit tested against a fake one (argv, defaults file, `--print` first),
+  but `perl`, `DBI`, and `DBD::mysql` were not available in the environment this
+  was built in. If you run it, the row is a genuine contribution.
+
+`make compat-doc` regenerates the document, and a test fails if the committed file
+is stale.
+
 ## Documentation
 
 - [`PRD.md`](PRD.md) — requirements, personas, acceptance criteria, non-goals
@@ -406,13 +479,14 @@ Engine credentials: pt-osc reads a temporary `0600` option file, so its password
 - [`docs/CHECKS.md`](docs/CHECKS.md) — every check: ID, severity, SQL source, MySQL error code
 - [`docs/EVENTS.md`](docs/EVENTS.md) — daemon event contract
 - [`docs/RESULTS.md`](docs/RESULTS.md) — what was built, what the tests proved, which bugs they caught
+- [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — which MySQL and engine versions are verified, and how
 - [`docs/STATUS.md`](docs/STATUS.md) — implementation ledger
 - [`SECURITY.md`](SECURITY.md) — threat model and reporting policy
 
 ## Development
 
 ```bash
-make test               # 165 unit tests
+make test               # 182 unit tests
 make lint               # go vet + gofmt check
 make cover              # per-package coverage
 make demo               # two plan cards side by side, no database needed

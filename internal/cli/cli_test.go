@@ -558,3 +558,121 @@ func TestAdviseWithoutAlterDoesNotDemandAChange(t *testing.T) {
 		}
 	}
 }
+
+// --- engine scopes ----------------------------------------------------------
+
+func TestEngineSetGlobal(t *testing.T) {
+	t.Setenv("SAKSAMA_STATE_DIR", t.TempDir())
+
+	code, out, errOut := run(t, "engine", "set", "--global", "pt-osc", "--note", "default kita pt-osc")
+	if code != ExitOK {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "every table on every database") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+
+	// The flag may also come after the positional argument.
+	code, out, _ = run(t, "engine", "set", "gh-ost", "--global")
+	if code != ExitOK {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+
+	code, out, _ = run(t, "engine", "show", "--global")
+	if code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "engine        gh-ost") {
+		t.Fatalf("unexpected show output: %s", out)
+	}
+}
+
+func TestEngineSetDatabaseScope(t *testing.T) {
+	t.Setenv("SAKSAMA_STATE_DIR", t.TempDir())
+
+	code, out, errOut := run(t, "engine", "set", "pt-osc", "-d", "shop")
+	if code != ExitOK {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "every table in shop") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+
+	// A table with no specific choice resolves to the database choice.
+	code, out, _ = run(t, "engine", "show", "-d", "shop", "-t", "orders")
+	if code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "engine        pt-osc") {
+		t.Fatalf("unexpected show output: %s", out)
+	}
+	if !strings.Contains(out, "from           database choice") {
+		t.Fatalf("the source must be named: %s", out)
+	}
+}
+
+func TestEngineResolutionOrderThroughCLI(t *testing.T) {
+	t.Setenv("SAKSAMA_STATE_DIR", t.TempDir())
+
+	run(t, "engine", "set", "--global", "native")
+	run(t, "engine", "set", "-d", "shop", "pt-osc")
+	run(t, "engine", "set", "-d", "shop", "-t", "orders", "gh-ost")
+
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"engine", "show", "-d", "shop", "-t", "orders"}, "gh-ost"},
+		{[]string{"engine", "show", "-d", "shop", "-t", "users"}, "pt-osc"},
+		{[]string{"engine", "show", "-d", "other", "-t", "orders"}, "native"},
+	}
+	for _, tc := range cases {
+		code, out, _ := run(t, tc.args...)
+		if code != ExitOK {
+			t.Fatalf("%v: exit %d", tc.args, code)
+		}
+		if !strings.Contains(out, "engine        "+tc.want) {
+			t.Errorf("%v: expected %s, got:\n%s", tc.args, tc.want, out)
+		}
+	}
+}
+
+func TestEngineSetRejectsConflictingFlags(t *testing.T) {
+	t.Setenv("SAKSAMA_STATE_DIR", t.TempDir())
+
+	code, _, errOut := run(t, "engine", "set", "--global", "pt-osc", "-d", "shop")
+	if code != ExitUsage {
+		t.Fatalf("exit %d, want usage error", code)
+	}
+	if !strings.Contains(errOut, "cannot be combined") {
+		t.Fatalf("unexpected stderr: %s", errOut)
+	}
+
+	code, _, errOut = run(t, "engine", "set", "pt-osc", "-t", "orders")
+	if code != ExitUsage {
+		t.Fatalf("exit %d, want usage error", code)
+	}
+	if !strings.Contains(errOut, "requires -d") {
+		t.Fatalf("unexpected stderr: %s", errOut)
+	}
+}
+
+func TestEngineClearGlobal(t *testing.T) {
+	t.Setenv("SAKSAMA_STATE_DIR", t.TempDir())
+
+	run(t, "engine", "set", "--global", "pt-osc")
+	code, out, _ := run(t, "engine", "clear", "--global")
+	if code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "cleared") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	code, out, _ = run(t, "engine", "show", "--global")
+	if code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "(not set)") {
+		t.Fatalf("global should be cleared: %s", out)
+	}
+}

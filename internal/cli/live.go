@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/user"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -381,11 +380,14 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	// Users naturally type "status s2 --json"; strip known flags first so the
 	// standard library flag parser does not stop at the positional argument.
 	jsonRequested := hasFlag(args, "--json")
+	plainRequested := hasFlag(args, "--plain")
 	args = removeFlag(args, "--json")
+	args = removeFlag(args, "--plain")
 
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Bool("json", false, "JSON output (accepted in any position)")
+	fs.Bool("plain", false, "borderless output (accepted in any position)")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -413,13 +415,18 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "no sessions recorded")
 			return ExitOK
 		}
-		tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(tw, "ID\tSTATE\tTARGET\tENGINE\tALTER\tCREATED")
-		for _, s := range sessions {
-			fmt.Fprintf(tw, "%s\t%s\t%s.%s\t%s\t%s\t%s\n",
-				s.ID, describeState(s), s.Database, s.Table, s.Engine, shorten(s.Alter, 40), s.CreatedAt)
+		table := render.Table{
+			Border:   !plainRequested,
+			MaxWidth: 40,
+			Columns: []render.Column{
+				{Header: "ID"}, {Header: "STATE"}, {Header: "TARGET"},
+				{Header: "ENGINE"}, {Header: "ALTER"}, {Header: "CREATED"},
+			},
 		}
-		tw.Flush()
+		for _, s := range sessions {
+			table.Add(s.ID, describeState(s), s.Database+"."+s.Table, s.Engine, s.Alter, s.CreatedAt)
+		}
+		_ = table.Render(stdout)
 		return ExitOK
 	}
 

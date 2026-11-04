@@ -903,7 +903,12 @@ func TestApplyRunsTheChosenCopyEngineAndStillVerifies(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Record the operator's decision, exactly as `saksama engine set` would.
-	if err := store.SetEngineChoice(state.EngineChoice{Engine: "pt-osc", Target: schema + ".t", Actor: "test"}); err != nil {
+	choice, err := state.NewChoice("pt-osc", false, schema, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice.Actor = "test"
+	if err := store.SetEngineChoice(choice); err != nil {
 		t.Fatal(err)
 	}
 

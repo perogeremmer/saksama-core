@@ -241,7 +241,7 @@ func TestSchemaReportExplainsBlockedTables(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := SchemaReport(&buf, "shop", rows); err != nil {
+	if err := SchemaReport(&buf, "shop", rows, nil); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -268,10 +268,118 @@ func TestSchemaReportExplainsBlockedTables(t *testing.T) {
 
 func TestSchemaReportHandlesEmptySchema(t *testing.T) {
 	var buf bytes.Buffer
-	if err := SchemaReport(&buf, "empty", nil); err != nil {
+	if err := SchemaReport(&buf, "empty", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "no tables found") {
 		t.Fatalf("unexpected output: %s", buf.String())
+	}
+}
+
+func TestTableRendererAlignsAndBorders(t *testing.T) {
+	tbl := &Table{
+		Border: true,
+		Columns: []Column{
+			{Header: "NAME"},
+			{Header: "ROWS", Align: Right},
+		},
+	}
+	tbl.Add("orders", "59000000")
+	tbl.Add("m2m", "7")
+
+	var buf bytes.Buffer
+	if err := tbl.Render(&buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	if !strings.HasPrefix(out, "+") {
+		t.Fatalf("expected a top border:\n%s", out)
+	}
+	// top rule + header + rule + 2 rows + bottom rule
+	if strings.Count(out, "\n") != 6 {
+		t.Fatalf("expected 6 lines, got %d:\n%s", strings.Count(out, "\n"), out)
+	}
+	// Numbers must be right-aligned so magnitudes line up.
+	if !strings.Contains(out, "| 59000000 |") {
+		t.Fatalf("rows column not right aligned:\n%s", out)
+	}
+	if !strings.Contains(out, "|        7 |") {
+		t.Fatalf("small numbers are not padded:\n%s", out)
+	}
+}
+
+func TestTableRendererPlainHasNoBorders(t *testing.T) {
+	tbl := plainTable(Column{Header: "A"}, Column{Header: "B"})
+	tbl.Add("1", "2")
+
+	var buf bytes.Buffer
+	if err := tbl.Render(&buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.ContainsAny(out, "+|") {
+		t.Fatalf("plain output must not contain border characters:\n%s", out)
+	}
+	if !strings.Contains(out, "A") || !strings.Contains(out, "2") {
+		t.Fatalf("content missing:\n%s", out)
+	}
+}
+
+func TestTableRendererTruncatesWideCells(t *testing.T) {
+	tbl := &Table{
+		Border:   true,
+		MaxWidth: 20,
+		Columns:  []Column{{Header: "ALTER"}},
+	}
+	tbl.Add(strings.Repeat("x", 100))
+
+	var buf bytes.Buffer
+	if err := tbl.Render(&buf); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if len(line) > 40 {
+			t.Fatalf("line not truncated to a sane width: %q", line)
+		}
+	}
+	if !strings.Contains(buf.String(), "...") {
+		t.Fatal("expected a truncation marker")
+	}
+}
+
+func TestTableRendererIsASCIIOnly(t *testing.T) {
+	tbl := boxTable(Column{Header: "A"})
+	tbl.Add("value")
+
+	var buf bytes.Buffer
+	if err := tbl.Render(&buf); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range buf.String() {
+		if r > 127 {
+			t.Fatalf("non-ASCII rune %q in table output", r)
+		}
+	}
+}
+
+func TestCompatibilityDocMentionsEveryRow(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Compatibility(&buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"## MySQL", "## Engines", "## Findings", "## PostgreSQL",
+		"verified", "claimed", "not yet",
+		"gh-ost", "pt-osc", "8.0.x", "8.4.x",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in the compatibility document", want)
+		}
+	}
+	if !strings.Contains(out, "PostgreSQL has no online schema change") {
+		t.Errorf("expected an honest PostgreSQL note")
 	}
 }

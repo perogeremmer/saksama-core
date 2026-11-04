@@ -44,6 +44,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdAdvise(args[1:], stdout, stderr)
 	case "engine":
 		return cmdEngine(args[1:], stdout, stderr)
+	case "compat":
+		return cmdCompat(args[1:], stdout, stderr)
 	case "apply":
 		return cmdApply(args[1:], stdout, stderr)
 	case "status":
@@ -83,6 +85,7 @@ Usage:
   saksama advise --live -h <host> -d <db>                   inspect every table
   saksama advise --live -h <host> -d <db> -t <table> [-a "<ALTER>"]
   saksama engine list|set|show|clear   choose the engine yourself
+  saksama compat                       which MySQL and engine versions are verified
   saksama apply  -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama status [<session>] [--json]
   saksama events <session>
@@ -108,7 +111,9 @@ Connection options (plan --live, apply):
   --tls <mode>             preferred|true|false|skip-verify
 
 Engine options:
-  saksama engine set gh-ost -d <db> -t <table>   record your decision
+  saksama engine set <name> --global             every table, everywhere
+  saksama engine set <name> -d <db>              every table in one database
+  saksama engine set <name> -d <db> -t <table>   one table
   saksama engine list                            what is installed, what is chosen
   saksama engine show -d <db> -t <table>         what apply would use now
 

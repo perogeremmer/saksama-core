@@ -38,6 +38,10 @@ type Conn struct {
 	User     string
 	Password string
 	Socket   string
+	// ServerPort is @@port as the server reports it. gh-ost refuses to start when
+	// it differs from the connection port, which happens behind any port mapping
+	// or proxy, so the difference has to be declared to it explicitly.
+	ServerPort int
 }
 
 // Spec is everything that differs between the two engines.
@@ -49,6 +53,29 @@ type Spec struct {
 	ShadowPrefix string
 	// ShadowSuffix is appended to build the copy table name.
 	ShadowSuffix string
+}
+
+// tailBuffer keeps the last few lines of engine output.
+//
+// When an engine fails, its own words are the most useful diagnostic there is;
+// the wrapper's job is to surface them, not to summarise them into "exit 1".
+type tailBuffer struct {
+	lines []string
+	max   int
+}
+
+func (t *tailBuffer) add(prefix, text string) {
+	if t.max == 0 {
+		t.max = 40
+	}
+	t.lines = append(t.lines, prefix+": "+text)
+	if len(t.lines) > t.max {
+		t.lines = t.lines[len(t.lines)-t.max:]
+	}
+}
+
+func (t *tailBuffer) String() string {
+	return strings.Join(t.lines, "\n")
 }
 
 // Engine implements engine.Engine for a copy-based tool.
@@ -140,6 +167,11 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 		if !e.opts.HasReplica {
 			argv = append(argv, "--allow-on-master")
 		}
+		if e.conn.ServerPort > 0 && e.port() != fmt.Sprint(e.conn.ServerPort) {
+			// Connecting through a proxy or a mapped port is normal; gh-ost just
+			// needs to be told that the mismatch is expected.
+			argv = append(argv, "--skip-port-validation")
+		}
 		// gh-ost has no option-file support. A password would have to go in argv,
 		// which puts it in the process list, so this is opt-in and loud.
 		if e.conn.Password != "" {
@@ -149,9 +181,9 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 						"pass --allow-argv-password to accept that, or use pt-osc which supports --defaults-file")
 			}
 			argv = append(argv, "--password="+e.conn.Password)
-		} else {
-			argv = append(argv, "--ask-pass")
 		}
+		// An empty password means "connect without one"; --ask-pass would block
+		// waiting on a terminal, which is the last thing a supervisor wants.
 		argv = append(argv, "--verbose", "--execute")
 		return argv, "", nil
 
@@ -282,8 +314,21 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 		go e.pollProgress(ctx, onProgress, stop)
 	}
 
+	tail := &tailBuffer{}
+	collect := func(l process.Line) {
+		// Never keep the password line if one was passed in argv.
+		text := l.Text
+		if e.opts.AllowArgvPassword && e.conn.Password != "" {
+			text = strings.ReplaceAll(text, e.conn.Password, "[REDACTED]")
+		}
+		tail.add(l.Stream, text)
+		if e.lines != nil {
+			e.lines(l)
+		}
+	}
+
 	start := e.now()
-	res, runErr := process.Run(ctx, process.Spec{Argv: stmts[0].Argv}, e.lines)
+	res, runErr := process.Run(ctx, process.Spec{Argv: stmts[0].Argv}, collect)
 	close(stop)
 
 	ex.Statements = append(ex.Statements, engine.StatementResult{
@@ -293,7 +338,10 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 	})
 	ex.FinishedAt = e.now()
 	if runErr != nil {
-		ex.Err = fmt.Errorf("%s failed (exit %d): %w", e.Name(), res.ExitCode, runErr)
+		// Quote the engine's own last words: that is the diagnostic the operator
+		// needs, and it is not recoverable from an exit code.
+		ex.Err = fmt.Errorf("%s failed (exit %d): %w\nlast output:\n%s",
+			e.Name(), res.ExitCode, runErr, tail.String())
 		return ex, ex.Err
 	}
 	if onProgress != nil {

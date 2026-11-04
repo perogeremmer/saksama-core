@@ -39,10 +39,11 @@ func NewCollector(q Querier, schema, table string) *Collector {
 func (c *Collector) Server(ctx context.Context) (model.Server, error) {
 	var srv model.Server
 	var version, comment, charset, collation sql.NullString
+	var port sql.NullInt64
 
 	err := c.Q.QueryRowContext(ctx, `
-		SELECT VERSION(), @@version_comment, @@character_set_server, @@collation_server
-	`).Scan(&version, &comment, &charset, &collation)
+		SELECT VERSION(), @@version_comment, @@character_set_server, @@collation_server, @@port
+	`).Scan(&version, &comment, &charset, &collation, &port)
 	if err != nil {
 		return srv, fmt.Errorf("reading server identity: %w", err)
 	}
@@ -51,6 +52,7 @@ func (c *Collector) Server(ctx context.Context) (model.Server, error) {
 	srv.VersionCmt = comment.String
 	srv.DefaultChar = charset.String
 	srv.DefaultColl = collation.String
+	srv.Port = int(port.Int64)
 	srv.Vendor = detectVendor(version.String, comment.String)
 	return srv, nil
 }

@@ -34,6 +34,25 @@ func Binaries() map[string]analyzer.EngineBinary {
 	return out
 }
 
+// Result is a probe finding, kept separate from the analyzer type so the
+// renderer can report local versions without depending on the decision layer.
+type Result struct {
+	Path      string
+	Version   string
+	Available bool
+	Error     string
+}
+
+// Results probes the known binaries and reports plain results.
+func Results() map[string]Result {
+	out := make(map[string]Result, len(names))
+	for _, name := range names {
+		b := probeOne(name)
+		out[name] = Result{Path: b.Path, Version: b.Version, Available: b.Available, Error: b.Error}
+	}
+	return out
+}
+
 func probeOne(name string) analyzer.EngineBinary {
 	bin := analyzer.EngineBinary{Name: name}
 

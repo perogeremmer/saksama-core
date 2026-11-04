@@ -15,6 +15,10 @@ type Server struct {
 	Vendor      string `json:"vendor"`          // mysql | percona | aurora | rds | mariadb | unknown
 	DefaultChar string `json:"default_charset"`
 	DefaultColl string `json:"default_collation"`
+	// Port is @@port as the server reports it. It matters because tools such as
+	// gh-ost refuse to run when the port used to connect differs from this value,
+	// which is the normal case behind a proxy or a port mapping.
+	Port int `json:"port"`
 }
 
 // Version is a parsed MySQL version.

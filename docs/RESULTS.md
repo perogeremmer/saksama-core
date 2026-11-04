@@ -12,7 +12,7 @@
 
 ## 1. Ringkasan satu paragraf
 
-Fase 1 (analyzer murni) dan Fase 2 (introspection live, eksekusi native, session durable, event contract, redaction, approval) **selesai dan terverifikasi terhadap MySQL 8.0.46 sungguhan**, bukan hanya unit test. Total **189 test**: 165 unit test + 24 integration test terhadap server nyata. Integration test menemukan **6 bug asli** di kode produksi — termasuk satu bug yang membuat setiap apply pada tabel ber-FK melaporkan kegagalan palsu, dan satu yang membuat `ALGORITHM=INSTANT` selalu ditolak MySQL. Semua sudah diperbaiki dan diberi test regresi.
+Fase 1 (analyzer murni) dan Fase 2 (introspection live, eksekusi native, session durable, event contract, redaction, approval) **selesai dan terverifikasi terhadap MySQL 8.0.46 sungguhan**, bukan hanya unit test. Total **206 test**: 182 unit test + 24 integration test terhadap server nyata. Integration test menemukan **6 bug asli** di kode produksi — termasuk satu bug yang membuat setiap apply pada tabel ber-FK melaporkan kegagalan palsu, dan satu yang membuat `ALGORITHM=INSTANT` selalu ditolak MySQL. Semua sudah diperbaiki dan diberi test regresi.
 
 ---
 

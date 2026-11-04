@@ -1,6 +1,6 @@
 BINARY  := saksama
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -s -w -X github.com/saksama/saksama/internal/cli.Version=$(VERSION)
+LDFLAGS := -s -w -X github.com/perogeremmer/saksama-core/internal/cli.Version=$(VERSION)
 
 # Integration test database. Override to point at your own server.
 IT_IMAGE := mysql:8.0
@@ -83,3 +83,9 @@ demo: build
 		--alter "MODIFY COLUMN status varchar(64) NOT NULL" \
 		--mysql-version 8.0.36 --host db.prod \
 		--rows 59000000 --data-bytes 18000000000 --index-bytes 4000000000 || true
+
+# Regenerate the compatibility document from internal/support. A test fails when
+# the committed file is stale, so this cannot drift.
+compat-doc: build
+	@./bin/saksama compat --markdown > docs/COMPATIBILITY.md
+	@echo "docs/COMPATIBILITY.md regenerated"

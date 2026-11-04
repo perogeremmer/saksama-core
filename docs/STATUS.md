@@ -35,13 +35,14 @@ make build
 | `internal/model` | neutral schema + ALTER model, version parsing | via parser/analyzer |
 | `internal/parser` | fail-closed tokenizer, `ALTER TABLE` parser, `SHOW CREATE TABLE` parser | 19 tests |
 | `internal/analyzer` | capability rules, checks, engine routing, duration/disk estimates, fingerprint, engine suitability matrix, schema-wide assessment | 46 tests |
-| `internal/render` | ASCII-only plan card, engine matrix, schema fitness table | 10 tests |
+| `internal/render` | ASCII tables, plan card, engine matrix, schema fitness table, compatibility doc | 15 tests |
 | `internal/events` | event envelope, redaction, per-second progress limiting | 9 tests |
 | `internal/probe` | detects installed gh-ost / pt-osc / perl and their versions | 2 tests |
+| `internal/support` | declared compatibility matrix; source of docs/COMPATIBILITY.md | via cli |
 | `internal/engine/copyeng` | gh-ost and pt-osc adapters: argv, subprocess, verification | 12 tests |
-| `internal/cli` | `plan`, `plan --live`, `advise`, `engine`, `apply`, `status`, `events`, `export`, `cleanup`, `schema`, `version` | 27 tests |
+| `internal/cli` | `plan`, `advise`, `engine`, `apply`, `status`, `events`, `export`, `cleanup`, `compat`, `schema`, `version` | 35 tests |
 
-Total: **165 unit tests** + **24 integration tests** against real MySQL 8.0.46, all green.
+Total: **182 unit tests** + **24 integration tests** against real MySQL 8.0.46, all green.
 
 ### ALTER operations understood
 

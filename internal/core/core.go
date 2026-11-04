@@ -62,6 +62,8 @@ type Request struct {
 	Actor string
 	// Binaries are the engine executables found locally, for the engine matrix.
 	Binaries map[string]analyzer.EngineBinary
+	// ServerPort is @@port, used to tell gh-ost that a port mismatch is expected.
+	ServerPort int
 }
 
 // ApprovalRequest is what the user is asked to approve.
@@ -290,7 +292,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		HasReplica:                prep.Snapshot.Runtime.ReplicaConfigured,
 	}
 
-	eng, err := r.buildEngine(plan.Recommendation.Engine, req, opts)
+	eng, err := r.buildEngine(plan.Recommendation.Engine, req, opts, prep.Snapshot.Server.Port)
 	if err != nil {
 		sess.State = state.StateFailed
 		sess.Error = err.Error()
@@ -540,10 +542,11 @@ func alterBody(s string) string {
 }
 
 // buildEngine returns the adapter for the chosen engine.
-func (r *Runner) buildEngine(name analyzer.Engine, req Request, opts engine.Options) (engine.Engine, error) {
+func (r *Runner) buildEngine(name analyzer.Engine, req Request, opts engine.Options, serverPort int) (engine.Engine, error) {
 	conn := copyeng.Conn{
 		Host: req.Conn.Host, Port: req.Conn.Port, User: req.Conn.User,
 		Password: req.Conn.Password, Socket: req.Conn.Socket,
+		ServerPort: serverPort,
 	}
 
 	switch name {

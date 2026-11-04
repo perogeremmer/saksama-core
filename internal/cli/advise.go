@@ -34,6 +34,7 @@ type adviseOpts struct {
 	engine     string
 	jsonOut    bool
 	noProbe    bool
+	plain      bool
 	rows       int64
 	dataBytes  int64
 	indexBytes int64
@@ -67,6 +68,7 @@ func cmdAdvise(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.engine, "engine", "", "force native|gh-ost|pt-osc when planning")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
 	fs.BoolVar(&o.noProbe, "no-probe", false, "skip probing installed engine binaries")
+	fs.BoolVar(&o.plain, "plain", false, "borderless output, for scripts and logs")
 	fs.Int64Var(&o.rows, "rows", 0, "estimated row count")
 	fs.Int64Var(&o.dataBytes, "data-bytes", 0, "table data bytes")
 	fs.Int64Var(&o.indexBytes, "index-bytes", 0, "table index bytes")
@@ -171,10 +173,11 @@ func adviseOffline(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdo
 		if o.jsonOut {
 			enc := json.NewEncoder(stdout)
 			enc.SetIndent("", "  ")
-			_ = enc.Encode(map[string]any{"schema": tbl.Schema, "server": srv.Version, "tables": rows})
+			_ = enc.Encode(map[string]any{"schema": tbl.Schema, "server": srv.Version,
+				"tables": rows, "artifacts": introspect.FindArtifacts([]model.Table{tbl})})
 			return ExitOK
 		}
-		if err := render.SchemaReport(stdout, tbl.Schema, rows); err != nil {
+		if err := render.SchemaReportStyled(stdout, tbl.Schema, rows, introspect.FindArtifacts([]model.Table{tbl}), !o.plain); err != nil {
 			fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 			return ExitInternal
 		}
@@ -343,19 +346,21 @@ func adviseSchema(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdou
 	}
 
 	rows := analyzer.AssessSchema(tables, srv, binaries)
+	artifacts := introspect.FindArtifacts(tables)
 
 	if o.jsonOut {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(map[string]any{
-			"schema": o.database,
-			"server": srv.Version,
-			"tables": rows,
+			"schema":    o.database,
+			"server":    srv.Version,
+			"tables":    rows,
+			"artifacts": artifacts,
 		})
 		return ExitOK
 	}
 
-	if err := render.SchemaReport(stdout, o.database, rows); err != nil {
+	if err := render.SchemaReportStyled(stdout, o.database, rows, artifacts, !o.plain); err != nil {
 		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 		return ExitInternal
 	}
