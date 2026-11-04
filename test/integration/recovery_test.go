@@ -183,7 +183,11 @@ func TestKilledCopyLeavesOnlyOwnedDebris(t *testing.T) {
 	for _, eng := range copyEngines(t) {
 		t.Run(eng.name, func(t *testing.T) {
 			schema, db := fixtureSchema(t)
-			createCopyFixture(t, db, 4096)
+			// Large enough that one-row chunks cannot finish inside the window between
+			// seeing the shadow table and killing the process. A smaller fixture made
+			// this test fail on a fast runner for the right reason - the copy was
+			// already over - which is a test that proves nothing.
+			createCopyFixture(t, db, 200000)
 
 			store, err := state.NewStore(t.TempDir())
 			if err != nil {
@@ -291,7 +295,7 @@ func TestCancelledCopyIsReportedHonestly(t *testing.T) {
 	for _, eng := range copyEngines(t) {
 		t.Run(eng.name, func(t *testing.T) {
 			schema, db := fixtureSchema(t)
-			createCopyFixture(t, db, 4096)
+			createCopyFixture(t, db, 200000)
 
 			store, err := state.NewStore(t.TempDir())
 			if err != nil {
