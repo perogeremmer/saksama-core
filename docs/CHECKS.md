@@ -79,7 +79,7 @@ doctor (section S).
 | D3 | a transaction older than the threshold is open | `WARN` | done | row locks and old row versions slow the copy |
 | D4 | `Threads_running` is elevated | `INFO` or `WARN` | done | throttling will engage |
 | D5 | replication is stopped, or lagging | `BLOCKER` when stopped or above 30s, `WARN` above 5s | done | gh-ost reads from a replica |
-| D6 | free disk is below twice the table size | `BLOCKER` when measured, `WARN` when unmeasured | done | `1021: Disk full` |
+| D6 | disk space: below 10 percent free is refused, below 25 percent warns, and a copy needs twice the table size. An unmeasured disk refuses `apply` and only warns `plan` | `BLOCKER` or `WARN` | done | `1021: Disk full` |
 | D7 | the table already has triggers | `WARN` | done | both engines create their own |
 | D8 | leftover artifacts from a previous migration | `BLOCKER` | done | a new run would collide with them |
 | D9 | a `CHECK` constraint would be violated by the copy | `WARN` | planned | enforced from 8.0.16 |
@@ -167,6 +167,24 @@ Rules:
 - **Automatic routing prefers a runnable engine.** If gh-ost suits the table but
   the server cannot run it, the recommendation moves to pt-osc and R9 explains
   the skip. An explicit `engine set` is never overridden.
+
+---
+
+### D6 in detail
+
+MySQL cannot report free filesystem space over SQL, so the number comes from one
+of three places, and they are never conflated:
+
+| Source | When |
+|---|---|
+| `filesystem` | `@@datadir` exists on this machine, so the volume is read with `statfs` |
+| `operator` | `--free-disk` and `--disk-total` were supplied |
+| unmeasured | a managed service or a remote host, with no flags |
+
+Thresholds: **10 percent free is a hard floor** for any execution, **25 percent
+warns**, and a copy engine needs **twice the table size** available. Walking up to
+a parent directory to find a filesystem is forbidden: it reports the free space of
+a different volume, which is worse than reporting nothing.
 
 ---
 

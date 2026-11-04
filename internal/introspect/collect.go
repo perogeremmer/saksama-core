@@ -405,7 +405,7 @@ func (c *Collector) Runtime(ctx context.Context) (Runtime, error) {
 
 	if c.DataDir != "" {
 		rt.DataDir = c.DataDir
-		rt.FreeDiskBytes = FreeDisk(c.DataDir)
+		rt.Disk = ReadDiskSpace(c.DataDir)
 	}
 
 	return rt, nil

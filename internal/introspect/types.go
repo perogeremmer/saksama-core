@@ -75,8 +75,11 @@ type Runtime struct {
 	Grants            Grants        `json:"grants"`
 	Artifacts         []Artifact    `json:"artifacts"`
 	LockWaitTimeout   int64         `json:"lock_wait_timeout"`
-	FreeDiskBytes     int64         `json:"free_disk_bytes"` // 0 = not measured
-	DataDir           string        `json:"datadir,omitempty"`
+	// Disk is the volume holding the data directory. MySQL cannot report free
+	// filesystem space over SQL, so this is only measured when Saksama runs on the
+	// database host.
+	Disk    DiskSpace `json:"disk"`
+	DataDir string    `json:"datadir,omitempty"`
 }
 
 // FKCheck is the verifiable part of check A1: the character set of both sides of

@@ -1083,3 +1083,88 @@ func TestSettingsAreReadFromAServerWithoutBinlog(t *testing.T) {
 		t.Fatal("the plan carries no environment report")
 	}
 }
+
+// --- disk space -------------------------------------------------------------
+
+// MySQL cannot report free filesystem space over SQL, so Saksama reads the volume
+// itself when the data directory is local. In the container the client is not on
+// the database host, so this asserts the honest "not measured" path, which is
+// what a remote user sees too.
+func TestDiskSpaceIsMeasuredOrHonestlyUnmeasured(t *testing.T) {
+	schema, db := fixtureSchema(t)
+
+	c := introspect.NewCollector(db, schema, "")
+	settings, err := c.Settings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	datadir := settings["datadir"]
+	if datadir == "" {
+		t.Skip("server did not report a datadir")
+	}
+
+	disk := introspect.ReadDiskSpace(datadir)
+	if disk.Measured {
+		if disk.Free <= 0 || disk.Total <= 0 {
+			t.Fatalf("measured disk looks invalid: %+v", disk)
+		}
+		if disk.Free > disk.Total {
+			t.Fatalf("free exceeds total: %+v", disk)
+		}
+		return
+	}
+	if disk.Reason == "" {
+		t.Fatal("an unmeasured disk must say why")
+	}
+}
+
+// Applying without a measurable disk and without --free-disk must refuse, because
+// a migration that fills the volume takes the whole server down with it.
+func TestApplyRefusesWhenDiskIsUnknown(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
+	req.ForExecution = true
+
+	sess, err := runner.Apply(context.Background(), req)
+	if err == nil {
+		t.Fatalf("expected a refusal for an unmeasured disk, got state %q", sess.State)
+	}
+	if !errors.Is(err, core.ErrBlocked) {
+		t.Fatalf("expected ErrBlocked, got %v", err)
+	}
+	// And nothing may have changed.
+	if n := countRows(t, db,
+		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
+		schema); n != 0 {
+		t.Fatal("the index was created despite the refusal")
+	}
+}
+
+// The same apply proceeds when the operator supplies the numbers.
+func TestApplyProceedsWithOperatorSuppliedDisk(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
+	req.ForExecution = true
+	req.FreeDisk = 500 << 30
+	req.DiskTotal = 1000 << 30
+
+	sess, err := runner.Apply(context.Background(), req)
+	if err != nil {
+		t.Fatalf("apply: %v (session error: %s)", err, sess.Error)
+	}
+	if sess.State != state.StateDone {
+		t.Fatalf("state = %q", sess.State)
+	}
+}

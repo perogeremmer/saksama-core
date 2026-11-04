@@ -112,7 +112,8 @@ saksama plan --ddl orders.sql --alter "<ALTER>" --mysql-version 8.0.36 --json
 | `--host <name>` | label for the target, used in reporting and confirmation |
 | `--engine <name>` | force `native`, `gh-ost`, or `pt-osc`; still subject to blockers |
 | `--production` | mark the target as production |
-| `--free-disk <bytes>` | free space on the data volume, for the disk check |
+| `--free-disk <bytes>` | free space on the data volume, when it cannot be measured from here |
+| `--disk-total <bytes>` | volume size, so the 10 percent floor can be applied |
 | `--rows`, `--data-bytes`, `--index-bytes` | sizing facts for the estimate |
 | `--json` | emit the plan JSON instead of the card |
 
@@ -141,6 +142,8 @@ saksama apply -h <host> -d <db> -t <table> -a "<ALTER>" --production --confirm d
 | `--force` | downgrade selected preflight aborts; never bypasses an invariant blocker |
 | `--lock-wait-timeout <n>` | session `lock_wait_timeout` in seconds, default 10 |
 | `--hold-cutover` | ask the engine to pause before the swap, where it supports that |
+| `--free-disk <bytes>` | free space on the data volume, when it cannot be measured from here |
+| `--disk-total <bytes>` | volume size, so the 10 percent floor can be applied |
 | `--allow-argv-password` | let an engine without an option file take the password in argv, visible in `ps`; off by default |
 | `--no-probe` | skip detecting installed engines |
 | `--json` | machine-readable session |
@@ -183,6 +186,39 @@ Engine names accept common spellings: `gh-ost`, `ghost`, `gh`; `pt-osc`, `pt`,
 `engine show` reports the resolved choice and where it came from (`table`,
 `database`, or `global`). `engine clear` forgets one scope without touching the
 others.
+
+---
+
+## Disk space
+
+MySQL cannot report free filesystem space over SQL, so Saksama has three honest
+states for it, and treats them differently:
+
+| State | How it happens | `plan` | `apply` |
+|---|---|---|---|
+| measured | the data directory exists on this machine, so the volume is read directly | judged | judged |
+| supplied | `--free-disk` and `--disk-total` were given | judged | judged |
+| unknown | a managed service, a remote host, no flags | `WARN` | **refused** |
+
+Two thresholds apply whenever the number is known:
+
+- **below 10 percent free** on the volume is refused outright, because binlogs,
+  undo, and application writes keep growing while a copy runs, and a full volume
+  takes the whole server down rather than one migration;
+- **below 25 percent free** warns.
+
+A copy engine additionally needs roughly twice the table size: the copy table plus
+the retained original. That is checked against the same free figure.
+
+Refusing an execution with an unknown disk is deliberate. The two ways out are one
+line each:
+
+```bash
+saksama apply ... --free-disk 500GB --disk-total 1TB
+```
+
+or run Saksama on the database host, where `@@datadir` can actually be read.
+`--force` downgrades this one blocker and records that it did.
 
 ---
 

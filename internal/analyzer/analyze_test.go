@@ -1115,3 +1115,141 @@ func TestUnknownSettingsDoNotBlockRunnable(t *testing.T) {
 		t.Fatalf("unknown settings should not fail: %v", gh.EnvironmentProblems())
 	}
 }
+
+// --- disk space (D6) --------------------------------------------------------
+//
+// MySQL cannot report free filesystem space over SQL, so this is either measured
+// on the database host, supplied by the operator, or unknown. Unknown must never
+// read as safe.
+
+const gib = int64(1) << 30
+
+func diskInput(free, total int64, measured bool) func(*Input) {
+	return func(in *Input) {
+		in.Disk = DiskFacts{Free: free, Total: total, Measured: measured, Source: "filesystem"}
+	}
+}
+
+func TestDiskBlocksWhenVolumeIsBelowTenPercent(t *testing.T) {
+	// 40 GiB of 500 GiB is 8 percent: enough for a small change, still refused.
+	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)",
+		diskInput(40*gib, 500*gib, true), func(in *Input) { in.ForExecution = true })
+
+	found := false
+	for _, c := range p.Checks {
+		if c.ID == chkDiskHeadroom && c.Severity == SeverityBlocker {
+			found = true
+			if !strings.Contains(c.Title, "10%") {
+				t.Errorf("title should name the floor: %q", c.Title)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a blocker for a volume below 10 percent: %+v", p.Checks)
+	}
+	if !p.Recommendation.Blocked {
+		t.Fatal("the plan must be blocked")
+	}
+}
+
+func TestDiskAcceptsHealthyVolume(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)",
+		diskInput(400*gib, 500*gib, true), func(in *Input) { in.ForExecution = true })
+
+	for _, c := range p.Checks {
+		if c.ID == chkDiskHeadroom && c.Severity != SeverityInfo {
+			t.Fatalf("expected an informational disk check, got %q: %s", c.Severity, c.Title)
+		}
+	}
+}
+
+func TestDiskWarnsBetweenTenAndTwentyFivePercent(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)",
+		diskInput(60*gib, 500*gib, true), func(in *Input) { in.ForExecution = true })
+
+	var warn bool
+	for _, c := range p.Checks {
+		if c.ID == chkDiskHeadroom && c.Severity == SeverityWarn {
+			warn = true
+		}
+	}
+	if !warn {
+		t.Fatalf("12 percent free should warn: %+v", p.Checks)
+	}
+}
+
+func TestDiskBlocksWhenCopyDoesNotFit(t *testing.T) {
+	// 20 GiB free of 100 GiB is above the floor, but this 22 GiB table needs 44 GiB
+	// for a copy, so the fit check must fire on its own.
+	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL",
+		diskInput(20*gib, 100*gib, true),
+		withBinaries(availableBinaries()),
+		func(in *Input) { in.ForExecution = true })
+
+	var blocker *Check
+	for i, c := range p.Checks {
+		if c.ID == chkDiskHeadroom && c.Severity == SeverityBlocker {
+			blocker = &p.Checks[i]
+		}
+	}
+	if blocker == nil {
+		t.Fatalf("expected a blocker: a 22 GiB table needs 44 GiB, only 20 free: %+v", p.Checks)
+	}
+	if !strings.Contains(blocker.Title, "copy") {
+		t.Errorf("title should name the copy: %q", blocker.Title)
+	}
+}
+
+func TestDiskUnmeasuredBlocksExecutionOnly(t *testing.T) {
+	// A plan is useful without a measured disk. An execution is not.
+	planned := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)", diskInput(0, 0, false))
+	for _, c := range planned.Checks {
+		if c.ID == chkDiskHeadroom && c.Severity == SeverityBlocker {
+			t.Fatalf("planning must not be blocked by an unmeasured disk: %s", c.Title)
+		}
+	}
+
+	executing := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)", diskInput(0, 0, false),
+		func(in *Input) { in.ForExecution = true })
+	var blocked bool
+	for _, c := range executing.Checks {
+		if c.ID == chkDiskHeadroom && c.Severity == SeverityBlocker {
+			blocked = true
+			if !strings.Contains(c.Remediation, "--free-disk") {
+				t.Errorf("remediation must say how to satisfy it: %q", c.Remediation)
+			}
+		}
+	}
+	if !blocked {
+		t.Fatalf("execution with an unmeasured disk must be refused: %+v", executing.Checks)
+	}
+}
+
+func TestDiskUnmeasuredAllowedByForce(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)", diskInput(0, 0, false),
+		func(in *Input) { in.ForExecution = true; in.Force = true })
+
+	for _, c := range p.Checks {
+		if c.ID == chkDiskHeadroom && c.Severity == SeverityBlocker {
+			t.Fatalf("--force should downgrade an unmeasured disk: %s", c.Title)
+		}
+	}
+}
+
+func TestDiskOperatorSuppliedNumbersAreUsed(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)", func(in *Input) {
+		in.ForExecution = true
+		in.FreeDisk = 30 * gib // 6 percent of the volume below
+		in.Disk = DiskFacts{Free: 30 * gib, Total: 500 * gib, Measured: true, Source: "operator"}
+	})
+
+	var blocked bool
+	for _, c := range p.Checks {
+		if c.ID == chkDiskHeadroom && c.Severity == SeverityBlocker {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatalf("operator-supplied numbers must be judged too: %+v", p.Checks)
+	}
+}

@@ -102,6 +102,8 @@ type livePlanOpts struct {
 	force      bool
 	jsonOut    bool
 	storeDir   string
+	freeDisk   int64
+	diskTotal  int64
 }
 
 func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
@@ -118,6 +120,8 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.force, "force", false, "downgrade selected preflight aborts (never capability blockers)")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
 	fs.StringVar(&o.storeDir, "state-dir", "", "state directory (default: ~/.local/state/saksama)")
+	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
+	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
 	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
 	fs.Bool("no-color", false, "accepted for compatibility")
 
@@ -160,6 +164,8 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 		Alter:      o.alter,
 		Production: o.production,
 		Force:      o.force,
+		FreeDisk:   o.freeDisk,
+		DiskTotal:  o.diskTotal,
 		Actor:      currentActor(),
 	}
 	if !*noProbe {
@@ -225,6 +231,8 @@ type applyOpts struct {
 	lockWait          int
 	holdCutover       bool
 	allowArgvPassword bool
+	freeDisk          int64
+	diskTotal         int64
 }
 
 func cmdApply(args []string, stdout, stderr io.Writer) int {
@@ -241,6 +249,8 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.production, "production", false, "mark the target as production, requiring --confirm")
 	fs.StringVar(&o.engine, "engine", "", "force native|gh-ost|pt-osc")
 	fs.BoolVar(&o.force, "force", false, "downgrade selected preflight aborts")
+	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
+	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
 	fs.StringVar(&o.confirm, "confirm", "", "must equal the host name when --production is set")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "build statements and approvals without executing")
@@ -296,6 +306,9 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		LockWaitTimeoutSeconds: o.lockWait,
 		HoldCutover:            o.holdCutover,
 		AllowArgvPassword:      o.allowArgvPassword,
+		FreeDisk:               o.freeDisk,
+		DiskTotal:              o.diskTotal,
+		ForExecution:           true,
 		Actor:                  currentActor(),
 		Binaries:               binariesOrNil(*noProbe),
 		Progress: func(p engine.Progress) {

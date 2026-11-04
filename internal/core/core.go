@@ -44,6 +44,9 @@ type Request struct {
 	EngineHintSource string
 	Force            bool
 	DryRun           bool
+	// ForExecution is set by `apply`. A plan tolerates an unmeasured disk; an
+	// execution does not.
+	ForExecution bool
 
 	LockWaitTimeoutSeconds int
 	LongQueryThreshold     int64
@@ -62,6 +65,11 @@ type Request struct {
 	Actor string
 	// Binaries are the engine executables found locally, for the engine matrix.
 	Binaries map[string]analyzer.EngineBinary
+	// FreeDisk and DiskTotal let an operator supply the numbers when the data
+	// directory is not on this machine, which is the normal case for a managed
+	// service.
+	FreeDisk  int64
+	DiskTotal int64
 	// ServerPort is @@port, used to tell gh-ost that a port mismatch is expected.
 	ServerPort int
 }
@@ -130,12 +138,17 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 	if req.LongQueryThreshold > 0 {
 		collector.LongQueryThreshold = req.LongQueryThreshold
 	}
+	// Settings come first: the data directory is needed before Collect can try to
+	// measure the volume it lives on.
+	settings, _ := collector.Settings(ctx)
+	if dir := settings["datadir"]; dir != "" {
+		collector.DataDir = dir
+	}
+
 	snap, err := collector.Collect(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	settings, _ := collector.Settings(ctx)
 
 	alter, alterErr := parser.ParseAlter("ALTER TABLE `" + escapeIdent(req.Table) + "` " + alterBody(req.Alter))
 
@@ -183,6 +196,9 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		Live:             liveStateFrom(snap, duplicates),
 		Binaries:         req.Binaries,
 		Settings:         analyzer.SettingsFromMap(settings),
+		Disk:             diskFacts(snap, req),
+		Force:            req.Force,
+		ForExecution:     req.ForExecution,
 	}
 
 	plan := analyzer.Analyze(input)
@@ -269,9 +285,19 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	plan := prep.Plan
 
 	if plan.Recommendation.Blocked {
+		// Name the blockers in the session itself, so `apply` and `status` say why
+		// without the operator having to open the stored plan.
+		var reasons []string
+		for _, c := range plan.Checks {
+			if c.Severity == analyzer.SeverityBlocker {
+				reasons = append(reasons, fmt.Sprintf("%s %s", c.ID, c.Title))
+			}
+		}
+		sess.Error = "blocked by " + strings.Join(reasons, "; ")
 		r.emit(prep, events.TypePlanRejected, map[string]any{
 			"blockers": plan.Recommendation.Blockers,
 			"engine":   plan.Recommendation.Engine,
+			"reasons":  reasons,
 		})
 		sess.LastSeq = prep.emitter.Seq()
 		_ = r.Store.Save(sess)
@@ -474,7 +500,6 @@ func liveStateFrom(snap introspect.Snapshot, duplicates map[string]int64) *analy
 		ReplicaConfigured: snap.Runtime.ReplicaConfigured,
 		ReplicaRunning:    snap.Runtime.ReplicaRunning,
 		ReplicaLagSeconds: snap.Runtime.ReplicaLagSec,
-		FreeDiskBytes:     snap.Runtime.FreeDiskBytes,
 		Duplicates:        duplicates,
 		Grants: analyzer.Grants{
 			User:             snap.Runtime.Grants.User,
@@ -561,4 +586,26 @@ func (r *Runner) buildEngine(name analyzer.Engine, req Request, opts engine.Opti
 		return copyeng.New(copyeng.PtOSC(), r.DB, conn, opts, nil), nil
 	}
 	return nil, fmt.Errorf("%w: no adapter for engine %q", ErrBlocked, name)
+}
+
+// diskFacts prefers a measurement from this machine, then whatever the operator
+// supplied, and otherwise says why it could not be measured.
+func diskFacts(snap introspect.Snapshot, req Request) analyzer.DiskFacts {
+	if snap.Runtime.Disk.Measured {
+		return analyzer.DiskFacts{
+			Free:     snap.Runtime.Disk.Free,
+			Total:    snap.Runtime.Disk.Total,
+			Measured: true,
+			Source:   "filesystem",
+		}
+	}
+	if req.FreeDisk > 0 {
+		return analyzer.DiskFacts{
+			Free:     req.FreeDisk,
+			Total:    req.DiskTotal,
+			Measured: true,
+			Source:   "operator",
+		}
+	}
+	return analyzer.DiskFacts{Reason: snap.Runtime.Disk.Reason}
 }

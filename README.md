@@ -57,6 +57,8 @@ trade-offs, and then runs the engine you chose.
   it. The recommendation never overrides you silently.
 - **Verified, not assumed.** The result is checked against `information_schema`.
   An engine exit code is not evidence.
+- **Disk before anything.** Below 10 percent free is refused, a copy needs twice
+  the table size, and an unmeasurable volume refuses `apply` rather than guessing.
 
 ## Quick start
 
@@ -209,13 +211,13 @@ claim something this repository does not do.
 ## Development
 
 ```bash
-make test               # 190 unit tests
+make test               # 202 unit tests
 make lint               # go vet plus a gofmt check
 make cover              # per-package coverage
 make demo               # two plan cards, no database needed
 
 make integration-up     # disposable MySQL 8.0 in docker on :33306
-make test-integration   # 25 tests against a real server
+make test-integration   # 28 tests against a real server
 make integration-down
 
 make compat-doc         # regenerate docs/COMPATIBILITY.md

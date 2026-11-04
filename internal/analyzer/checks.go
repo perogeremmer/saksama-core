@@ -429,42 +429,6 @@ func checksOperational(in Input, anyRebuild bool) []Check {
 		})
 	}
 
-	if anyRebuild {
-		size := in.Table.SizeBytes()
-		need := size * 2
-		detail := fmt.Sprintf("a copy-based migration needs roughly %s of additional space (shadow table plus the old table)", humanBytes(need))
-		freeDisk := in.FreeDisk
-		if freeDisk == 0 && in.Live != nil {
-			freeDisk = in.Live.FreeDiskBytes
-		}
-		if in.Live != nil && in.Live.FreeDiskBytes > 0 {
-			freeDisk = in.Live.FreeDiskBytes
-		}
-		if freeDisk > 0 {
-			if freeDisk < need {
-				out = append(out, Check{
-					ID: chkDiskHeadroom, Severity: SeverityBlocker,
-					Title:       "insufficient free disk space",
-					Detail:      fmt.Sprintf("%s free but %s required", humanBytes(freeDisk), humanBytes(need)),
-					Remediation: "free space or run the migration on a larger volume before applying",
-				})
-			} else {
-				out = append(out, Check{
-					ID: chkDiskHeadroom, Severity: SeverityInfo,
-					Title:  "disk headroom looks sufficient",
-					Detail: fmt.Sprintf("%s free, %s required", humanBytes(in.FreeDisk), humanBytes(need)),
-				})
-			}
-		} else {
-			out = append(out, Check{
-				ID: chkDiskHeadroom, Severity: SeverityWarn,
-				Title:       "free disk space was not measured",
-				Detail:      detail,
-				Remediation: "verify free space on the data volume before applying",
-			})
-		}
-	}
-
 	if size := in.Table.SizeBytes(); size > 100<<30 {
 		out = append(out, Check{
 			ID: chkHugeTable, Severity: SeverityWarn,

@@ -25,10 +25,6 @@ type LiveState struct {
 
 	Grants Grants
 
-	// FreeDiskBytes is the measured free space on the data volume. 0 means "not
-	// measured", which is different from "no space".
-	FreeDiskBytes int64
-
 	LeftoverArtifacts []string
 
 	// FKCompatibility reports whether both sides of each foreign key agree on

@@ -194,7 +194,17 @@ type Input struct {
 	// server was not inspected, and every environment check reports "unknown".
 	Settings ServerSettings
 	MaxLoad  int   // optional: current Threads_running observation
-	FreeDisk int64 // optional: bytes free on the data volume
+	FreeDisk int64 // optional: bytes free on the data volume, from the operator
+	// Disk is what could be measured or supplied about the data volume. When it is
+	// unmeasured, D6 refuses instead of assuming there is room.
+	Disk DiskFacts
+	// Force downgrades a small allowlist of non-invariant blockers, such as an
+	// unmeasurable disk, and is recorded in the audit trail.
+	Force bool
+	// ForExecution is true when the plan is about to be executed rather than
+	// shown. It tightens checks whose facts cannot be verified: a plan with an
+	// unmeasured disk is still useful, an execution with one is not.
+	ForExecution bool
 	// Live is the observation collected from a real server. Nil means the plan
 	// is offline, and every live-only check says so instead of passing silently.
 	Live *LiveState
@@ -284,6 +294,7 @@ func Analyze(in Input) Plan {
 	p.Checks = append(p.Checks, checksIndexes(in, projected)...)
 	p.Checks = append(p.Checks, checksForeignKeys(in, projected)...)
 	p.Checks = append(p.Checks, checksOperational(in, anyRebuild)...)
+	p.Checks = append(p.Checks, diskChecks(in, anyRebuild)...)
 	p.Checks = append(p.Checks, liveChecks(in, projected)...)
 
 	// Engine suitability drives routing, so it must be computed first.

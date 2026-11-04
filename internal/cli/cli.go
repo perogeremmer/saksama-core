@@ -147,6 +147,7 @@ Plan options:
   --engine <name>        force native|gh-ost|pt-osc (still subject to blockers)
   --production           mark the target as production
   --free-disk <bytes>    free space on the data volume, for the disk check
+  --disk-total <bytes>   volume size, so the 10 percent floor can be applied
   --rows <n>             estimated row count (improves the duration range)
   --data-bytes <n>       table data size in bytes
   --index-bytes <n>      table index size in bytes
@@ -171,6 +172,7 @@ type planOpts struct {
 	engine     string
 	production bool
 	freeDisk   int64
+	diskTotal  int64
 	rows       int64
 	dataBytes  int64
 	indexBytes int64
@@ -192,6 +194,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.engine, "engine", "", "force engine")
 	fs.BoolVar(&o.production, "production", false, "mark target as production")
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free disk bytes")
+	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
 	fs.Int64Var(&o.rows, "rows", 0, "estimated row count (informs duration)")
 	fs.Int64Var(&o.dataBytes, "data-bytes", 0, "table data size in bytes")
 	fs.Int64Var(&o.indexBytes, "index-bytes", 0, "table index size in bytes")
@@ -306,6 +309,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		SchemaSource: src,
 		Ignored:      ignored,
 		FreeDisk:     o.freeDisk,
+		Disk:         analyzer.DiskFacts{Free: o.freeDisk, Total: o.diskTotal, Measured: o.freeDisk > 0, Source: "operator"},
 	}
 	// Engine precedence: flag, then the choice recorded for this table, then the
 	// analyzer's recommendation.
