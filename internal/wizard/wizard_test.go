@@ -89,6 +89,9 @@ type fakeBackend struct {
 	schema     core.SchemaAdvice
 	prep       *core.Prepared
 	lastSess   *state.Session
+	choices    []state.EngineChoice
+	setEngines []state.EngineChoice
+	cleared    []state.EngineChoice
 }
 
 func (f *fakeBackend) Connect(c cred.Conn) error {
@@ -161,6 +164,29 @@ func (f *fakeBackend) ReleaseCutover(ctx context.Context, id string) (*state.Ses
 func (f *fakeBackend) Reconcile(ctx context.Context) ([]core.Finding, error) { return nil, nil }
 
 func (f *fakeBackend) Binaries() map[string]analyzer.EngineBinary { return nil }
+
+func (f *fakeBackend) EngineChoices(ctx context.Context) ([]state.EngineChoice, error) {
+	return f.choices, nil
+}
+
+func (f *fakeBackend) SetEngine(engine, database, table string, global bool, note string) (state.EngineChoice, error) {
+	choice, err := state.NewChoice(engine, global, database, table)
+	if err != nil {
+		return state.EngineChoice{}, err
+	}
+	choice.Note = note
+	f.setEngines = append(f.setEngines, choice)
+	return choice, nil
+}
+
+func (f *fakeBackend) ClearEngine(database, table string, global bool) (state.EngineChoice, error) {
+	choice, err := state.NewChoice("native", global, database, table)
+	if err != nil {
+		return state.EngineChoice{}, err
+	}
+	f.cleared = append(f.cleared, choice)
+	return choice, nil
+}
 
 func newWizard(t *testing.T, b Backend, answers ...string) (*Wizard, *script) {
 	t.Helper()
@@ -401,4 +427,149 @@ func TestEndOfInputExitsQuietly(t *testing.T) {
 	if code := w.loop(); code != ExitOK {
 		t.Fatalf("exit = %d, want 0 for ctrl-d", code)
 	}
+}
+
+// A 5.6 production plan arrives blocked by E5b, and the only thing missing is the
+// operator saying the risk is theirs. Without this screen the menu is a dead end:
+// the CLI can pass that flag and the menu cannot.
+func TestBlockedMDLIsOfferedForAcceptanceAndThenReanalysed(t *testing.T) {
+	blocked := &core.Prepared{Plan: analyzer.Plan{
+		Target: analyzer.Target{Database: "shop", Table: "orders"},
+		Checks: []analyzer.Check{{
+			ID: "E5b", Severity: analyzer.SeverityBlocker,
+			Title: "the metadata lock queue cannot be observed on MySQL 5.6",
+		}},
+		Recommendation: analyzer.Recommendation{Blockers: 1},
+	}}
+	accepted := &core.Prepared{Plan: analyzer.Plan{
+		Target:         analyzer.Target{Database: "shop", Table: "orders"},
+		Recommendation: analyzer.Recommendation{},
+	}}
+
+	b := &countingBackend{fakeBackend: fakeBackend{}, plans: []*core.Prepared{blocked, accepted}}
+	w, p := newWizard(t, b, "0")
+	w.connected = true
+	w.database = "shop"
+	w.tables = []analyzer.TableAssessment{{Table: "orders"}}
+
+	// table choice, ALTER builder (index on a column), production yes, accept the
+	// risk yes, then record no.
+	p = drive(w, "orders", "1", "ix_status", "status", "y", "y", "n")
+	w.plan()
+
+	if len(b.analyzed) != 2 {
+		t.Fatalf("expected a second analysis after accepting the risk, got %d", len(b.analyzed))
+	}
+	if !b.analyzed[1].AcceptUnknownMDL {
+		t.Fatalf("the second analysis must carry --accept-unknown-mdl: %+v", b.analyzed[1])
+	}
+	out := p.output()
+	if !strings.Contains(out, "Accept that risk?") {
+		t.Fatalf("the risk must be asked about:\n%s", out)
+	}
+	if !strings.Contains(out, "--accept-unknown-mdl") {
+		t.Fatalf("the equivalent command must show the flag:\n%s", out)
+	}
+}
+
+// Declining leaves the plan refused and records nothing.
+func TestDecliningMDLAcceptanceKeepsThePlanRefused(t *testing.T) {
+	blocked := &core.Prepared{Plan: analyzer.Plan{
+		Target:         analyzer.Target{Database: "shop", Table: "orders"},
+		Checks:         []analyzer.Check{{ID: "E5b", Severity: analyzer.SeverityBlocker}},
+		Recommendation: analyzer.Recommendation{Blockers: 1},
+	}}
+	b := &countingBackend{fakeBackend: fakeBackend{}, plans: []*core.Prepared{blocked}}
+	w, p := newWizard(t, b, "0")
+	w.connected = true
+	w.database = "shop"
+	w.tables = []analyzer.TableAssessment{{Table: "orders"}}
+
+	p = drive(w, "orders", "1", "ix_status", "status", "y", "n")
+	w.plan()
+
+	if len(b.prepared) != 0 {
+		t.Fatal("a refused plan must not be recorded")
+	}
+	if len(b.analyzed) != 1 {
+		t.Fatalf("declining must not trigger a re-analysis, got %d", len(b.analyzed))
+	}
+	if !strings.Contains(p.output(), "would be refused") {
+		t.Fatalf("the refusal must be stated:\n%s", p.output())
+	}
+}
+
+// The engine screen records a decision; it never installs anything.
+func TestEngineChoiceRecordsWithoutInstalling(t *testing.T) {
+	b := &fakeBackend{}
+	w, p := newWizard(t, b, "0")
+
+	// record a choice: table scope -> orders -> pt-osc -> note
+	w.connected = true
+	p = drive(w, "1", "1", "orders", "3", "foreign keys must be copied")
+	w.database = "shop"
+	w.tables = []analyzer.TableAssessment{{Table: "orders"}}
+	w.engineChoice()
+
+	if len(b.setEngines) != 1 {
+		t.Fatalf("recorded %d choices", len(b.setEngines))
+	}
+	got := b.setEngines[0]
+	if got.Engine != "pt-osc" || got.Database != "shop" || got.Table != "orders" {
+		t.Fatalf("choice = %+v", got)
+	}
+	out := p.output()
+	if !strings.Contains(out, "saksama engine set pt-osc -d shop -t orders") {
+		t.Fatalf("the equivalent command must be printed:\n%s", out)
+	}
+	if strings.Contains(out, "install") && !strings.Contains(out, "nothing installed here") {
+		t.Fatalf("the screen must not offer to install:\n%s", out)
+	}
+}
+
+func TestEngineChoiceCanBeForgotten(t *testing.T) {
+	b := &fakeBackend{choices: []state.EngineChoice{
+		{Engine: "gh-ost", Scope: state.ScopeDatabase, Database: "shop"},
+	}}
+	w, p := newWizard(t, b, "0")
+
+	// forget: database scope
+	w.connected = true
+	p = drive(w, "2", "2")
+	w.database = "shop"
+	w.engineChoice()
+
+	if len(b.cleared) != 1 || b.cleared[0].Database != "shop" {
+		t.Fatalf("cleared = %+v", b.cleared)
+	}
+	out := p.output()
+	if !strings.Contains(out, "saksama engine clear -d shop") {
+		t.Fatalf("the equivalent command must be printed:\n%s", out)
+	}
+	if !strings.Contains(out, "gh-ost") {
+		t.Fatalf("existing choices must be listed:\n%s", out)
+	}
+}
+
+// countingBackend returns a different canned plan per Analyze call, so a test can
+// assert what happens between the first read and the second.
+type countingBackend struct {
+	fakeBackend
+	plans []*core.Prepared
+}
+
+func (c *countingBackend) Analyze(ctx context.Context, req core.Request) (*core.Prepared, error) {
+	c.analyzed = append(c.analyzed, req)
+	if len(c.plans) == 0 {
+		return nil, nil
+	}
+	p := c.plans[0]
+	if len(c.plans) > 1 {
+		c.plans = c.plans[1:]
+	}
+	return p, nil
+}
+
+func (c *countingBackend) EngineChoices(ctx context.Context) ([]state.EngineChoice, error) {
+	return c.choices, nil
 }

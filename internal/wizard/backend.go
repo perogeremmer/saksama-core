@@ -37,6 +37,12 @@ type Backend interface {
 	Reconcile(ctx context.Context) ([]core.Finding, error)
 
 	Binaries() map[string]analyzer.EngineBinary
+
+	// Engine choices are decisions, not actions: they write to the state
+	// directory and nothing else, which is why the menu may record one.
+	EngineChoices(ctx context.Context) ([]state.EngineChoice, error)
+	SetEngine(engine, database, table string, global bool, note string) (state.EngineChoice, error)
+	ClearEngine(database, table string, global bool) (state.EngineChoice, error)
 }
 
 // live is the real backend: one connection, one runner, one state directory.
@@ -134,3 +140,31 @@ func (l *live) Reconcile(ctx context.Context) ([]core.Finding, error) {
 }
 
 func (l *live) Binaries() map[string]analyzer.EngineBinary { return l.binaries }
+
+func (l *live) EngineChoices(ctx context.Context) ([]state.EngineChoice, error) {
+	return l.store.ListEngineChoices()
+}
+
+func (l *live) SetEngine(engine, database, table string, global bool, note string) (state.EngineChoice, error) {
+	choice, err := state.NewChoice(engine, global, database, table)
+	if err != nil {
+		return state.EngineChoice{}, err
+	}
+	choice.Actor = currentActor()
+	choice.Note = note
+	if err := l.store.SetEngineChoice(choice); err != nil {
+		return state.EngineChoice{}, err
+	}
+	return choice, nil
+}
+
+func (l *live) ClearEngine(database, table string, global bool) (state.EngineChoice, error) {
+	choice, err := state.NewChoice("native", global, database, table)
+	if err != nil {
+		return state.EngineChoice{}, err
+	}
+	if err := l.store.ClearEngineChoice(choice); err != nil {
+		return state.EngineChoice{}, err
+	}
+	return choice, nil
+}

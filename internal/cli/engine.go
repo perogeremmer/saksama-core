@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/probe"
 	"github.com/perogeremmer/saksama-core/internal/render"
 	"github.com/perogeremmer/saksama-core/internal/state"
@@ -247,21 +248,9 @@ func cmdEngineSet(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "engine set to %s for %s\n", choice.Engine, describeScope(choice))
 	fmt.Fprintf(stdout, "state: %s\n", store.Dir())
 	fmt.Fprintln(stdout)
-	flagText := scopeFlags(choice)
-	fmt.Fprintf(stdout, "check it:  saksama engine show%s\n", flagText)
-	fmt.Fprintf(stdout, "undo it:   saksama engine clear%s\n", flagText)
+	fmt.Fprintf(stdout, "check it:  saksama engine show%s\n", core.EngineScopeFlags(choice))
+	fmt.Fprintf(stdout, "undo it:   %s\n", core.EngineClearCommandLine(choice))
 	return ExitOK
-}
-
-// scopeFlags renders the scope as the flags that reproduce it.
-func scopeFlags(c state.EngineChoice) string {
-	switch c.Scope {
-	case state.ScopeDatabase:
-		return " -d " + c.Database
-	case state.ScopeTable:
-		return " -d " + c.Database + " -t " + c.Table
-	}
-	return " --global"
 }
 
 func describeScope(c state.EngineChoice) string {

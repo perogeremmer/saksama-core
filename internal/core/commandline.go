@@ -55,6 +55,11 @@ func (req Request) CommandLineFor(verb string) string {
 	if req.Production {
 		args = append(args, "--production", "--confirm", req.Conn.Describe())
 	}
+	// Without this, the command a 5.6 production preview prints is the one that
+	// would be refused: the operator would read "equivalent" and copy a refusal.
+	if req.AcceptUnknownMDL {
+		args = append(args, "--accept-unknown-mdl")
+	}
 	if req.EngineHint != "" && req.EngineHintSource == "flag" {
 		args = append(args, "--engine", string(req.EngineHint))
 	}
@@ -80,6 +85,11 @@ func (req Request) CommandLineFor(verb string) string {
 		args = append(args, "--force")
 	}
 
+	return joinQuoted(args)
+}
+
+// joinQuoted spell a command so it can be pasted into a shell unchanged.
+func joinQuoted(args []string) string {
 	quoted := make([]string, 0, len(args))
 	for _, a := range args {
 		quoted = append(quoted, shellQuote(a))

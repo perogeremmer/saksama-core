@@ -156,6 +156,7 @@ func (w *Wizard) loop() int {
 			{"5", "Run a planned change", "execute a recorded plan"},
 			{"6", "Sessions", "follow, cancel, cutover, cleanup"},
 			{"7", "Reconcile", "sessions that never finished"},
+			{"8", "Engine choice", "record which engine to use, per table"},
 			{"0", "Exit", ""},
 		}, "0")
 		if err != nil {
@@ -180,10 +181,149 @@ func (w *Wizard) loop() int {
 			w.sessions()
 		case "7":
 			w.reconcile()
+		case "8":
+			w.engineChoice()
 		case "0":
 			return ExitOK
 		}
 	}
+}
+
+// acceptUnknownMDL asks the one question a blocker can be answered with.
+//
+// The wizard holds no policy of its own, so it does not decide which blockers are
+// acceptable: it asks only when the analyzer's own plan carries E5b as a BLOCKER,
+// which is the check whose remedy is an explicit operator acknowledgement. A
+// "no" leaves the plan refused, which is the correct outcome.
+func (w *Wizard) acceptUnknownMDL(plan analyzer.Plan) bool {
+	acceptable := false
+	for _, c := range plan.Checks {
+		if c.ID == "E5b" && c.Severity == analyzer.SeverityBlocker {
+			acceptable = true
+		}
+	}
+	if !acceptable {
+		return false
+	}
+	ok, err := w.p.Confirm(
+		"MySQL 5.6 cannot report its metadata lock queue. Accept that risk?", false)
+	return err == nil && ok
+}
+
+// ensureTables reads the schema once per session, so a table can be picked from a
+// list rather than typed. Every screen that offers a table needs the same read.
+func (w *Wizard) ensureTables() bool {
+	if w.tables != nil {
+		return true
+	}
+	adv, err := w.b.Schema(context.Background(), w.database, "")
+	if err != nil {
+		w.fail(err)
+		return false
+	}
+	w.tables = adv.Tables
+	return true
+}
+
+// engineChoice records which engine to use, because the verdict on the tables
+// screen is only useful if the decision it implies can be written down without
+// leaving the menu.
+//
+// It is a decision, not an action: nothing is installed, nothing downloads, and
+// `engine clear` undoes it. Installing a binary stays outside the menu.
+func (w *Wizard) engineChoice() {
+	choices, err := w.b.EngineChoices(context.Background())
+	if err != nil {
+		w.fail(err)
+		return
+	}
+
+	w.p.Printf("\nENGINE CHOICE\n")
+	if len(choices) == 0 {
+		w.p.Printf("  nothing recorded yet: plan and apply follow the analyzer's recommendation\n")
+	} else {
+		for _, c := range choices {
+			note := c.Note
+			if note != "" {
+				note = "  (" + shorten(note, 40) + ")"
+			}
+			w.p.Printf("  %-16s %-8s%s\n", c.Label(), c.Engine, note)
+		}
+	}
+	w.p.Printf("\n  nothing installed here; `saksama engine doctor` shows what is missing\n")
+
+	action, err := w.p.Choose("What do you want to do?", []Item{
+		{"1", "Record a choice", "engines: native, gh-ost, pt-osc"},
+		{"2", "Forget a choice", "back to the analyzer's recommendation"},
+		{"0", "Back", ""},
+	}, "0")
+	if err != nil || action == "0" {
+		return
+	}
+
+	scope, err := w.p.Choose("Which scope?", []Item{
+		{"1", "One table", orDash(w.database)},
+		{"2", "Every table in a database", orDash(w.database)},
+		{"3", "Everywhere", "global"},
+		{"0", "Back", ""},
+	}, "0")
+	if err != nil || scope == "0" {
+		return
+	}
+
+	var database, table string
+	global := scope == "3"
+	switch scope {
+	case "1":
+		if !w.requireConnection() || !w.ensureTables() {
+			return
+		}
+		table = w.chooseTable()
+		if table == "" {
+			return
+		}
+		database = w.database
+	case "2":
+		if !w.requireConnection() {
+			return
+		}
+		database = w.database
+	}
+
+	if action == "2" {
+		cleared, err := w.b.ClearEngine(database, table, global)
+		if err != nil {
+			w.fail(err)
+			return
+		}
+		w.p.Printf("\nforgot the choice for %s\n", cleared.Label())
+		w.p.Printf("equivalent: %s\n", core.EngineClearCommandLine(cleared))
+		return
+	}
+
+	engine, err := w.p.Choose("Which engine?", []Item{
+		{"1", "native", "MySQL does it in place, no copy"},
+		{"2", "gh-ost", "rebuild through the binlog"},
+		{"3", "pt-osc", "rebuild through triggers"},
+		{"0", "Back", ""},
+	}, "0")
+	if err != nil || engine == "0" {
+		return
+	}
+	names := map[string]string{"1": "native", "2": "gh-ost", "3": "pt-osc"}
+
+	note, err := w.p.Ask("why? (recorded in the audit trail, optional)", "")
+	if err != nil {
+		return
+	}
+
+	choice, err := w.b.SetEngine(names[engine], database, table, global, note)
+	if err != nil {
+		w.fail(err)
+		return
+	}
+	w.p.Printf("\nrecorded %s for %s\n", choice.Engine, choice.Label())
+	w.p.Printf("equivalent: %s\n", core.EngineChoiceCommandLine(choice))
 }
 
 func (w *Wizard) fail(err error) {
@@ -304,13 +444,8 @@ func (w *Wizard) plan() {
 	if !w.requireConnection() {
 		return
 	}
-	if w.tables == nil {
-		adv, err := w.b.Schema(context.Background(), w.database, "")
-		if err != nil {
-			w.fail(err)
-			return
-		}
-		w.tables = adv.Tables
+	if !w.ensureTables() {
+		return
 	}
 
 	table := w.chooseTable()
@@ -351,6 +486,25 @@ func (w *Wizard) plan() {
 		return
 	}
 	w.printChecks(prep.Plan)
+
+	// One blocker can be accepted rather than fixed, and only the operator may
+	// decide that. The analyzer names it; the wizard does not go looking for a
+	// server version, so this also covers a 5.7/8.0 user who cannot read the lock
+	// queue for lack of a grant.
+	if prep != nil && prep.Plan.Recommendation.Blockers > 0 && w.acceptUnknownMDL(prep.Plan) {
+		req.AcceptUnknownMDL = true
+		prep, err = w.b.Analyze(context.Background(), req)
+		if err != nil {
+			w.fail(err)
+			return
+		}
+		w.p.Printf("\nre-read with --accept-unknown-mdl:\n")
+		if err := render.PlanCard(w.out, prep.Plan); err != nil {
+			w.fail(err)
+			return
+		}
+		w.printChecks(prep.Plan)
+	}
 
 	if prep.Plan.Recommendation.Blockers > 0 {
 		w.p.Printf("\nthis change would be refused; fix the BLOCKER lines above first\n")
@@ -588,6 +742,14 @@ func (w *Wizard) apply() {
 	if w.freeDisk == 0 {
 		w.p.Printf("\nnote: free disk was not supplied, so a run may be refused for an\n")
 		w.p.Printf("      unmeasurable volume. Restart with --free-disk and --disk-total.\n")
+	}
+
+	// Re-reading before executing answers one question the session record cannot:
+	// does this run need the operator to accept a risk that only exists on some
+	// servers? It writes nothing, so asking here costs a handful of queries.
+	if preview, err := w.b.Analyze(context.Background(), req); err == nil && preview != nil &&
+		preview.Plan.Recommendation.Blockers > 0 && w.acceptUnknownMDL(preview.Plan) {
+		req.AcceptUnknownMDL = true
 	}
 	w.p.Printf("\nequivalent: %s\n", req.CommandLineFor("apply"))
 

@@ -50,6 +50,7 @@ saksama wizard -h db.prod -d shop --free-disk 100000000000 --disk-total 20000000
   5   Run a planned change         execute a recorded plan, statements shown first
   6   Sessions                     follow, cancel, cutover, cleanup
   7   Reconcile                    sessions that never finished
+  8   Engine choice                record which engine to use, per table
   0   Exit
 ```
 
@@ -66,6 +67,14 @@ The rules it follows:
   requires typing the host name.
 - **No prompt without a terminal.** On a pipe or in CI it exits `2` and names the
   non-interactive commands instead of waiting for input.
+- **The one acceptable blocker is asked, not assumed.** A 5.6 production plan
+  arrives blocked by `E5b` because the metadata lock queue cannot be read there.
+  The menu asks whether you accept that risk and, if you do, re-reads the plan
+  with `--accept-unknown-mdl`. Saying no leaves it refused.
+- **Engine choice is a decision, not an action.** Option 8 records `engine set` or
+  forgets it with `engine clear`, then prints the equivalent command. Installing a
+  binary stays outside the menu: a download behind a numbered prompt is a decision
+  that has to be read (asset, digest, directory, sudo), not a menu item.
 
 | Flag | Meaning |
 |---|---|
