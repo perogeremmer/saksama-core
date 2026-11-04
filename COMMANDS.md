@@ -131,6 +131,10 @@ database for progress, and verifies the result.
 ```
 saksama apply -h <host> -d <db> -t <table> -a "<ALTER>" --dry-run
 saksama apply -h <host> -d <db> -t <table> -a "<ALTER>" --production --confirm db.prod
+
+# plan, read it, decide, then execute exactly that plan
+saksama plan --live ... -a "<ALTER>"
+saksama apply --session s3 --confirm db.prod
 ```
 
 | Flag | Meaning |
@@ -141,6 +145,7 @@ saksama apply -h <host> -d <db> -t <table> -a "<ALTER>" --production --confirm d
 | `--engine <name>` | override the recorded choice |
 | `--force` | downgrade selected preflight aborts; never bypasses an invariant blocker |
 | `--lock-wait-timeout <n>` | session `lock_wait_timeout` in seconds, default 10 |
+| `--session <id>` | execute the plan stored in that session instead of planning again |
 | `--hold-cutover` | ask the engine to pause before the swap, where it supports that |
 | `--free-disk <bytes>` | free space on the data volume, when it cannot be measured from here |
 | `--disk-total <bytes>` | volume size, so the 10 percent floor can be applied |
@@ -154,6 +159,17 @@ recommendation. The analyzer's own pick always stays visible.
 
 After execution the result is verified through `information_schema`. An engine
 that exits `0` without doing the work is reported as a failure.
+
+The schema is checked twice, because a plan is a statement about a shape and shapes
+move:
+
+- `apply --session` compares the schema against the fingerprint recorded in that
+  plan, and refuses if anyone altered the table in between;
+- every apply rereads the schema immediately before the DDL, which also catches a
+  change that happened during the preflight checks.
+
+Row counts and sizes are excluded from the fingerprint, so a busy table does not
+trip it.
 
 ---
 

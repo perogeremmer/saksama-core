@@ -97,10 +97,12 @@ type Session struct {
 	Approvals    []Approval        `json:"approvals,omitempty"`
 	Verification []VerifyRecord    `json:"verification,omitempty"`
 
-	LastSeq   int64  `json:"last_seq"`
-	Error     string `json:"error,omitempty"`
-	Actor     string `json:"actor,omitempty"`
-	CommandID string `json:"command_id,omitempty"`
+	// ResumedFrom records that this execution followed an earlier plan.
+	ResumedFrom string `json:"resumed_from,omitempty"`
+	LastSeq     int64  `json:"last_seq"`
+	Error       string `json:"error,omitempty"`
+	Actor       string `json:"actor,omitempty"`
+	CommandID   string `json:"command_id,omitempty"`
 }
 
 // Store is a directory of sessions.

@@ -1189,3 +1189,150 @@ func TestApplyProceedsWithOperatorSuppliedDisk(t *testing.T) {
 		t.Fatalf("state = %q", sess.State)
 	}
 }
+
+// --- fingerprint revalidation ----------------------------------------------
+
+// The plan is computed and then executed later, possibly by a different person.
+// If the schema moved in between, the ALTER was written for a table that no longer
+// exists in that shape, so it must be refused rather than guessed at.
+func TestApplyRefusesWhenSchemaChangedAfterPlanning(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+
+	// Plan first, against the current shape.
+	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
+	prep, err := runner.PlanOnly(context.Background(), req)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planned := prep.Plan.SchemaFingerprint
+	prep.Close()
+
+	// Someone else changes the table before this plan is executed.
+	mustExec(t, db, "ALTER TABLE `t` ADD COLUMN `surprise` int NULL")
+
+	// Executing the already-planned fingerptrint must be refused even though the
+	// engine itself would happily run.
+	current, err := introspect.NewCollector(db, schema, "t").Table(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analyzer.Fingerprint(current) == planned {
+		t.Fatal("the fingerprint did not notice a new column, so the check would be useless")
+	}
+}
+
+// The same table, replanned, must be accepted: the guard refuses a stale plan, not
+// the change.
+func TestApplyAcceptsAFreshPlanAfterSchemaChange(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"ALTER TABLE `t` ADD COLUMN `surprise` int NULL",
+	)
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
+	req.ForExecution = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+
+	sess, err := runner.Apply(context.Background(), req)
+	if err != nil {
+		t.Fatalf("apply: %v (session error: %s)", err, sess.Error)
+	}
+	if sess.State != state.StateDone {
+		t.Fatalf("state = %q", sess.State)
+	}
+}
+
+// ApplyFromSession is the plan, review, execute workflow: the stored plan must be
+// refused once the schema no longer matches it.
+func TestApplyFromSessionRefusesAStalePlan(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+
+	// Plan and keep it.
+	prep, err := runner.PlanOnly(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_a (a)"))
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	sessionID := prep.Session.ID
+	prep.Close()
+
+	// The table moves before anyone executes the plan.
+	mustExec(t, db, "ALTER TABLE `t` ADD COLUMN `surprise` int NULL")
+
+	req := applyRequest(schema, "t", "")
+	req.ForExecution = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+
+	sess, err := runner.ApplyFromSession(context.Background(), sessionID, req)
+	if err == nil {
+		t.Fatalf("expected the stale plan to be refused, got state %q", sess.State)
+	}
+	if !errors.Is(err, core.ErrBlocked) {
+		t.Fatalf("expected ErrBlocked, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "changed since session") {
+		t.Fatalf("the error should say what changed: %v", err)
+	}
+
+	// Nothing may have run.
+	if n := countRows(t, db,
+		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
+		schema); n != 0 {
+		t.Fatal("the index was created despite the refusal")
+	}
+}
+
+func TestApplyFromSessionRunsAFreshPlan(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `a` int NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+
+	prep, err := runner.PlanOnly(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_a (a)"))
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	sessionID := prep.Session.ID
+	prep.Close()
+
+	req := applyRequest(schema, "t", "")
+	req.ForExecution = true
+	req.FreeDisk = 200 << 30
+	req.DiskTotal = 500 << 30
+
+	sess, err := runner.ApplyFromSession(context.Background(), sessionID, req)
+	if err != nil {
+		t.Fatalf("apply from session: %v (session error: %s)", err, sess.Error)
+	}
+	if sess.State != state.StateDone {
+		t.Fatalf("state = %q", sess.State)
+	}
+	if sess.ResumedFrom != sessionID {
+		t.Fatalf("the execution should record the plan it followed, got %q", sess.ResumedFrom)
+	}
+	if n := countRows(t, db,
+		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
+		schema); n == 0 {
+		t.Fatal("the index was not created")
+	}
+}

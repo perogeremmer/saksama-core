@@ -233,6 +233,7 @@ type applyOpts struct {
 	allowArgvPassword bool
 	freeDisk          int64
 	diskTotal         int64
+	session           string
 }
 
 func cmdApply(args []string, stdout, stderr io.Writer) int {
@@ -251,6 +252,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.force, "force", false, "downgrade selected preflight aborts")
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
 	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
+	fs.StringVar(&o.session, "session", "", "execute the plan stored in this session instead of planning again")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
 	fs.StringVar(&o.confirm, "confirm", "", "must equal the host name when --production is set")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "build statements and approvals without executing")
@@ -262,8 +264,8 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	if o.table == "" || o.database == "" || strings.TrimSpace(o.alter) == "" {
-		fmt.Fprintln(stderr, "saksama apply: --database, --table, and --alter are required")
+	if o.session == "" && (o.table == "" || o.database == "" || strings.TrimSpace(o.alter) == "") {
+		fmt.Fprintln(stderr, "saksama apply: --database, --table, and --alter are required, or pass --session <id>")
 		return ExitUsage
 	}
 
@@ -327,7 +329,13 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		}, nil
 	}
 
-	sess, err := runner.Apply(context.Background(), req)
+	var sess *state.Session
+	if o.session != "" {
+		// A stored plan already names its engine; --engine still wins.
+		sess, err = runner.ApplyFromSession(context.Background(), o.session, req)
+	} else {
+		sess, err = runner.Apply(context.Background(), req)
+	}
 	if sess != nil {
 		if o.jsonOut {
 			enc := json.NewEncoder(stdout)

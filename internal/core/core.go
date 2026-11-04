@@ -47,6 +47,8 @@ type Request struct {
 	// ForExecution is set by `apply`. A plan tolerates an unmeasured disk; an
 	// execution does not.
 	ForExecution bool
+	// ResumedFrom names the session whose plan this execution follows.
+	ResumedFrom string
 
 	LockWaitTimeoutSeconds int
 	LongQueryThreshold     int64
@@ -224,6 +226,7 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		Warnings:          plan.Recommendation.Warnings,
 		Reasons:           plan.Recommendation.Reasons,
 		Actor:             req.Actor,
+		ResumedFrom:       req.ResumedFrom,
 	}
 	if raw, err := json.Marshal(plan); err == nil {
 		sess.Plan = raw
@@ -389,6 +392,18 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	sess.LastSeq = prep.emitter.Seq()
 	_ = r.Store.Save(sess)
 	r.emit(prep, events.TypePhaseStarted, map[string]any{"phase": "preflight"})
+
+	// The schema must still be the one that was planned and approved. Between the
+	// plan and this moment a deploy, another migration, or a colleague's ALTER can
+	// change it, and an ALTER written for the old shape is the wrong ALTER.
+	if err := r.revalidateSchema(ctx, prep, sess, req); err != nil {
+		sess.State = state.StateFailed
+		sess.Error = err.Error()
+		sess.LastSeq = prep.emitter.Seq()
+		_ = r.Store.Save(sess)
+		r.emit(prep, events.TypePhaseFailed, map[string]any{"phase": "preflight", "error": err.Error()})
+		return sess, err
+	}
 
 	if err := eng.Preflight(ctx); err != nil {
 		sess.State = state.StateFailed
@@ -622,4 +637,89 @@ func binaryPath(bins map[string]analyzer.EngineBinary, name string) string {
 		return ""
 	}
 	return b.Path
+}
+
+// revalidateSchema compares the schema now against the schema the plan was built
+// from, and refuses on any difference the fingerprint tracks: columns, indexes,
+// foreign keys, engine, row format, charset.
+//
+// Volatile facts (row counts, sizes) are deliberately excluded, so a growing table
+// does not trip this.
+func (r *Runner) revalidateSchema(ctx context.Context, prep *Prepared, sess *state.Session, req Request) error {
+	current, err := introspect.NewCollector(r.DB, req.Database, req.Table).Table(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot re-read the schema before executing: %w", err)
+	}
+
+	now := analyzer.Fingerprint(current)
+	if now == prep.Plan.SchemaFingerprint {
+		return nil
+	}
+
+	sess.SchemaFingerprint = now
+	return fmt.Errorf(
+		"the schema changed after this plan was made (planned %s, now %s); "+
+			"someone altered %s.%s in between, so re-plan before executing",
+		shortFingerprint(prep.Plan.SchemaFingerprint), shortFingerprint(now),
+		req.Database, req.Table)
+}
+
+func shortFingerprint(f string) string {
+	if len(f) > 19 {
+		return f[:19]
+	}
+	return f
+}
+
+// ApplyFromSession executes a plan that was produced and reviewed earlier.
+//
+// This is the workflow the tool claims to support: plan, read it, decide, execute.
+// The schema must still be the one that plan describes, otherwise the ALTER was
+// written for a table that has since changed.
+func (r *Runner) ApplyFromSession(ctx context.Context, sessionID string, req Request) (*state.Session, error) {
+	stored, err := r.Store.Load(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if stored.State.Terminal() {
+		return nil, fmt.Errorf("session %s already ended as %q", sessionID, stored.State)
+	}
+	if stored.Blockers > 0 {
+		return nil, fmt.Errorf("%w: session %s was planned with %d blocker(s)", ErrBlocked, sessionID, stored.Blockers)
+	}
+
+	// Fill what the caller did not repeat.
+	if req.Database == "" {
+		req.Database = stored.Database
+	}
+	if req.Table == "" {
+		req.Table = stored.Table
+	}
+	if strings.TrimSpace(req.Alter) == "" {
+		req.Alter = stored.Alter
+	}
+	if req.Production != stored.Production && !req.Production {
+		req.Production = stored.Production
+	}
+
+	// Compare the stored plan against the schema as it is now, before doing
+	// anything. A plan is a statement about a shape, and shapes move.
+	current, err := introspect.NewCollector(r.DB, req.Database, req.Table).Table(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the table before executing session %s: %w", sessionID, err)
+	}
+	if now := analyzer.Fingerprint(current); now != stored.SchemaFingerprint {
+		return nil, fmt.Errorf(
+			"%w: the schema of %s.%s changed since session %s was planned (planned %s, now %s); re-plan first",
+			ErrBlocked, req.Database, req.Table, sessionID,
+			shortFingerprint(stored.SchemaFingerprint), shortFingerprint(now))
+	}
+
+	if req.EngineHint == "" && stored.Engine != "" && stored.Engine != "none" {
+		req.EngineHint = analyzer.Engine(stored.Engine)
+		req.EngineHintSource = "recorded"
+	}
+	req.ResumedFrom = sessionID
+
+	return r.Apply(ctx, req)
 }
