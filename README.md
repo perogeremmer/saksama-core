@@ -502,8 +502,7 @@ is stale.
 
 ## Documentation
 
-- [`PRD.md`](PRD.md), requirements, personas, acceptance criteria, non-goals
-- [`DESIGN.md`](DESIGN.md), architecture, engine comparison, roadmap
+- [`ARCHITECTURE.md`](ARCHITECTURE.md), system shape, engine comparison, safety policy, roadmap
 - [`docs/CHECKS.md`](docs/CHECKS.md), every check: ID, severity, SQL source, MySQL error code
 - [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md), which MySQL and engine versions are verified, and how
 - [`SECURITY.md`](SECURITY.md), threat model and reporting policy
@@ -555,4 +554,4 @@ gh-ost may be embedded (MIT, keep its license). `pt-online-schema-change` is GPL
 
 ## Origin
 
-Built from a hand-written `migrate.sh` wrapper that did the FK dance by hand, and quietly dropped `ON DELETE CASCADE` while doing it. The audit of that script is in [`DESIGN.md` §14](DESIGN.md); every item in it became a rule in this tool.
+Built from a hand-written `migrate.sh` wrapper that did the FK dance by hand, and quietly dropped `ON DELETE CASCADE` while doing it. The audit of that script is in [`ARCHITECTURE.md` §14](ARCHITECTURE.md); every item in it became a rule in this tool.

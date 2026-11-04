@@ -33,7 +33,8 @@ type Capability struct {
 	Blocked bool   `json:"blocked"` // not allowed at all
 }
 
-// capabilityRules is the version-gated native DDL matrix (PRD FR-3 / CHECKS §F).
+// capabilityFor is the version-gated native DDL matrix, documented in
+// docs/CHECKS.md section F.
 //
 // Every rule is fail-closed: if a version is not explicitly covered, the result
 // is COPY/blocked rather than "probably fine".

@@ -140,7 +140,8 @@ type Verification struct {
 	Table string `json:"table,omitempty"`
 }
 
-// Plan is the complete analyzer output. It is the product API (PRD FR-5).
+// Plan is the complete analyzer output, and the product API: every frontend
+// reads it, and `saksama schema` publishes its JSON Schema.
 type Plan struct {
 	ContractVersion   int                `json:"contract_version"`
 	GeneratedAt       string             `json:"generated_at"`

@@ -2,7 +2,7 @@
 //
 // Output is intentionally ASCII-only: Saksama runs on servers with TERM=dumb,
 // locale C, and unpredictable SSH clients, so box-drawing characters are a
-// liability rather than a feature (PRD NFR-4).
+// liability rather than a feature.
 package render
 
 import (

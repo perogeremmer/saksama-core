@@ -57,4 +57,4 @@ ADD COLUMN failed at execution while the plan reported it as safe.
 
 - One concern per PR.
 - Include the output of `make test` and, if you touched execution, `make test-integration`.
-- Update `README.md` and `PRD.md` when something moves from "not built" to "done".
+- Update `README.md` and `ARCHITECTURE.md` when something moves from "not built" to "done".

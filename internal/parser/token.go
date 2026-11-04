@@ -2,7 +2,7 @@
 // statement splitter for the MySQL ALTER TABLE / CREATE TABLE subset that
 // Saksama supports.
 //
-// Design rules (see PRD FR-1):
+// Design rules:
 //   - Never guess. Anything the tokenizer cannot classify is an error.
 //   - Handles backtick identifiers, quoted strings, comments, and nested parens.
 //   - Multi-statement input is rejected, not split.

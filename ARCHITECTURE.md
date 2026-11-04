@@ -3,11 +3,11 @@
 > **Design doc.** Status: draft, evolving with the implementation.
 > **Date:** 2026-11-04
 > **Origin:** a hand-written `migrate.sh` wrapper around pt-osc, plus the research in this file.
-> **Product name:** **Saksama Core**, binary `saksama`. The naming rationale is in section 3 of the PRD.
+> **Product name:** **Saksama Core**, binary `saksama`. The naming rationale is in the README.
 
 ---
 
-## 0. Summary
+## 1. Summary
 
 An open source tool for backend developers and startup founders who:
 
@@ -33,7 +33,7 @@ An open source tool for backend developers and startup founders who:
 
 ---
 
-## 1. Context and target user
+## 2. Context and target user
 
 **Target:** a backend developer or startup founder who:
 
@@ -56,7 +56,7 @@ An open source tool for backend developers and startup founders who:
 
 ---
 
-## 2. Landscape and the gap
+## 3. Landscape and the gap
 
 | Tool | What it is | Where it falls short | What we add |
 |---|---|---|---|
@@ -71,9 +71,9 @@ An open source tool for backend developers and startup founders who:
 
 ---
 
-## 3. Engine comparison
+## 4. Engine comparison
 
-### 3.1 pt-osc versus gh-ost
+### 4.1 pt-osc versus gh-ost
 
 | Aspect | pt-osc | gh-ost |
 |---|---|---|
@@ -90,7 +90,7 @@ An open source tool for backend developers and startup founders who:
 | Resume | 3.x only, with specific first-run flags | no |
 | Extra requirement | Perl stack | binlog ROW, FULL row image |
 
-### 3.2 MySQL versions
+### 4.2 MySQL versions
 
 | MySQL | Native INSTANT | Native INPLACE | gh-ost | pt-osc |
 |---|---|---|---|---|
@@ -101,22 +101,25 @@ An open source tool for backend developers and startup founders who:
 | Aurora | yes | yes | yes with care | `foreign_key_checks=0` is unavailable |
 | RDS | yes | yes | needs `rds_superuser` | needs `rds_superuser` |
 
-### 3.3 The CLONE plugin is not a table engine
+### 4.3 The CLONE plugin is not a table engine
 
 `CLONE INSTANT FROM donor` performs a physical instance clone. It is fast, requires a donor instance, and is not a per-table operation. It is deliberately absent from the engine ladder.
 
 ---
 
-## 4. Architectural principles
+## 5. Architectural principles
 
-```
-analyzer (pure, testable)  ->  Plan {engine, why[], checks[], duration, engines[]}
-       |
-orchestrator (stateful)    ->  Session, phase machine, event emission
-       |
-engine adapters            ->  native | gh-ost | pt-osc   (same interface)
-       |
-frontends                  ->  CLI | TUI | Web | CI
+```mermaid
+flowchart TD
+    FE["Frontends<br/>CLI, TUI, Web, CI"]
+    ORCH["Orchestrator<br/>session, phase machine, events"]
+    ADAPT["Engine adapters<br/>native, gh-ost, pt-osc"]
+    AN["Analyzer<br/>pure, testable, no I/O"]
+
+    FE --> ORCH
+    ORCH --> ADAPT
+    ORCH --> AN
+    AN -->|"Plan {engine, why[], checks[], duration, engines[]}"| ORCH
 ```
 
 1. **The analyzer is a pure function.** No database handle, fully unit testable, usable offline as a CI gate, the single source of truth for every frontend.
@@ -127,59 +130,63 @@ frontends                  ->  CLI | TUI | Web | CI
 
 ---
 
-## 5. System shape
+## 6. System shape
 
+```mermaid
+flowchart TD
+    subgraph clients["Frontends"]
+        CLI["saksama CLI (thin)"]
+        TUI["TUI<br/>phase 4"]
+        WEB["Web control plane<br/>phase 6"]
+    end
+
+    subgraph core["internal/core"]
+        ORCH["orchestrator<br/>observe, analyze, approve, lock,<br/>preflight, execute, verify, record"]
+    end
+
+    subgraph support["Supporting packages"]
+        INTRO["internal/introspect<br/>information_schema, performance_schema,<br/>server settings, artifacts"]
+        AN["internal/analyzer<br/>pure functions, no database handle"]
+        ENG["internal/engine<br/>native, gh-ost, pt-osc"]
+        ST["internal/state<br/>session JSON, event log, table lock"]
+    end
+
+    CLI -->|"commands"| ORCH
+    TUI -->|"commands"| ORCH
+    WEB -->|"commands"| ORCH
+    ORCH -->|"JSONL events"| CLI
+    ORCH -->|"JSONL events"| TUI
+    ORCH -->|"JSONL events"| WEB
+
+    ORCH -->|"read schema and settings"| INTRO
+    ORCH -->|"decide"| AN
+    ORCH -->|"start and supervise"| ENG
+    ORCH -->|"persist and audit"| ST
+
+    INTRO -->|"model.Table, LiveState"| AN
+    AN -->|"Plan"| ORCH
+    ENG -->|"verify through"| INTRO
 ```
-+--------------+  +--------------+  +---------------+
-|  CLI (thin)  |  | TUI (later)  |  | Web (later)   |
-+------+-------+  +------+-------+  +------+--------+
-       +----------------+-----------------+
-                        |  JSONL events (contract v1)
-                +-------v---------+
-                |  internal/core  |
-                |  orchestrator   |
-                +---+---------+---+
-     +--------------+         +--------------+
-+----v--------+            +---v------------------+
-| introspect  |            | engine/native        |
-| + settings  |            | engine/copyeng       |
-+----+--------+            +---+------------------+
-     +-------------+-----------+
-             +-----v------+  +----------------+
-             |  analyzer  |  |  state store   |
-             |   (pure)   |  |  + event log   |
-             +------------+  +----------------+
-```
 
-**Mapping from `herdr-core`, which is already in the toolchain:**
+The event contract is one way for commands and the other way for events, which is
+what makes a TUI, a web UI, and a CI job equal citizens rather than three
+implementations of the same logic.
 
-| herdr-core | Saksama Core |
-|---|---|
-| terminal | migration session |
-| `hc run` | `saksama apply` |
-| `hc attach` | `saksama status`, later a TUI attach |
-| `hc events --json` | `saksama events` |
-| `hc schema` | `saksama schema`, `saksama compat --json` |
-| `hc server start/stop` | `saksama daemon` (phase 3) |
-| `hc --keep` | orphan recovery (phase 3) |
+## 7. The analyzer
 
----
-
-## 6. The analyzer
-
-### 6.1 Parse the ALTER into operations
+### 7.1 Parse the ALTER into operations
 
 A deliberately small tokenizer, not a full SQL parser. Supported: `ADD INDEX`, `ADD UNIQUE`, `ADD COLUMN`, `DROP COLUMN`, `MODIFY`, `CHANGE`, `RENAME COLUMN`, `RENAME TO`, `ADD` and `DROP PRIMARY KEY`, `CONVERT TO CHARACTER SET`, `ENGINE=`, `ALTER COLUMN SET/DROP DEFAULT`, plus `ALGORITHM=` and `LOCK=`. Anything else becomes `OpUnknown`, which is a blocker.
 
-### 6.2 Introspect the server
+### 7.2 Introspect the server
 
 Columns, indexes, primary key shape, foreign keys in both directions with their actions, triggers, table and index size, row format, partitioning, active queries, open transactions, metadata locks, replica state, grants, leftover artifacts, and the server settings listed in section 6.5.
 
-### 6.3 Check catalog
+### 7.3 Check catalog
 
 Every check has a stable ID, a severity, the MySQL error it prevents, and an actionable remediation. The catalogue lives in [`docs/CHECKS.md`](docs/CHECKS.md) and covers charset and collation, index shape, foreign keys, operational hazards, engine capabilities, engine selection, and server settings.
 
-### 6.4 Duration estimates
+### 7.4 Duration estimates
 
 A single number is a lie. Every estimate is a range, a confidence label, and the basis:
 
@@ -187,13 +194,13 @@ A single number is a lie. Every estimate is a range, a confidence label, and the
 - a bounded read-only benchmark (planned),
 - a heuristic fallback, labelled as such.
 
-### 6.5 The server-settings doctor
+### 7.5 The server-settings doctor
 
 `advise` reads the variables the engines depend on and shows them next to what is required: `log_bin`, `binlog_format`, `binlog_row_image`, `server_id`, `read_only`, `super_read_only`, `performance_schema`, `transaction_isolation`, `sql_require_primary_key`, `innodb_file_per_table`, `lower_case_table_names`, `gtid_mode`.
 
 Settings are a second axis, separate from suitability. An engine can suit a table perfectly and still refuse to start. Unknown is never treated as a pass.
 
-### 6.6 Routing
+### 7.6 Routing
 
 ```
 1. every operation has a verified native rule          -> native
@@ -207,7 +214,7 @@ A recorded operator choice overrides the automatic pick and is then judged on it
 
 ---
 
-## 7. Safety policy
+## 8. Safety policy
 
 | Situation | Default |
 |---|---|
@@ -224,13 +231,13 @@ A recorded operator choice overrides the automatic pick and is then judged on it
 
 ---
 
-## 8. Recovery
+## 9. Recovery
 
 Before a cutover, cancel and cleanup are safe: the production table has not been swapped. After a cutover, new writes live only in the new table, so the tool says "forward migration" rather than offering a rename that would discard writes. Metadata snapshots are kept for audit and for a recovery performed under a write freeze.
 
 ---
 
-## 9. TUI realities on a server
+## 10. TUI realities on a server
 
 | Reality | Implication |
 |---|---|
@@ -244,7 +251,7 @@ Before a cutover, cancel and cleanup are safe: the production table has not been
 
 ---
 
-## 10. Licensing and distribution
+## 11. Licensing and distribution
 
 | Component | License | Can it be bundled |
 |---|---|---|
@@ -256,13 +263,13 @@ Version detection is mandatory, because a 2019 pt-osc behaves differently from 3
 
 ---
 
-## 11. Language choice
+## 12. Language choice
 
-Go, for a static binary, `go:embed`, a mature MySQL driver, cheap concurrency for polling, fast iteration, and consistency with `herdr-core`. Rust would be right only if the author were already fluent, or if a future custom engine needed memory control without a GC. The bottleneck is MySQL.
+Go, for a static binary, `go:embed`, a mature MySQL driver, cheap concurrency for polling, and fast iteration. Rust would be right only if the author were already fluent, or if a future custom engine needed memory control without a GC. The bottleneck is MySQL.
 
 ---
 
-## 12. Roadmap
+## 13. Roadmap
 
 | Phase | Content | State |
 |---|---|---|
@@ -277,7 +284,7 @@ Go, for a static binary, `go:embed`, a mature MySQL driver, cheap concurrency fo
 
 ---
 
-## 13. Findings from auditing the original `migrate.sh`
+## 14. Findings from auditing the original `migrate.sh`
 
 The original script (816 lines) proved the need and also showed what goes wrong.
 
@@ -298,7 +305,7 @@ Everything in that list became a rule in this tool, and item 1 in particular is 
 
 ---
 
-## 14. Risks and non-goals
+## 15. Risks and non-goals
 
 **Risks:** a wrapper breaks when engine output changes (mitigated by never parsing it); scope creep into writing an engine; a support burden across MySQL versions (mitigated by the capability matrix and version detection); low usage frequency, since teams migrate a few times a month (mitigated by CI integration); one FK bug destroying the project's reputation (mitigated by tests against a real server).
 
@@ -306,7 +313,7 @@ Everything in that list became a rule in this tool, and item 1 in particular is 
 
 ---
 
-## 15. Glossary
+## 16. Glossary
 
 | Term | Meaning |
 |---|---|
