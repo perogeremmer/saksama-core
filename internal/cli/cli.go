@@ -80,7 +80,8 @@ Usage:
   saksama plan   --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
   saksama plan --live -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama advise --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
-  saksama advise --live -h <host> -d <db> -t <table> -a "<ALTER>"
+  saksama advise --live -h <host> -d <db>                   inspect every table
+  saksama advise --live -h <host> -d <db> -t <table> [-a "<ALTER>"]
   saksama engine list|set|show|clear   choose the engine yourself
   saksama apply  -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama status [<session>] [--json]
@@ -112,7 +113,9 @@ Engine options:
   saksama engine show -d <db> -t <table>         what apply would use now
 
 Advise options:
-  --live                   read the table from the server instead of a file
+  --live                   read from the server instead of a file
+  -t, --table <name>       one table; omit it to inspect the whole schema
+  -a, --alter <sql>        optional; without it the report covers table shape
   --no-probe               skip detecting gh-ost / pt-online-schema-change on PATH
   --json                   machine-readable engine matrix
 

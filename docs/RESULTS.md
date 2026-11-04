@@ -12,7 +12,7 @@
 
 ## 1. Ringkasan satu paragraf
 
-Fase 1 (analyzer murni) dan Fase 2 (introspection live, eksekusi native, session durable, event contract, redaction, approval) **selesai dan terverifikasi terhadap MySQL 8.0.46 sungguhan**, bukan hanya unit test. Total **183 test**: 160 unit test + 23 integration test terhadap server nyata. Integration test menemukan **6 bug asli** di kode produksi — termasuk satu bug yang membuat setiap apply pada tabel ber-FK melaporkan kegagalan palsu, dan satu yang membuat `ALGORITHM=INSTANT` selalu ditolak MySQL. Semua sudah diperbaiki dan diberi test regresi.
+Fase 1 (analyzer murni) dan Fase 2 (introspection live, eksekusi native, session durable, event contract, redaction, approval) **selesai dan terverifikasi terhadap MySQL 8.0.46 sungguhan**, bukan hanya unit test. Total **189 test**: 165 unit test + 24 integration test terhadap server nyata. Integration test menemukan **6 bug asli** di kode produksi — termasuk satu bug yang membuat setiap apply pada tabel ber-FK melaporkan kegagalan palsu, dan satu yang membuat `ALGORITHM=INSTANT` selalu ditolak MySQL. Semua sudah diperbaiki dan diberi test regresi.
 
 ---
 
@@ -24,7 +24,13 @@ saksama engine list
 saksama engine set gh-ost -d shop -t orders --note "alasan saya"
 saksama engine show -d shop -t orders
 
-# 0. Tanya dulu: tabel ini cocoknya gh-ost atau Percona Toolkit?
+# 0. Periksa sendiri: tanpa nama tabel, seluruh schema dipindai
+saksama advise --live -h db.prod -d shop
+
+#    atau satu tabel, tanpa perlu menyebut perubahan apa pun
+saksama advise --live -h db.prod -d shop -t orders
+
+#    atau satu tabel dengan perubahan konkret
 saksama advise --live -h db.prod -d shop -t orders -a "MODIFY COLUMN ..."
 
 # 1. Plan tanpa database (CI gate)

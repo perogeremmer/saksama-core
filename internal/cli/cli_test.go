@@ -506,14 +506,23 @@ func TestAdviseJSONIncludesEngineMatrix(t *testing.T) {
 	}
 }
 
-func TestAdviseRequiresAlter(t *testing.T) {
+// Without an ALTER, advise still reports engine fitness for the table shape.
+// The operator should not have to name a change just to ask about a table.
+func TestAdviseWithoutAlterReportsTableShape(t *testing.T) {
 	ddl := writeTemp(t, "orders.sql", testDDL)
-	code, _, errOut := run(t, "advise", "--ddl", ddl, "--mysql-version", "8.0.36")
-	if code != ExitUsage {
-		t.Fatalf("exit %d", code)
+
+	code, out, errOut := run(t, "advise", "--ddl", ddl, "--mysql-version", "8.0.36", "--no-probe")
+	if code != ExitOK {
+		t.Fatalf("exit %d, stderr %s", code, errOut)
 	}
-	if !strings.Contains(errOut, "--alter is required") {
-		t.Fatalf("stderr: %s", errOut)
+	if !strings.Contains(out, "ENGINE SUITABILITY for schema") {
+		t.Fatalf("expected the schema report:\n%s", out)
+	}
+	if !strings.Contains(out, "REBUILD WITH") {
+		t.Fatalf("expected the rebuild column:\n%s", out)
+	}
+	if !strings.Contains(out, "orders") {
+		t.Fatalf("expected the table row:\n%s", out)
 	}
 }
 
@@ -524,5 +533,28 @@ func TestAdviseRequiresASource(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "--ddl") {
 		t.Fatalf("stderr: %s", errOut)
+	}
+}
+
+// Recommending one table's engine must not require naming a change.
+func TestAdviseWithoutAlterDoesNotDemandAChange(t *testing.T) {
+	ddl := writeTemp(t, "orders.sql", testDDL)
+	code, out, errOut := run(t, "advise", "--ddl", ddl, "--mysql-version", "8.0.36", "--json", "--no-probe")
+	if code != ExitOK {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	tables, _ := payload["tables"].([]any)
+	if len(tables) != 1 {
+		t.Fatalf("expected one table row, got %v", payload["tables"])
+	}
+	row := tables[0].(map[string]any)
+	for _, key := range []string{"table", "primary_key", "gh_ost", "pt_osc", "rebuild_engine"} {
+		if _, ok := row[key]; !ok {
+			t.Errorf("missing %q in the table row", key)
+		}
 	}
 }

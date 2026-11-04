@@ -57,6 +57,42 @@ PT-OSC    SUITABLE  (ready)
   decide with          saksama engine set <native|gh-ost|pt-osc>
 ```
 
+### Ask about the whole database first
+
+You do not have to name a table. With just `-d`, Saksama inspects every table in the
+schema and tells you which engine suits each one, biggest first:
+
+```
+$ saksama advise --live -h db.prod -d shop
+
+ENGINE SUITABILITY for schema shop
+6 table(s), sorted by size. These are the engines for a rebuild;
+an index-only change needs no engine at all on MySQL 8.0.
+
+TABLE      ROWS    SIZE     PRIMARY KEY          FK   GH-OST  PT-OSC  REBUILD WITH
+orders     59.0M   20.5 GB  id bigint unsigned   1/0  no      yes     pt-osc
+m2m        180.0M  44.0 GB  composite(a_id,b_id) 0/0  no      yes     pt-osc
+sessions   2.1M    640 MB   uuid char(36)        0/0  yes     yes     gh-ost
+users      410.0k  88 MB    id bigint unsigned   0/0  yes     yes     gh-ost
+audit_log  180.0M  44.0 GB  (none)               0/0  no      no      none
+
+TABLES NO ENGINE CAN COPY
+  audit_log
+    - no primary key or unique key to chunk by
+
+NOTES
+  orders    pt-osc only: gh-ost cannot handle this table
+  m2m       pt-osc only: gh-ost cannot handle this table
+
+NEXT
+  record your decision per table:  saksama engine set gh-ost -d <db> -t <table>
+  inspect one table in detail:     saksama advise --live -d <db> -t <table>
+```
+
+`--alter` is optional throughout. Give it and the report covers that specific
+change; omit it and the report covers the table's shape, which is what decides
+the engine.
+
 Record the decision, then apply:
 
 ```
@@ -148,9 +184,11 @@ Three verdicts, and the difference matters:
 Use it offline too, and get JSON:
 
 ```bash
-saksama advise --ddl orders.sql --alter "..." --mysql-version 8.0.36
-saksama advise --live ... --json | jq '.engines[] | {engine, verdict, blocked_by}'
-saksama advise --live ... --no-probe     # skip detecting installed binaries
+saksama advise --live -d shop                    every table in the schema
+saksama advise --live -d shop -t orders          one table, no change needed
+saksama advise --ddl orders.sql --mysql-version 8.0.36
+saksama advise --live ... --json | jq '.tables[] | {table, rebuild_engine}'
+saksama advise --live ... --no-probe             skip detecting installed binaries
 ```
 
 The plan card carries a one-line summary so you never have to remember to ask:
@@ -374,13 +412,13 @@ Engine credentials: pt-osc reads a temporary `0600` option file, so its password
 ## Development
 
 ```bash
-make test               # 160 unit tests
+make test               # 165 unit tests
 make lint               # go vet + gofmt check
 make cover              # per-package coverage
 make demo               # two plan cards side by side, no database needed
 
 make integration-up     # disposable MySQL 8.0 in docker on :33306
-make test-integration   # 23 tests against a real server
+make test-integration   # 24 tests against a real server
 make integration-down
 ```
 

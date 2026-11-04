@@ -11,6 +11,7 @@ import (
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
 	"github.com/perogeremmer/saksama-core/internal/core"
+	"github.com/perogeremmer/saksama-core/internal/introspect"
 	"github.com/perogeremmer/saksama-core/internal/model"
 	"github.com/perogeremmer/saksama-core/internal/parser"
 	"github.com/perogeremmer/saksama-core/internal/probe"
@@ -72,10 +73,6 @@ func cmdAdvise(args []string, stdout, stderr io.Writer) int {
 	fs.Bool("no-color", false, "accepted for compatibility")
 
 	if err := fs.Parse(args); err != nil {
-		return ExitUsage
-	}
-	if strings.TrimSpace(o.alter) == "" {
-		fmt.Fprintln(stderr, "saksama advise: --alter is required")
 		return ExitUsage
 	}
 
@@ -161,11 +158,27 @@ func adviseOffline(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdo
 		tbl.IndexLength = o.indexBytes
 	}
 
-	alter, err := parser.ParseAlter("ALTER TABLE `" + strings.ReplaceAll(tbl.Name, "`", "``") + "` " + alterStatementBody(o.alter))
-	ops := alter.Ops
-	if err != nil {
-		ignored = append(ignored, "ALTER statement could not be parsed: "+err.Error())
-		ops = []model.Op{{Kind: model.OpUnknown, Raw: strings.TrimSpace(o.alter)}}
+	var ops []model.Op
+	if strings.TrimSpace(o.alter) != "" {
+		alter, err := parser.ParseAlter("ALTER TABLE `" + strings.ReplaceAll(tbl.Name, "`", "``") + "` " + alterStatementBody(o.alter))
+		ops = alter.Ops
+		if err != nil {
+			ignored = append(ignored, "ALTER statement could not be parsed: "+err.Error())
+			ops = []model.Op{{Kind: model.OpUnknown, Raw: strings.TrimSpace(o.alter)}}
+		}
+	} else {
+		rows := analyzer.AssessSchema([]model.Table{tbl}, srv, binaries)
+		if o.jsonOut {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"schema": tbl.Schema, "server": srv.Version, "tables": rows})
+			return ExitOK
+		}
+		if err := render.SchemaReport(stdout, tbl.Schema, rows); err != nil {
+			fmt.Fprintf(stderr, "saksama advise: %v\n", err)
+			return ExitInternal
+		}
+		return ExitOK
 	}
 
 	in := analyzer.Input{
@@ -207,9 +220,14 @@ func chosenLabel(c *state.EngineChoice) string {
 }
 
 func adviseLive(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdout, stderr io.Writer) int {
-	if o.table == "" || o.database == "" {
-		fmt.Fprintln(stderr, "saksama advise --live: --database and --table are required")
+	if o.database == "" {
+		fmt.Fprintln(stderr, "saksama advise --live: --database is required")
 		return ExitUsage
+	}
+	// No table name, or no ALTER: report table shape instead of demanding a change.
+	// The operator should not have to name one just to ask about the engine.
+	if o.table == "" || strings.TrimSpace(o.alter) == "" {
+		return adviseSchema(o, binaries, stdout, stderr)
 	}
 
 	conn, err := o.resolve()
@@ -280,6 +298,66 @@ func writeAdvise(o adviseOpts, plan analyzer.Plan, chosen string, stdout, stderr
 
 	if plan.Recommendation.Blockers > 0 {
 		return ExitBlocked
+	}
+	return ExitOK
+}
+
+// adviseSchema reads every table in the database and reports engine fitness.
+//
+// This is the mode people actually want first: they know the database, not yet
+// which table and which engine. Inspecting it for them is the point.
+func adviseSchema(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdout, stderr io.Writer) int {
+	conn, err := o.resolve()
+	if err != nil {
+		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
+		return ExitUsage
+	}
+	db, err := openDB(conn)
+	if err != nil {
+		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
+		return ExitInternal
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	collector := introspect.NewCollector(db, o.database, o.table)
+	srv, err := collector.Server(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
+		return ExitInternal
+	}
+	var tables []model.Table
+	if o.table != "" {
+		tbl, err := collector.Table(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama advise: %v\n", err)
+			return ExitInternal
+		}
+		tables = append(tables, tbl)
+	} else {
+		tables, err = collector.SchemaTables(ctx, false)
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama advise: %v\n", err)
+			return ExitInternal
+		}
+	}
+
+	rows := analyzer.AssessSchema(tables, srv, binaries)
+
+	if o.jsonOut {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
+			"schema": o.database,
+			"server": srv.Version,
+			"tables": rows,
+		})
+		return ExitOK
+	}
+
+	if err := render.SchemaReport(stdout, o.database, rows); err != nil {
+		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
+		return ExitInternal
 	}
 	return ExitOK
 }

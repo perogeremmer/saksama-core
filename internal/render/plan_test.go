@@ -228,3 +228,50 @@ func TestPlanCardSaysNotExecutableInsteadOfReady(t *testing.T) {
 		t.Fatalf("expected the reason:\n%s", out)
 	}
 }
+
+func TestSchemaReportExplainsBlockedTables(t *testing.T) {
+	rows := []analyzer.TableAssessment{
+		{Table: "orders", Rows: 59_000_000, SizeBytes: 20 << 30, PrimaryKey: "id bigint",
+			FKOut: 2, GhOst: analyzer.VerdictUnsuitable, PtOSC: analyzer.VerdictSuitable,
+			RebuildEngine: analyzer.EnginePtOSC, Notes: []string{"pt-osc only: gh-ost cannot handle this table"}},
+		{Table: "audit_log", PrimaryKey: "(none)",
+			GhOst: analyzer.VerdictUnsuitable, PtOSC: analyzer.VerdictUnsuitable,
+			RebuildEngine: analyzer.EngineNone,
+			Blockers:      []string{"no primary key or unique key to chunk by"}},
+	}
+
+	var buf bytes.Buffer
+	if err := SchemaReport(&buf, "shop", rows); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"ENGINE SUITABILITY for schema shop",
+		"TABLE", "PRIMARY KEY", "GH-OST", "PT-OSC", "REBUILD WITH",
+		"pt-osc", "none",
+		"TABLES NO ENGINE CAN COPY",
+		"no primary key or unique key to chunk by",
+		"NOTES",
+		"saksama engine set",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	for _, r := range out {
+		if r > 127 {
+			t.Fatalf("non-ASCII rune %q in schema report", r)
+		}
+	}
+}
+
+func TestSchemaReportHandlesEmptySchema(t *testing.T) {
+	var buf bytes.Buffer
+	if err := SchemaReport(&buf, "empty", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "no tables found") {
+		t.Fatalf("unexpected output: %s", buf.String())
+	}
+}

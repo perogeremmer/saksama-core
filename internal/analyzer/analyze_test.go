@@ -819,3 +819,113 @@ func TestAdviseUUIDPrimaryKeyWarnsInCons(t *testing.T) {
 		t.Fatalf("expected a UUID chunking caveat in gh-ost cons: %v", gh.Cons)
 	}
 }
+
+// --- schema-wide assessment (advise without a table name) --------------------
+
+func fleetTable(name string, mut func(*model.Table)) model.Table {
+	t := model.Table{
+		Schema: "shop", Name: name, Engine: "InnoDB", RowFormat: "DYNAMIC",
+		Charset: "utf8mb4", Collation: "utf8mb4_0900_ai_ci",
+		Rows: 1000, DataLength: 1 << 20,
+		Columns: []model.Column{
+			{Name: "id", DataType: "bigint", Type: "bigint unsigned", Extra: "auto_increment"},
+			{Name: "v", DataType: "int", Type: "int"},
+		},
+		Indexes: []model.Index{{Name: "PRIMARY", Primary: true, Unique: true,
+			Parts: []model.IndexPart{{Column: "id"}}}},
+	}
+	if mut != nil {
+		mut(&t)
+	}
+	return t
+}
+
+func TestAssessSchemaPicksTheEnginePerTableShape(t *testing.T) {
+	tables := []model.Table{
+		fleetTable("plain", nil),
+		fleetTable("with_fk", func(t *model.Table) {
+			t.ForeignKeys = []model.ForeignKey{{
+				Name: "fk_a", Columns: []string{"v"}, RefTable: "other", RefColumns: []string{"id"},
+				OnDelete: model.ActionCascade,
+			}}
+		}),
+		fleetTable("composite", func(t *model.Table) {
+			t.Indexes[0].Parts = append(t.Indexes[0].Parts, model.IndexPart{Column: "v"})
+		}),
+		fleetTable("no_key", func(t *model.Table) {
+			t.Indexes = nil
+		}),
+		fleetTable("myisam", func(t *model.Table) {
+			t.Engine = "MyISAM"
+		}),
+	}
+
+	got := AssessSchema(tables, model.Server{Version: "8.0.36", Vendor: "mysql"},
+		map[string]EngineBinary{
+			"gh-ost":                  {Name: "gh-ost", Available: true, Version: "1.1.7"},
+			"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Version: "3.5.1"},
+		})
+
+	byName := map[string]TableAssessment{}
+	for _, r := range got {
+		byName[r.Table] = r
+	}
+
+	if e := byName["plain"].RebuildEngine; e != EngineGhOst {
+		t.Errorf("plain: got %q, want gh-ost", e)
+	}
+	if e := byName["with_fk"].RebuildEngine; e != EnginePtOSC {
+		t.Errorf("with_fk: got %q, want pt-osc", e)
+	}
+	if e := byName["composite"].RebuildEngine; e != EnginePtOSC {
+		t.Errorf("composite: got %q, want pt-osc", e)
+	}
+	if e := byName["no_key"].RebuildEngine; e != EngineNone {
+		t.Errorf("no_key: got %q, want none", e)
+	}
+	if len(byName["no_key"].Blockers) == 0 {
+		t.Error("no_key must explain why no engine fits")
+	}
+	if e := byName["myisam"].RebuildEngine; e != EngineNone {
+		t.Errorf("myisam: got %q, want none", e)
+	}
+
+	// Biggest table first, so the expensive decisions are on top.
+	for i := 1; i < len(got); i++ {
+		if got[i-1].SizeBytes < got[i].SizeBytes {
+			t.Fatalf("not sorted by size: %+v", got)
+		}
+	}
+}
+
+func TestAssessSchemaDescribesPrimaryKey(t *testing.T) {
+	tables := []model.Table{
+		fleetTable("simple", nil),
+		fleetTable("composite", func(t *model.Table) {
+			t.Indexes[0].Parts = append(t.Indexes[0].Parts, model.IndexPart{Column: "v"})
+		}),
+		fleetTable("none", func(t *model.Table) { t.Indexes = nil }),
+		fleetTable("uuid", func(t *model.Table) {
+			t.Columns = []model.Column{{Name: "uuid", DataType: "char", Type: "char(36)", Charset: "utf8mb4"}}
+			t.Indexes[0].Parts = []model.IndexPart{{Column: "uuid"}}
+		}),
+	}
+	got := AssessSchema(tables, model.Server{Version: "8.0.36"}, nil)
+	byName := map[string]TableAssessment{}
+	for _, r := range got {
+		byName[r.Table] = r
+	}
+
+	if !strings.Contains(byName["simple"].PrimaryKey, "id bigint") {
+		t.Errorf("simple PK = %q", byName["simple"].PrimaryKey)
+	}
+	if !strings.HasPrefix(byName["composite"].PrimaryKey, "composite(") {
+		t.Errorf("composite PK = %q", byName["composite"].PrimaryKey)
+	}
+	if byName["none"].PrimaryKey != "(none)" {
+		t.Errorf("none PK = %q", byName["none"].PrimaryKey)
+	}
+	if !strings.Contains(byName["uuid"].PrimaryKey, "char(36)") {
+		t.Errorf("uuid PK = %q", byName["uuid"].PrimaryKey)
+	}
+}

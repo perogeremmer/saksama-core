@@ -36,6 +36,7 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/cred"
 	"github.com/perogeremmer/saksama-core/internal/introspect"
+	"github.com/perogeremmer/saksama-core/internal/model"
 	"github.com/perogeremmer/saksama-core/internal/state"
 )
 
@@ -947,5 +948,76 @@ func TestApplyRunsTheChosenCopyEngineAndStillVerifies(t *testing.T) {
 		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND COLUMN_NAME = 'note'",
 		schema); n != 0 {
 		t.Fatal("the column should not exist")
+	}
+}
+
+// --- schema-wide scan -------------------------------------------------------
+
+func TestIntrospectSchemaTablesReadsEveryTable(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"CREATE TABLE `spots` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"CREATE TABLE `orders` ("+
+			"`id` bigint unsigned NOT NULL AUTO_INCREMENT,"+
+			"`spot_id` bigint unsigned NOT NULL,"+
+			"`status` varchar(32) NOT NULL,"+
+			"PRIMARY KEY (`id`), KEY `ix_spot` (`spot_id`),"+
+			"CONSTRAINT `fk_o_s` FOREIGN KEY (`spot_id`) REFERENCES `spots` (`id`) ON DELETE CASCADE"+
+			") ENGINE=InnoDB",
+		"CREATE TABLE `m2m` (`a` bigint unsigned NOT NULL, `b` bigint unsigned NOT NULL, PRIMARY KEY (`a`,`b`)) ENGINE=InnoDB",
+		"CREATE TABLE `audit` (`msg` text) ENGINE=InnoDB",
+		"CREATE VIEW `v_orders` AS SELECT id FROM `orders`",
+	)
+
+	c := introspect.NewCollector(db, schema, "")
+	tables, err := c.SchemaTables(context.Background(), false)
+	if err != nil {
+		t.Fatalf("schema tables: %v", err)
+	}
+
+	byName := map[string]model.Table{}
+	for _, tbl := range tables {
+		byName[tbl.Name] = tbl
+	}
+	if _, ok := byName["v_orders"]; ok {
+		t.Error("views must not be included by default")
+	}
+	if len(byName) != 5 {
+		t.Fatalf("got %d tables, want 5: %v", len(byName), byName)
+	}
+
+	// The FK must be visible from both sides, including its action.
+	if fk := byName["orders"].ForeignKeys; len(fk) != 1 || fk[0].OnDelete != "CASCADE" {
+		t.Fatalf("orders FK = %+v", fk)
+	}
+	if ref := byName["spots"].ReferencedBy; len(ref) != 1 || ref[0].RefTable != "orders" {
+		t.Fatalf("spots incoming = %+v", ref)
+	}
+
+	// Composite key must be visible as two parts.
+	pk, ok := byName["m2m"].PrimaryKey()
+	if !ok || len(pk.Parts) != 2 {
+		t.Fatalf("m2m PK = %+v", pk)
+	}
+	// No-key table must report as such.
+	if _, ok := byName["audit"].PrimaryKey(); ok {
+		t.Error("audit must have no primary key")
+	}
+
+	// And the assessment must turn that into a usable recommendation.
+	rows := analyzer.AssessSchema(tables, model.Server{Version: "8.0.46", Vendor: "mysql"}, nil)
+	byTable := map[string]analyzer.TableAssessment{}
+	for _, r := range rows {
+		byTable[r.Table] = r
+	}
+	if byTable["orders"].RebuildEngine != analyzer.EnginePtOSC {
+		t.Errorf("orders rebuild engine = %q, want pt-osc", byTable["orders"].RebuildEngine)
+	}
+	if byTable["users"].RebuildEngine != analyzer.EngineGhOst {
+		t.Errorf("users rebuild engine = %q, want gh-ost", byTable["users"].RebuildEngine)
+	}
+	if byTable["audit"].RebuildEngine != analyzer.EngineNone {
+		t.Errorf("audit rebuild engine = %q, want none", byTable["audit"].RebuildEngine)
 	}
 }

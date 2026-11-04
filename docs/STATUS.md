@@ -9,7 +9,7 @@
 
 ```
 saksama plan    [--live]   produce and record a plan
-saksama advise  [--live]   engine suitability: native vs gh-ost vs pt-osc
+saksama advise  [--live]   engine suitability for one table, or the whole schema
 saksama engine  list|set|show|clear    choose the engine yourself
 saksama apply   ...        execute a native migration
 saksama status  [id]       list or inspect sessions
@@ -34,14 +34,14 @@ make build
 |---|---|---|
 | `internal/model` | neutral schema + ALTER model, version parsing | via parser/analyzer |
 | `internal/parser` | fail-closed tokenizer, `ALTER TABLE` parser, `SHOW CREATE TABLE` parser | 19 tests |
-| `internal/analyzer` | capability rules, checks, engine routing, duration/disk estimates, fingerprint, engine suitability matrix | 44 tests |
-| `internal/render` | ASCII-only plan card + engine matrix report | 8 tests |
+| `internal/analyzer` | capability rules, checks, engine routing, duration/disk estimates, fingerprint, engine suitability matrix, schema-wide assessment | 46 tests |
+| `internal/render` | ASCII-only plan card, engine matrix, schema fitness table | 10 tests |
 | `internal/events` | event envelope, redaction, per-second progress limiting | 9 tests |
 | `internal/probe` | detects installed gh-ost / pt-osc / perl and their versions | 2 tests |
 | `internal/engine/copyeng` | gh-ost and pt-osc adapters: argv, subprocess, verification | 12 tests |
-| `internal/cli` | `plan`, `plan --live`, `advise`, `engine`, `apply`, `status`, `events`, `export`, `cleanup`, `schema`, `version` | 26 tests |
+| `internal/cli` | `plan`, `plan --live`, `advise`, `engine`, `apply`, `status`, `events`, `export`, `cleanup`, `schema`, `version` | 27 tests |
 
-Total: **160 unit tests** + **23 integration tests** against real MySQL 8.0.46, all green.
+Total: **165 unit tests** + **24 integration tests** against real MySQL 8.0.46, all green.
 
 ### ALTER operations understood
 

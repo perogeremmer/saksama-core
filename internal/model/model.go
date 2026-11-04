@@ -215,6 +215,14 @@ func (t Table) PrimaryKey() (Index, bool) {
 	return Index{}, false
 }
 
+// PrimaryKeyParts returns the number of columns in the primary key, or 0.
+func (t Table) PrimaryKeyParts() int {
+	if pk, ok := t.PrimaryKey(); ok {
+		return len(pk.Parts)
+	}
+	return 0
+}
+
 // HasUniqueKey reports whether the table has a primary or unique index.
 func (t Table) HasUniqueKey() bool {
 	for _, ix := range t.Indexes {
