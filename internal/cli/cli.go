@@ -40,6 +40,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return cmdPlanLive(removeFlag(args[1:], "--live"), stdout, stderr)
 		}
 		return cmdPlan(args[1:], stdout, stderr)
+	case "advise":
+		return cmdAdvise(args[1:], stdout, stderr)
 	case "apply":
 		return cmdApply(args[1:], stdout, stderr)
 	case "status":
@@ -75,6 +77,8 @@ func usage(w io.Writer) {
 Usage:
   saksama plan   --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
   saksama plan --live -h <host> -d <db> -t <table> -a "<ALTER>" [options]
+  saksama advise --ddl <file|-> --alter "<ALTER>" --mysql-version <X.Y.Z> [options]
+  saksama advise --live -h <host> -d <db> -t <table> -a "<ALTER>"
   saksama apply  -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama status [<session>] [--json]
   saksama events <session>
@@ -98,6 +102,11 @@ Connection options (plan --live, apply):
   --ask-pass               prompt for the password (never pass it in argv)
   --no-defaults            ignore ~/.my.cnf
   --tls <mode>             preferred|true|false|skip-verify
+
+Advise options:
+  --live                   read the table from the server instead of a file
+  --no-probe               skip detecting gh-ost / pt-online-schema-change on PATH
+  --json                   machine-readable engine matrix
 
 Apply options:
   --production             require --confirm <host> before any mutation

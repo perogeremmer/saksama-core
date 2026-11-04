@@ -225,6 +225,9 @@ func (t Table) HasUniqueKey() bool {
 	return false
 }
 
+// TriggersAny reports whether the table already has triggers of its own.
+func (t Table) TriggersAny() bool { return len(t.Triggers) > 0 }
+
 // AllForeignKeys returns outgoing and incoming FKs.
 func (t Table) AllForeignKeys() []ForeignKey {
 	out := make([]ForeignKey, 0, len(t.ForeignKeys)+len(t.ReferencedBy))

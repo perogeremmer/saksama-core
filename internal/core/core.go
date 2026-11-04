@@ -53,6 +53,8 @@ type Request struct {
 	EventSink io.Writer
 	// Actor records who ran this, for the audit trail.
 	Actor string
+	// Binaries are the engine executables found locally, for the engine matrix.
+	Binaries map[string]analyzer.EngineBinary
 }
 
 // ApprovalRequest is what the user is asked to approve.
@@ -156,6 +158,7 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		Ignored:      ignored,
 		EngineHint:   req.EngineHint,
 		Live:         liveStateFrom(snap, duplicates),
+		Binaries:     req.Binaries,
 	}
 
 	plan := analyzer.Analyze(input)

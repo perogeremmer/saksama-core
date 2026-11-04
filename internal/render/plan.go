@@ -30,6 +30,9 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 		label("TABLE", tableLine(p))
 	}
 	label("FINGERPRINT", p.SchemaFingerprint)
+	if line := enginesLine(p); line != "" {
+		label("ENGINES", line)
+	}
 
 	b.WriteString("\nWHY\n")
 	if len(p.Recommendation.Reasons) == 0 {
@@ -102,9 +105,15 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 		fmt.Fprintf(&b, "FALLBACKS  %s (manual override only)\n", strings.Join(fb, ", "))
 	}
 	fmt.Fprintf(&b, "BLOCKERS   %d\n", p.Recommendation.Blockers)
-	if p.Recommendation.Blockers > 0 {
+	switch {
+	case p.Recommendation.Blockers > 0:
 		fmt.Fprintf(&b, "RESULT     refused\n")
-	} else {
+	case !p.Recommendation.Executable:
+		fmt.Fprintf(&b, "RESULT     fits, but not executable in this build\n")
+		fmt.Fprintf(&b, "REASON     %s\n", p.Recommendation.ExecutableReason)
+	case p.Recommendation.Engine == analyzer.EngineNone:
+		fmt.Fprintf(&b, "RESULT     no execution path selected\n")
+	default:
 		fmt.Fprintf(&b, "RESULT     ready (nothing has been changed)\n")
 	}
 
@@ -136,6 +145,26 @@ func durationLine(d analyzer.DurationEstimate) string {
 		return "n/a"
 	}
 	return fmt.Sprintf("%s - %s | confidence %s", humanDuration(d.FromSeconds), humanDuration(d.ToSeconds), d.Confidence)
+}
+
+// enginesLine is the one-line summary of the engine matrix. The full breakdown
+// lives in `saksama advise`.
+func enginesLine(p analyzer.Plan) string {
+	if len(p.Engines) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, a := range p.Engines {
+		switch a.Verdict {
+		case analyzer.VerdictSuitable:
+			parts = append(parts, fmt.Sprintf("%s ok", a.Engine))
+		case analyzer.VerdictBlocked:
+			parts = append(parts, fmt.Sprintf("%s blocked", a.Engine))
+		default:
+			parts = append(parts, fmt.Sprintf("%s fits/not-built", a.Engine))
+		}
+	}
+	return strings.Join(parts, " | ") + "   (see: saksama advise)"
 }
 
 func targetLine(p analyzer.Plan) string {

@@ -398,3 +398,96 @@ func TestCleanupRefusesToGuessOwnership(t *testing.T) {
 		t.Fatalf("cleanup must state that it does not drop by name pattern: %s", out)
 	}
 }
+
+// --- advise -----------------------------------------------------------------
+
+func TestAdviseOfflineShowsAllThreeEngines(t *testing.T) {
+	ddl := writeTemp(t, "orders.sql", testDDLWithFK)
+
+	code, out, errOut := run(t, "advise",
+		"--ddl", ddl,
+		"--alter", "MODIFY COLUMN status varchar(64) NOT NULL",
+		"--mysql-version", "8.0.36",
+		"--no-probe")
+	if code != ExitBlocked {
+		t.Fatalf("exit %d, want %d (blocked)\nstderr: %s", code, ExitBlocked, errOut)
+	}
+	for _, want := range []string{"ENGINE SUITABILITY", "NATIVE", "GH-OST", "PT-OSC", "VERDICT"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in advise output:\n%s", want, out)
+		}
+	}
+	// The whole point: on an FK table, gh-ost must be the one ruled out.
+	if !strings.Contains(out, "no foreign keys in or out") {
+		t.Fatalf("expected the foreign-key requirement to appear:\n%s", out)
+	}
+}
+
+func TestAdviseNativeSuitableExitsZero(t *testing.T) {
+	ddl := writeTemp(t, "orders.sql", testDDL)
+
+	code, out, _ := run(t, "advise",
+		"--ddl", ddl,
+		"--alter", "ADD INDEX ix_created (created_at)",
+		"--mysql-version", "8.0.36",
+		"--no-probe")
+	if code != ExitOK {
+		t.Fatalf("exit %d, want 0:\n%s", code, out)
+	}
+	if !strings.Contains(out, "recommended: native (executable now)") {
+		t.Fatalf("unexpected verdict:\n%s", out)
+	}
+}
+
+func TestAdviseJSONIncludesEngineMatrix(t *testing.T) {
+	ddl := writeTemp(t, "orders.sql", testDDL)
+
+	code, out, errOut := run(t, "advise",
+		"--ddl", ddl,
+		"--alter", "MODIFY COLUMN status varchar(64) NOT NULL",
+		"--mysql-version", "8.0.36",
+		"--no-probe",
+		"--json")
+	if code != ExitOK {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("advise --json is not JSON: %v\n%s", err, out)
+	}
+	engines, ok := payload["engines"].([]any)
+	if !ok || len(engines) != 3 {
+		t.Fatalf("expected 3 engine assessments, got %v", payload["engines"])
+	}
+	if payload["recommended"] != "gh-ost" {
+		t.Fatalf("recommended = %v", payload["recommended"])
+	}
+
+	// The recommendation must admit it cannot run here.
+	rec, _ := payload["recommendation"].(map[string]any)
+	if rec["executable"] != false {
+		t.Fatalf("this build must not claim gh-ost is executable: %v", rec["executable"])
+	}
+}
+
+func TestAdviseRequiresAlter(t *testing.T) {
+	ddl := writeTemp(t, "orders.sql", testDDL)
+	code, _, errOut := run(t, "advise", "--ddl", ddl, "--mysql-version", "8.0.36")
+	if code != ExitUsage {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(errOut, "--alter is required") {
+		t.Fatalf("stderr: %s", errOut)
+	}
+}
+
+func TestAdviseRequiresASource(t *testing.T) {
+	code, _, errOut := run(t, "advise", "--alter", "ADD INDEX ix (a)")
+	if code != ExitUsage {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(errOut, "--ddl") {
+		t.Fatalf("stderr: %s", errOut)
+	}
+}

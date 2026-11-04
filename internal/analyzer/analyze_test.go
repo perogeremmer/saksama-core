@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/perogeremmer/saksama-core/internal/model"
@@ -543,5 +544,200 @@ func TestUUIDPrimaryKeyWarns(t *testing.T) {
 	// just less evenly.
 	if p.Recommendation.Engine != EngineGhOst {
 		t.Fatalf("got %q, want gh-ost", p.Recommendation.Engine)
+	}
+}
+
+// --- engine matrix ("is this a gh-ost table or a pt-osc table?") -------------
+
+func assessmentFor(p Plan, e Engine) (EngineAssessment, bool) {
+	for _, a := range p.Engines {
+		if a.Engine == e {
+			return a, true
+		}
+	}
+	return EngineAssessment{}, false
+}
+
+func TestAdviseNativeSuitableForAddIndex(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix_created (created_at)")
+
+	native, ok := assessmentFor(p, EngineNative)
+	if !ok {
+		t.Fatal("native assessment missing")
+	}
+	if native.Verdict != VerdictSuitable {
+		t.Fatalf("native verdict = %q (%v)", native.Verdict, native.BlockedBy)
+	}
+	if !native.Executable {
+		t.Fatal("native must be executable in this build")
+	}
+	if !p.Recommendation.Executable {
+		t.Fatal("recommendation must be executable")
+	}
+}
+
+func TestAdviseGhOstBlockedByForeignKeys(t *testing.T) {
+	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
+
+	gh, ok := assessmentFor(p, EngineGhOst)
+	if !ok {
+		t.Fatal("gh-ost assessment missing")
+	}
+	if gh.Verdict != VerdictBlocked {
+		t.Fatalf("gh-ost verdict = %q", gh.Verdict)
+	}
+	found := false
+	for _, b := range gh.BlockedBy {
+		if b == "no foreign keys in or out" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the foreign key requirement to be the blocker, got %v", gh.BlockedBy)
+	}
+
+	// pt-osc handles foreign keys, so it must NOT be blocked by them.
+	pt, ok := assessmentFor(p, EnginePtOSC)
+	if !ok {
+		t.Fatal("pt-osc assessment missing")
+	}
+	for _, b := range pt.BlockedBy {
+		if b == "no foreign keys in or out" {
+			t.Fatal("pt-osc should not be blocked by foreign keys")
+		}
+	}
+}
+
+func TestAdviseGhOstFitsWithoutForeignKeys(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", func(in *Input) {
+		in.Binaries = map[string]EngineBinary{
+			"gh-ost": {Name: "gh-ost", Available: true, Path: "/usr/local/bin/gh-ost", Version: "1.1.6"},
+		}
+	})
+
+	gh, _ := assessmentFor(p, EngineGhOst)
+	if gh.Verdict != VerdictNotExecutable {
+		t.Fatalf("gh-ost verdict = %q, want not_executable (fits, adapter missing): %v", gh.Verdict, gh.BlockedBy)
+	}
+	if len(gh.BlockedBy) != 0 {
+		t.Fatalf("gh-ost should have no blockers here: %v", gh.BlockedBy)
+	}
+
+	// The recommendation must not claim to be executable.
+	if p.Recommendation.Engine != EngineGhOst {
+		t.Fatalf("recommended = %q", p.Recommendation.Engine)
+	}
+	if p.Recommendation.Executable {
+		t.Fatal("this build must not claim it can run gh-ost")
+	}
+	if !strings.Contains(p.Recommendation.ExecutableReason, "not implemented") {
+		t.Fatalf("reason = %q", p.Recommendation.ExecutableReason)
+	}
+}
+
+func TestAdviseGhOstBlockedWhenBinaryMissing(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", func(in *Input) {
+		in.Binaries = map[string]EngineBinary{
+			"gh-ost": {Name: "gh-ost", Available: false, Error: "not found on PATH"},
+		}
+	})
+	gh, _ := assessmentFor(p, EngineGhOst)
+	if gh.Verdict != VerdictBlocked {
+		t.Fatalf("verdict = %q, want blocked", gh.Verdict)
+	}
+	var hasBinaryBlock bool
+	for _, b := range gh.BlockedBy {
+		if b == "gh-ost binary installed" {
+			hasBinaryBlock = true
+		}
+	}
+	if !hasBinaryBlock {
+		t.Fatalf("expected the binary requirement: %v", gh.BlockedBy)
+	}
+}
+
+func TestAdviseCompositePrimaryKeyFavoursPtOSC(t *testing.T) {
+	tbl := baseTable()
+	tbl.Indexes[0] = model.Index{Name: "PRIMARY", Primary: true, Unique: true,
+		Parts: []model.IndexPart{{Column: "id"}, {Column: "spot_id"}}}
+
+	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
+
+	gh, _ := assessmentFor(p, EngineGhOst)
+	if gh.Verdict != VerdictBlocked {
+		t.Fatalf("gh-ost verdict = %q, want blocked", gh.Verdict)
+	}
+	pt, _ := assessmentFor(p, EnginePtOSC)
+	if len(pt.BlockedBy) != 0 {
+		t.Fatalf("pt-osc should fit a composite key, blocked by %v", pt.BlockedBy)
+	}
+	// And it must say why pt-osc is the better fit.
+	var mentionsComposite bool
+	for _, n := range pt.Notes {
+		if strings.Contains(n, "composite primary key") {
+			mentionsComposite = true
+		}
+	}
+	if !mentionsComposite {
+		t.Fatalf("expected a note about composite keys: %v", pt.Notes)
+	}
+}
+
+func TestAdvisePtOSCBlockedWithoutKey(t *testing.T) {
+	tbl := baseTable()
+	tbl.Indexes = nil
+
+	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
+	pt, _ := assessmentFor(p, EnginePtOSC)
+	if pt.Verdict != VerdictBlocked {
+		t.Fatalf("pt-osc verdict = %q, want blocked", pt.Verdict)
+	}
+}
+
+func TestAdviseNativeBlockedWhenFKColumnTouched(t *testing.T) {
+	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN spot_id bigint unsigned NOT NULL")
+	native, _ := assessmentFor(p, EngineNative)
+	if native.Verdict != VerdictBlocked {
+		t.Fatalf("native verdict = %q", native.Verdict)
+	}
+	var hasFkBlock bool
+	for _, b := range native.BlockedBy {
+		if b == "no foreign-key column touched" {
+			hasFkBlock = true
+		}
+	}
+	if !hasFkBlock {
+		t.Fatalf("expected the FK-column requirement: %v", native.BlockedBy)
+	}
+}
+
+func TestAdvisePartitionedTableBlocksGhOst(t *testing.T) {
+	tbl := baseTable()
+	tbl.Partitioned = true
+	p := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
+	gh, _ := assessmentFor(p, EngineGhOst)
+	var blocked bool
+	for _, b := range gh.BlockedBy {
+		if b == "table is not partitioned" {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatalf("partitioned table must block gh-ost: %v", gh.BlockedBy)
+	}
+}
+
+func TestAdviseEveryEngineIsAssessed(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix_created (created_at)")
+	if len(p.Engines) != 3 {
+		t.Fatalf("got %d assessments, want 3", len(p.Engines))
+	}
+	for _, a := range p.Engines {
+		if a.Summary == "" {
+			t.Errorf("%s has no summary", a.Engine)
+		}
+		if len(a.Requirements) == 0 {
+			t.Errorf("%s has no requirements", a.Engine)
+		}
 	}
 }

@@ -37,6 +37,75 @@ The copy engines already exist and they are good. What is missing is the layer a
 
 Saksama Core is **not** a new copy engine and **not** a thin gh-ost wrapper. It owns the decision layer; engines stay interchangeable workers.
 
+## Which tool fits? `saksama advise`
+
+The most common question is not "run this" — it is *"is this a gh-ost table or a Percona Toolkit table?"* That question deserves its own command, and it deserves an answer even when this build cannot execute the engine.
+
+```
+$ saksama advise --live -h db.prod -d shop -t orders \
+                 -a "MODIFY COLUMN status varchar(64) NOT NULL"
+
+ENGINE SUITABILITY for shop.orders
+ALTER   MODIFY COLUMN status varchar(64) NOT NULL
+SERVER  8.0.46
+TABLE   8 cols, 3 indexes, 2 out / 0 in FK
+
+[x]  NATIVE       BLOCKED by no table copy required
+     plain ALTER TABLE, executed by MySQL itself with an explicit ALGORITHM and LOCK
+     [  ok] understood operations            all operations are recognised
+     [FAIL] no table copy required           these operations rebuild the table: modify_column
+     [  ok] no foreign-key column touched    no constrained column is modified
+
+[x]  GH-OST       BLOCKED by no foreign keys in or out
+     row-by-row copy through a ghost table with triggers, then an atomic swap
+     [  ok] MySQL 5.7 or newer               server is 8.0.46
+     [  ok] InnoDB storage engine            table is InnoDB
+     [FAIL] no foreign keys in or out        2 constraint(s) involve this table; gh-ost
+                                             does not support foreign keys at all
+     [  ok] single-column primary key        primary key is id
+     [  ok] table is not partitioned         table is not partitioned
+     [  ok] gh-ost binary installed          found /usr/local/bin/gh-ost (1.1.7)
+     note  no replica detected: gh-ost must run with --allow-on-master
+     note  estimated disk: about 41.0 GB extra
+
+[!]  PT-OSC       NOT EXECUTABLE HERE
+     Percona Toolkit's pt-online-schema-change: triggers plus a shadow table, then RENAME swap
+     [  ok] MySQL 5.1 or newer               pt-osc supports every version Saksama plans for
+     [  ok] InnoDB storage engine            table is InnoDB
+     [  ok] primary or unique key            the table can be chunked
+     [  ok] pt-osc binary installed          found /usr/local/bin/pt-online-schema-change (3.5.1)
+     note  2 outgoing foreign key(s): pt-osc 3.x handles these natively when copying
+     note  licensing: pt-osc is GPL-2, so it is never bundled
+
+VERDICT
+  the chosen path is refused (1 blocker(s)), but pt-online-schema-change satisfies
+  every requirement for this change; its adapter is not built yet
+```
+
+Three verdicts, and the difference matters:
+
+| Verdict | Meaning |
+|---|---|
+| `SUITABLE` | every requirement is met and this build can run it |
+| `BLOCKED` | a hard requirement of *that engine* is not met (gh-ost + foreign keys, gh-ost + composite key, pt-osc + no key) |
+| `NOT EXECUTABLE HERE` | the engine fits this change perfectly; this build has no adapter for it yet |
+
+`BLOCKED` is about the engine. `NOT EXECUTABLE HERE` is about us. Confusing the two is how people end up attributing a tool's limitation to their own schema.
+
+Use it offline too, and get JSON:
+
+```bash
+saksama advise --ddl orders.sql --alter "..." --mysql-version 8.0.36
+saksama advise --live ... --json | jq '.engines[] | {engine, verdict, blocked_by}'
+saksama advise --live ... --no-probe     # skip detecting installed binaries
+```
+
+The plan card carries a one-line summary so you never have to remember to ask:
+
+```
+ENGINES    native ok | gh-ost blocked | pt-osc fits/not-built   (see: saksama advise)
+```
+
 ## See it work
 
 ```
@@ -111,6 +180,7 @@ Single static binary, no CGO, no runtime dependencies. Linux/macOS amd64/arm64.
 ```
 saksama plan     --ddl <file|-> ...        offline plan (CI gate, no database)
 saksama plan --live ...                    plan against a server, records a session
+saksama advise   --ddl|--live ...          which engine fits: native vs gh-ost vs pt-osc
 saksama apply    ...                       execute a native migration
 saksama status   [session]                 list or inspect sessions
 saksama events   <session>                 append-only JSONL event log
@@ -217,6 +287,8 @@ MySQL Clone Plugin is deliberately **not** in the ladder: it clones an instance,
 | `SHOW CREATE TABLE` parser incl. FK actions | ✅ |
 | Version-gated capability matrix | ✅ |
 | Checks catalog (A/B/C/D/E/R, 34 rules) | ✅ |
+| Engine suitability matrix (`advise`, native/gh-ost/pt-osc) | ✅ |
+| Installed-binary probe with version detection | ✅ |
 | Offline plan, plan card, `--json`, exit codes | ✅ |
 | Live introspection (`information_schema`, `performance_schema`) | ✅ |
 | Native execution with explicit `ALGORITHM`/`LOCK` | ✅ |
@@ -243,17 +315,17 @@ Commands that are not implemented yet (`apply --engine gh-ost`, `cutover`, `canc
 ## Development
 
 ```bash
-make test               # 99 unit tests
+make test               # 138 unit tests
 make lint               # go vet + gofmt check
 make cover              # per-package coverage
 make demo               # two plan cards side by side, no database needed
 
 make integration-up     # disposable MySQL 8.0 in docker on :33306
-make test-integration   # 20 tests against a real server
+make test-integration   # 22 tests against a real server
 make integration-down
 ```
 
-Integration tests run against a real MySQL because a claim like "`ADD COLUMN` is INSTANT on 8.0.12+" is either verified or it is marketing. They have already caught five real bugs, including one that made every apply on a foreign-key table report a false verification failure.
+Integration tests run against a real MySQL because a claim like "`ADD COLUMN` is INSTANT on 8.0.12+" is either verified or it is marketing. They have already caught six real bugs, including one that made every apply on a foreign-key table report a false verification failure, and one where the plan card read "ready" for an engine this build cannot run.
 
 ### Contribution rules
 

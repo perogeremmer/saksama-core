@@ -46,15 +46,18 @@ cover:
 # and removes the container. This is the only way to prove the analyzer's claims
 # match MySQL's real behaviour.
 
+# The wait probes TCP, not the unix socket: while mysqld initialises, the
+# entrypoint runs a socket-only server, so a socket ping succeeds before the
+# published port is listening, and every test would silently skip.
 integration-up:
 	@docker rm -f $(IT_NAME) >/dev/null 2>&1 || true
 	@docker run -d --name $(IT_NAME) \
 		-e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
 		-e MYSQL_DATABASE=shop \
 		-p $(IT_PORT):3306 $(IT_IMAGE) --max-connections=200 >/dev/null
-	@printf "waiting for MySQL"
-	@for i in $$(seq 1 90); do \
-		if docker exec $(IT_NAME) mysqladmin ping -uroot --silent >/dev/null 2>&1; then \
+	@printf "waiting for MySQL on TCP"
+	@for i in $$(seq 1 120); do \
+		if docker exec $(IT_NAME) mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then \
 			echo " ready"; exit 0; \
 		fi; \
 		printf "."; sleep 1; \

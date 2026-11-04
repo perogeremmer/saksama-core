@@ -142,3 +142,25 @@ CLONE tidak masuk engine ladder: MySQL Clone Plugin adalah clone fisik instance,
 - Repo `github.com/perogeremmer/saksama-core`; tagline EN wajib di baris pertama README karena nama tidak self-explanatory bagi penutur Inggris.
 - **Revisi 2026-11-04:** produk dipublikasikan sebagai **Saksama Core**, modul `github.com/perogeremmer/saksama-core`, binary tetap `saksama`.
 - Kata umum Indonesia → selalu brand dengan huruf kapital + tagline; bidik keyword panjang ("Saksama MySQL migration").
+
+---
+
+## D14 — Engine suitability adalah perintah tersendiri, dan "tidak bisa dijalankan" harus dibedakan dari "tidak cocok"
+
+**Status:** Disepakati
+**Alasan:** Pertanyaan pertama pengguna bukan "jalankan ini", tapi "tabel ini cocoknya gh-ost atau Percona Toolkit?". Menjawabnya di dalam plan card saja menyembunyikan informasi: plan card hanya menampilkan jalur yang dipilih. Karena itu `saksama advise` menilai **setiap** engine terhadap perubahan konkret ini.
+
+Tiga verdict dibedakan secara tegas:
+- `SUITABLE` — semua syarat terpenuhi **dan** build ini bisa menjalankannya
+- `BLOCKED` — syarat keras *engine itu* tidak terpenuhi (gh-ost + FK, gh-ost + PK komposit, pt-osc tanpa key)
+- `NOT EXECUTABLE HERE` — engine cocok sepenuhnya, tetapi build ini belum punya adapter
+
+**Alternatif ditolak:**
+- *Satu verdict biner cocok/tidak* — menyamakan batasan engine dengan batasan tool, sehingga pengguna menyalahkan schema-nya sendiri.
+- *Hanya menampilkan engine yang direkomendasikan* — menghilangkan justifikasi, padahal justifikasi itu produknya.
+- *Mengeksekusi binary untuk menilai* — analyzer harus tetap murni; hasil probe binary di-inject lewat `Input.Binaries`.
+
+**Implikasi:**
+- `Plan.Engines []EngineAssessment` masuk ke kontrak JSON (aditif, pre-1.0).
+- `Recommendation.Executable` + `ExecutableReason` wajib ada: plan **tidak boleh** menulis `RESULT ready` untuk engine yang belum diimplementasikan.
+- Probe binary (`gh-ost`, `pt-online-schema-change`, `perl`) berjalan di package `internal/probe`, bukan di analyzer.

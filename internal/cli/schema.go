@@ -10,7 +10,7 @@ const planJSONSchema = `{
   "$id": "https://saksama.dev/schema/plan-v1.json",
   "title": "Saksama plan",
   "type": "object",
-  "required": ["contract_version", "generated_at", "target", "alter", "server", "schema", "schema_fingerprint", "operations", "recommendation", "checks", "duration", "disk", "recovery", "verification"],
+  "required": ["contract_version", "generated_at", "target", "alter", "server", "schema", "schema_fingerprint", "operations", "recommendation", "checks", "duration", "disk", "recovery", "verification", "engines"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 1 },
@@ -149,6 +149,37 @@ const planJSONSchema = `{
           "kind": { "enum": ["index_exists", "index_absent", "column_exists", "column_absent", "foreign_key_present"] },
           "name": { "type": "string" },
           "table": { "type": "string" }
+        }
+      }
+    },
+    "engines": {
+      "description": "Suitability of every execution path for this specific change, including paths this build cannot run yet.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["engine", "verdict", "summary", "requirements", "executable"],
+        "additionalProperties": false,
+        "properties": {
+          "engine": { "enum": ["native", "gh-ost", "pt-osc", "none"] },
+          "verdict": { "enum": ["suitable", "blocked", "not_executable"] },
+          "summary": { "type": "string" },
+          "executable": { "type": "boolean" },
+          "blocked_by": { "type": "array", "items": { "type": "string" } },
+          "notes": { "type": "array", "items": { "type": "string" } },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "met", "blocking", "detail"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "met": { "type": "boolean" },
+                "blocking": { "type": "boolean" },
+                "detail": { "type": "string" }
+              }
+            }
+          }
         }
       }
     },

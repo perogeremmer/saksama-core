@@ -31,6 +31,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/perogeremmer/saksama-core/internal/analyzer"
 	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/cred"
 	"github.com/perogeremmer/saksama-core/internal/introspect"
@@ -753,5 +754,98 @@ func TestAddIndexAllowedOnTableWithForeignKey(t *testing.T) {
 	}
 	if sess.Engine != "native" {
 		t.Fatalf("engine = %q, want native", sess.Engine)
+	}
+}
+
+// --- advise against a live server -------------------------------------------
+
+func TestAdviseLiveDetectsForeignKeyAndSuggestsPtOSC(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `p` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+		"CREATE TABLE `c` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `pid` bigint unsigned NOT NULL, "+
+			"`status` varchar(32) NOT NULL, PRIMARY KEY (`id`), KEY `ix_pid` (`pid`), "+
+			"CONSTRAINT `fk_c_p` FOREIGN KEY (`pid`) REFERENCES `p` (`id`) ON DELETE CASCADE) ENGINE=InnoDB",
+	)
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(64) NOT NULL")
+	req.Binaries = map[string]analyzer.EngineBinary{
+		"gh-ost":                  {Name: "gh-ost", Available: true, Path: "/usr/bin/gh-ost", Version: "1.1.6"},
+		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: "/usr/bin/pt-online-schema-change", Version: "3.5.1"},
+	}
+
+	prep, err := runner.PlanOnly(context.Background(), req)
+	if err != nil {
+		t.Fatalf("advise: %v", err)
+	}
+	defer prep.Close()
+
+	byEngine := map[analyzer.Engine]analyzer.EngineAssessment{}
+	for _, a := range prep.Plan.Engines {
+		byEngine[a.Engine] = a
+	}
+
+	// gh-ost cannot work with foreign keys. This is the whole reason the engine
+	// matrix exists.
+	gh, ok := byEngine[analyzer.EngineGhOst]
+	if !ok {
+		t.Fatal("gh-ost assessment missing")
+	}
+	if gh.Verdict != analyzer.VerdictBlocked {
+		t.Fatalf("gh-ost verdict = %q, want blocked on an FK table", gh.Verdict)
+	}
+	var fkBlocked bool
+	for _, b := range gh.BlockedBy {
+		if b == "no foreign keys in or out" {
+			fkBlocked = true
+		}
+	}
+	if !fkBlocked {
+		t.Fatalf("gh-ost blockers = %v", gh.BlockedBy)
+	}
+
+	// pt-osc handles foreign keys, so it must not be blocked by them.
+	pt, ok := byEngine[analyzer.EnginePtOSC]
+	if !ok {
+		t.Fatal("pt-osc assessment missing")
+	}
+	for _, b := range pt.BlockedBy {
+		if b == "no foreign keys in or out" {
+			t.Fatalf("pt-osc must not be blocked by foreign keys: %v", pt.BlockedBy)
+		}
+	}
+	if pt.Verdict != analyzer.VerdictNotExecutable {
+		t.Fatalf("pt-osc verdict = %q, want not_executable (fits, adapter missing)", pt.Verdict)
+	}
+}
+
+func TestAdviseLiveFavoursNativeForAddIndex(t *testing.T) {
+	schema, db := fixtureSchema(t)
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `at` datetime NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB",
+	)
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+	prep, err := runner.PlanOnly(context.Background(), applyRequest(schema, "t", "ADD INDEX ix_at (at)"))
+	if err != nil {
+		t.Fatalf("advise: %v", err)
+	}
+	defer prep.Close()
+
+	var native analyzer.EngineAssessment
+	for _, a := range prep.Plan.Engines {
+		if a.Engine == analyzer.EngineNative {
+			native = a
+		}
+	}
+	if native.Verdict != analyzer.VerdictSuitable {
+		t.Fatalf("native verdict = %q: %v", native.Verdict, native.BlockedBy)
+	}
+	if !prep.Plan.Recommendation.Executable {
+		t.Fatal("native recommendation must be executable")
 	}
 }

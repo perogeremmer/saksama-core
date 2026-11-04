@@ -643,6 +643,8 @@ Command minimum:
 
 ```text
 saksama plan
+saksama plan --live
+saksama advise
 saksama apply
 saksama status
 saksama cutover

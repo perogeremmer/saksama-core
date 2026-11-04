@@ -23,9 +23,10 @@ func samplePlan() analyzer.Plan {
 			Reason: "in-place",
 		}},
 		Recommendation: analyzer.Recommendation{
-			Engine:    analyzer.EngineNative,
-			Reasons:   []string{"every operation is supported by a verified native DDL rule"},
-			Fallbacks: []analyzer.Engine{analyzer.EngineGhOst},
+			Engine:     analyzer.EngineNative,
+			Executable: true,
+			Reasons:    []string{"every operation is supported by a verified native DDL rule"},
+			Fallbacks:  []analyzer.Engine{analyzer.EngineGhOst},
 		},
 		Checks: []analyzer.Check{
 			{ID: "D1", Severity: analyzer.SeverityWarn, Title: "long-running query", Detail: "127s", Remediation: "wait", MySQLError: 1205},
@@ -119,5 +120,91 @@ func TestMultiLineInputIsFlattened(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "ALTER      ADD INDEX ix (\n") {
 		t.Fatal("multi-line ALTER leaked into the header")
+	}
+}
+
+func TestEngineMatrixShowsEveryEngine(t *testing.T) {
+	p := samplePlan()
+	p.Engines = []analyzer.EngineAssessment{
+		{Engine: analyzer.EngineNative, Verdict: analyzer.VerdictSuitable, Executable: true,
+			Summary: "plain ALTER TABLE",
+			Requirements: []analyzer.Requirement{
+				{Name: "no table copy required", Met: true, Blocking: true, Detail: "in place"},
+			}},
+		{Engine: analyzer.EngineGhOst, Verdict: analyzer.VerdictBlocked,
+			Summary: "ghost table copy", BlockedBy: []string{"no foreign keys in or out"},
+			Requirements: []analyzer.Requirement{
+				{Name: "no foreign keys in or out", Met: false, Blocking: true, Detail: "2 constraints"},
+			}},
+		{Engine: analyzer.EnginePtOSC, Verdict: analyzer.VerdictNotExecutable,
+			Summary: "Percona Toolkit",
+			Requirements: []analyzer.Requirement{
+				{Name: "primary or unique key", Met: true, Blocking: true, Detail: "chunkable"},
+			}},
+	}
+	p.Recommendation = analyzer.Recommendation{Engine: analyzer.EngineNative, Executable: true}
+
+	var buf bytes.Buffer
+	if err := EngineMatrix(&buf, p); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"ENGINE SUITABILITY", "NATIVE", "GH-OST", "PT-OSC", "VERDICT",
+		"SUITABLE", "BLOCKED by no foreign keys in or out", "NOT EXECUTABLE HERE",
+		"recommended: native (executable now)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	for _, r := range out {
+		if r > 127 {
+			t.Fatalf("non-ASCII rune %q in engine matrix", r)
+		}
+	}
+}
+
+func TestEngineMatrixExplainsNonExecutableRecommendation(t *testing.T) {
+	p := samplePlan()
+	p.Engines = []analyzer.EngineAssessment{
+		{Engine: analyzer.EngineGhOst, Verdict: analyzer.VerdictNotExecutable, Summary: "copy"},
+	}
+	p.Recommendation = analyzer.Recommendation{
+		Engine: analyzer.EngineGhOst, Executable: false,
+		ExecutableReason: "the gh-ost adapter is not implemented in this build",
+	}
+
+	var buf bytes.Buffer
+	if err := EngineMatrix(&buf, p); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "best fit for this change: gh-ost") {
+		t.Fatalf("expected the best-fit line:\n%s", out)
+	}
+	if !strings.Contains(out, "not implemented in this build") {
+		t.Fatalf("expected the reason:\n%s", out)
+	}
+}
+
+func TestPlanCardSaysNotExecutableInsteadOfReady(t *testing.T) {
+	p := samplePlan()
+	p.Recommendation = analyzer.Recommendation{
+		Engine: analyzer.EngineGhOst, Executable: false,
+		ExecutableReason: "the gh-ost adapter is not implemented in this build",
+	}
+
+	var buf bytes.Buffer
+	if err := PlanCard(&buf, p); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "RESULT     ready") {
+		t.Fatalf("a non-executable plan must never read as ready:\n%s", out)
+	}
+	if !strings.Contains(out, "not executable in this build") {
+		t.Fatalf("expected the not-executable result:\n%s", out)
 	}
 }

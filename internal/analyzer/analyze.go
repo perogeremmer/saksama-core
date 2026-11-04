@@ -97,6 +97,12 @@ type Recommendation struct {
 	Blockers  int      `json:"blockers"`
 	Warnings  int      `json:"warnings"`
 	Infos     int      `json:"infos"`
+	// Executable reports whether this build can actually run the recommended
+	// engine. A plan can be safe and still not executable, and saying so is the
+	// difference between a tool you trust and a tool that lies.
+	Executable bool `json:"executable"`
+	// ExecutableReason explains a false Executable.
+	ExecutableReason string `json:"executable_reason,omitempty"`
 }
 
 // DurationEstimate is deliberately a range with a confidence label.
@@ -130,22 +136,23 @@ type Verification struct {
 
 // Plan is the complete analyzer output. It is the product API (PRD FR-5).
 type Plan struct {
-	ContractVersion   int              `json:"contract_version"`
-	GeneratedAt       string           `json:"generated_at"`
-	Target            Target           `json:"target"`
-	Alter             string           `json:"alter"`
-	AlterNormalized   string           `json:"alter_normalized,omitempty"`
-	Server            ServerInfo       `json:"server"`
-	Schema            SchemaInfo       `json:"schema"`
-	SchemaFingerprint string           `json:"schema_fingerprint"`
-	Operations        []OpPlan         `json:"operations"`
-	Recommendation    Recommendation   `json:"recommendation"`
-	Checks            []Check          `json:"checks"`
-	Duration          DurationEstimate `json:"duration"`
-	Disk              DiskEstimate     `json:"disk"`
-	Recovery          Recovery         `json:"recovery"`
-	Verification      []Verification   `json:"verification"`
-	Notes             []string         `json:"notes,omitempty"`
+	ContractVersion   int                `json:"contract_version"`
+	GeneratedAt       string             `json:"generated_at"`
+	Target            Target             `json:"target"`
+	Alter             string             `json:"alter"`
+	AlterNormalized   string             `json:"alter_normalized,omitempty"`
+	Server            ServerInfo         `json:"server"`
+	Schema            SchemaInfo         `json:"schema"`
+	SchemaFingerprint string             `json:"schema_fingerprint"`
+	Operations        []OpPlan           `json:"operations"`
+	Recommendation    Recommendation     `json:"recommendation"`
+	Checks            []Check            `json:"checks"`
+	Duration          DurationEstimate   `json:"duration"`
+	Disk              DiskEstimate       `json:"disk"`
+	Recovery          Recovery           `json:"recovery"`
+	Verification      []Verification     `json:"verification"`
+	Engines           []EngineAssessment `json:"engines"`
+	Notes             []string           `json:"notes,omitempty"`
 }
 
 // Input is everything the analyzer needs. No database handle, ever.
@@ -161,8 +168,11 @@ type Input struct {
 	SchemaSource string   // live | ddl | json
 	Ignored      []string // schema fragments the parser could not model
 	EngineHint   Engine   // user override; empty means auto
-	MaxLoad      int      // optional: current Threads_running observation
-	FreeDisk     int64    // optional: bytes free on the data volume
+	// Binaries are the engine executables found on this machine, injected so the
+	// analyzer never spawns a process.
+	Binaries map[string]EngineBinary
+	MaxLoad  int   // optional: current Threads_running observation
+	FreeDisk int64 // optional: bytes free on the data volume
 	// Live is the observation collected from a real server. Nil means the plan
 	// is offline, and every live-only check says so instead of passing silently.
 	Live *LiveState
@@ -273,6 +283,8 @@ func Analyze(in Input) Plan {
 		rec.Reasons = append(rec.Reasons, fmt.Sprintf("%d blocker(s) prevent execution", rec.Blockers))
 	}
 	p.Recommendation = rec
+
+	p.Engines = AssessEngines(in, projected)
 
 	p.Duration = estimateDuration(in, projected, rec.Engine)
 	p.Disk = estimateDisk(projected, rec.Engine)

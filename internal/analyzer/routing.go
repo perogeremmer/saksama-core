@@ -35,9 +35,11 @@ func routingChecks(in Input, anyRebuild bool, projected model.Table) []Check {
 	if fks := projected.AllForeignKeys(); len(fks) > 0 {
 		out = append(out, Check{
 			ID: chkFKCopyBlocked, Severity: SeverityBlocker,
-			Title:       "copy-based migration is blocked for tables with foreign keys",
-			Detail:      fmt.Sprintf("%s has %d foreign key constraint(s) in or out", projected.Name, len(fks)),
-			Remediation: "use a verified native operation, or run a reviewed maintenance procedure; Saksama v1 will not drop and recreate constraints automatically",
+			Title: "no available copy engine supports this table's foreign keys",
+			Detail: fmt.Sprintf("%s has %d foreign key constraint(s) in or out; gh-ost does not support foreign keys, "+
+				"and the pt-online-schema-change adapter is not enabled in this build", projected.Name, len(fks)),
+			Remediation: "use a verified native operation, enable the pt-osc adapter, or run a reviewed maintenance procedure; " +
+				"Saksama will not drop and recreate constraints automatically",
 		})
 	}
 
@@ -93,6 +95,9 @@ func route(in Input, anyRebuild, anyNative, anyBlocked bool, projected model.Tab
 		rec.Engine = in.EngineHint
 	}
 
+	// Execution capability of this build, independent of safety.
+	rec.Executable, rec.ExecutableReason = executableHere(rec.Engine)
+
 	// Fallbacks are informational; they are never used implicitly.
 	if rec.Engine == EngineNative {
 		rec.Fallbacks = []Engine{EngineGhOst}
@@ -102,6 +107,23 @@ func route(in Input, anyRebuild, anyNative, anyBlocked bool, projected model.Tab
 	}
 
 	return rec
+}
+
+// executableHere reports whether this build actually implements the engine.
+//
+// Only the native path exists today. Saying "recommended: gh-ost" while being
+// unable to run gh-ost would be the most damaging kind of dishonesty: the plan
+// card would read as ready and `apply` would then refuse.
+func executableHere(e Engine) (bool, string) {
+	switch e {
+	case EngineNative:
+		return true, ""
+	case EngineGhOst:
+		return false, "the gh-ost adapter is not implemented in this build"
+	case EnginePtOSC:
+		return false, "the pt-online-schema-change adapter is not implemented in this build"
+	}
+	return false, "no execution path was selected"
 }
 
 func allInstant(ops []model.Op) bool {

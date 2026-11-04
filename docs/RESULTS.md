@@ -12,13 +12,16 @@
 
 ## 1. Ringkasan satu paragraf
 
-Fase 1 (analyzer murni) dan Fase 2 (introspection live, eksekusi native, session durable, event contract, redaction, approval) **selesai dan terverifikasi terhadap MySQL 8.0.46 sungguhan**, bukan hanya unit test. Total **119 test**: 99 unit test + 20 integration test terhadap server nyata. Integration test menemukan **5 bug asli** di kode produksi — termasuk satu bug yang membuat setiap apply pada tabel ber-FK melaporkan kegagalan palsu, dan satu yang membuat `ALGORITHM=INSTANT` selalu ditolak MySQL. Semua sudah diperbaiki dan diberi test regresi.
+Fase 1 (analyzer murni) dan Fase 2 (introspection live, eksekusi native, session durable, event contract, redaction, approval) **selesai dan terverifikasi terhadap MySQL 8.0.46 sungguhan**, bukan hanya unit test. Total **160 test**: 138 unit test + 22 integration test terhadap server nyata. Integration test menemukan **6 bug asli** di kode produksi — termasuk satu bug yang membuat setiap apply pada tabel ber-FK melaporkan kegagalan palsu, dan satu yang membuat `ALGORITHM=INSTANT` selalu ditolak MySQL. Semua sudah diperbaiki dan diberi test regresi.
 
 ---
 
 ## 2. Yang bisa dilakukan tool ini sekarang
 
 ```bash
+# 0. Tanya dulu: tabel ini cocoknya gh-ost atau Percona Toolkit?
+saksama advise --live -h db.prod -d shop -t orders -a "MODIFY COLUMN ..."
+
 # 1. Plan tanpa database (CI gate)
 saksama plan --ddl orders.sql --alter "ADD INDEX ix_created (created_at)" \
              --mysql-version 8.0.36 --json
@@ -116,7 +119,38 @@ contract: 1 | completeness: complete | events: 13
 session state: done | approvals: 1
 ```
 
-### 3.5 Friction produksi
+### 3.5 Matriks engine — jawaban "gh-ost atau Percona Toolkit?"
+
+```
+$ saksama advise --live ... -a "MODIFY COLUMN status varchar(64) NOT NULL"
+
+[x]  NATIVE       BLOCKED by no table copy required
+     [FAIL] no table copy required      these operations rebuild the table: modify_column
+
+[x]  GH-OST       BLOCKED by no foreign keys in or out
+     [FAIL] no foreign keys in or out   1 constraint(s) involve this table
+
+[!]  PT-OSC       NOT EXECUTABLE HERE
+     [  ok] primary or unique key       the table can be chunked
+     note  1 outgoing foreign key(s): pt-osc 3.x handles these natively when copying
+
+VERDICT
+  the chosen path is refused (1 blocker(s)), but pt-online-schema-change satisfies
+  every requirement for this change; its adapter is not built yet
+```
+
+Tiga verdict dibedakan tegas: `SUITABLE` (semua syarat + bisa dijalankan), `BLOCKED` (syarat *engine itu* tidak terpenuhi), `NOT EXECUTABLE HERE` (engine cocok, adapter kita belum ada). Perbedaan `BLOCKED` vs `NOT EXECUTABLE` mencegah orang menyalahkan schema-nya sendiri atas batasan tool.
+
+Kasus PK komposit memperlihatkan nilainya:
+
+```
+[x]  GH-OST   BLOCKED by single-column primary key
+     [FAIL] single-column primary key   primary key has 2 columns; gh-ost chunks by a single column
+[!]  PT-OSC   NOT EXECUTABLE HERE
+     note  composite primary key (2 columns) is supported by pt-osc; this is its main advantage over gh-ost
+```
+
+### 3.6 Friction produksi
 
 ```
 $ saksama apply ... --production
@@ -139,6 +173,8 @@ Integration test bukan formalitas — ia menemukan bug yang unit test tidak mung
 | 3 | Preflight memakai ambang long-query hardcoded 30 detik | Ambang yang dikonfigurasi diabaikan → preflight tidak pernah menangkap hazard di window yang diperpendek | `TestPreflightAbortsOnLongRunningStatement` | `LongQueryThresholdSeconds` dialirkan dari request |
 | 4 | `status s1 --json` mencetak teks manusia | Script/CI pengguna rusak diam-diam; flag setelah argumen posisional diabaikan `flag` stdlib | Run manual | flag `--json` diekstrak sebelum parse |
 | 5 | Daftar operasi kosong menghasilkan plan "ready" | **Fail-open paling berbahaya**: CI gate hijau padahal tidak ada yang dipahami | Ditemukan sendiri saat review Fase 1, dikunci dengan test | Safety net analyzer + `OpUnknown` sintetis di CLI |
+| 6 | Plan menulis `RESULT ready` untuk engine yang belum diimplementasikan (gh-ost pada tabel tanpa FK) | Plan card bilang siap, lalu `apply` menolak — janji palsu tepat pada saat pengguna paling butuh kepastian | Run manual `advise` + pengecekan konsistensi matrix vs verdict | `Recommendation.Executable` + `ExecutableReason`; plan card menulis "fits, but not executable in this build" |
+| 7 | Makefile health-check menunggu socket, test menghubung lewat TCP | Seluruh integration suite **skip** tanpa gagal, sehingga CI hijau padahal tidak ada yang diuji — kelas bug yang sama berbahayanya dengan #5 | `make test-integration` dijalankan dari container kosong | Probe TCP di dalam container (`mysql -h127.0.0.1 -P3306`) |
 
 Bug #5 adalah alasan eksplisit kenapa `TestEmptyOperationListIsNeverReady` dan `TestUnparseableAlterIsNeverReady` ada: keduanya menjaga satu-satunya kegagalan yang tidak boleh terjadi.
 
@@ -189,9 +225,10 @@ Aturan yang dijaga kode:
 | `internal/state` | 332 | 223 | session JSON atomik, event log, lock per tabel |
 | `internal/engine` | 113 | — | kontrak engine (`Statements/Preflight/Execute/Verify`) |
 | `internal/engine/native` | 330 | 168 | DDL eksplisit, preflight recheck, verifikasi via information_schema |
+| `internal/probe` | 118 | 30 | deteksi binary gh-ost / pt-osc / perl + versinya |
 | `internal/events` | 198 | 160 | envelope, redaction rekursif, rate limit progres 1/detik |
 | `internal/core` | 520 | (integration) | orkestrasi + approval + audit |
-| `internal/cli` | 1121 | 400 | `plan`, `plan --live`, `apply`, `status`, `events`, `export`, `cleanup`, `schema` |
+| `internal/cli` | 1420 | 560 | `plan`, `plan --live`, `advise`, `apply`, `status`, `events`, `export`, `cleanup`, `schema` |
 | `internal/render` | 226 | 123 | plan card ASCII-only |
 | `test/integration` | — | 757 | 20 test terhadap MySQL 8.0.46 nyata |
 
@@ -237,10 +274,10 @@ Yang **tidak** akan pernah dilakukan tool ini tanpa keputusan eksplisit: drop/re
 
 ```bash
 make build          # binary statis di bin/saksama
-make test           # 99 unit test
+make test           # 138 unit test
 make lint           # go vet + gofmt
 
-make test-integration   # menjalankan MySQL 8.0 di docker, 20 test, lalu bersih-bersih
+make test-integration   # menjalankan MySQL 8.0 di docker, 22 test, lalu bersih-bersih
 
 make demo           # dua plan card berdampingan: native vs refused
 ```
@@ -257,7 +294,7 @@ Tidak ada password di argv. Urutan pembacaan kredensial: `--defaults-extra-file`
 
 ## 10. Rekomendasi langkah berikutnya
 
-1. **Fase 3 (gh-ost)** — ini yang membuat produk menjangkau kasus rebuild tanpa FK, dan `--postpone-cutover-flag-file` adalah fitur yang paling dicari target user (gerbang verifikasi sebelum swap).
+1. **Fase 3 (gh-ost)** — matriks engine sudah menjawab "cocok atau tidak"; langkah berikutnya membuat jawaban `NOT EXECUTABLE HERE` berubah menjadi bisa dijalankan. `--postpone-cutover-flag-file` adalah fitur yang paling dicari target user (gerbang verifikasi sebelum swap).
 2. **Profil throughput lokal** — setelah beberapa migrasi, estimasi durasi bisa naik dari heuristic ke angka mesin pengguna sendiri. Ini juga yang membuat plan card layak dipercaya.
 3. **TUI** — setelah core stabil, karena TUI hanya membaca `Plan` dan event yang sama.
 4. **Soak test di staging** — PRD §15.3 mensyaratkan ini sebelum klaim "safe for production"; sekarang yang terbukti adalah correctness, bukan ketahanan pada beban produksi.

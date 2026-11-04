@@ -7,6 +7,18 @@
 
 ## What works today
 
+```
+saksama plan    [--live]   produce and record a plan
+saksama advise  [--live]   engine suitability: native vs gh-ost vs pt-osc
+saksama apply   ...        execute a native migration
+saksama status  [id]       list or inspect sessions
+saksama events  <id>       append-only JSONL event log
+saksama export  <id>       audit export
+saksama cleanup <id>       refuses to guess ownership
+saksama schema             JSON Schema of the plan contract
+```
+
+
 ```bash
 make build
 ./bin/saksama plan --ddl testdata/orders.sql \
@@ -21,12 +33,13 @@ make build
 |---|---|---|
 | `internal/model` | neutral schema + ALTER model, version parsing | via parser/analyzer |
 | `internal/parser` | fail-closed tokenizer, `ALTER TABLE` parser, `SHOW CREATE TABLE` parser | 19 tests |
-| `internal/analyzer` | capability rules, checks, engine routing, duration/disk estimates, fingerprint | 34 tests |
-| `internal/render` | ASCII-only plan card | 5 tests |
+| `internal/analyzer` | capability rules, checks, engine routing, duration/disk estimates, fingerprint + engine suitability matrix | 43 tests |
+| `internal/render` | ASCII-only plan card + engine matrix report | 8 tests |
 | `internal/events` | event envelope, redaction, per-second progress limiting | 9 tests |
-| `internal/cli` | `plan`, `schema`, `version`; exit codes | 14 tests |
+| `internal/probe` | detects installed gh-ost / pt-osc / perl and their versions | 2 tests |
+| `internal/cli` | `plan`, `plan --live`, `advise`, `apply`, `status`, `events`, `export`, `cleanup`, `schema`, `version` | 25 tests |
 
-Total: **81 tests**, all green (`make test`).
+Total: **138 unit tests** + **22 integration tests** against real MySQL 8.0.46, all green.
 
 ### ALTER operations understood
 
@@ -97,10 +110,7 @@ Offline-evaluable checks from `docs/CHECKS.md`:
 
 | Item | Phase | Note |
 |---|---|---|
-| Live introspection (`information_schema`, `performance_schema`) | 2 | unlocks A1 verified, B5 duplicates, D1 MDL check, D8 leftovers |
-| Native execution with explicit `ALGORITHM`/`LOCK` | 2 | |
-| Session state store + approvals + audit export | 2 | |
-| gh-ost supervision, hold-cutover, cancel/cleanup | 3 | |
+| gh-ost supervision, hold-cutover, cancel/cleanup | 3 | engine matrix already reports whether it *fits* |
 | Crash reconciliation | 3 | |
 | TUI (Bubble Tea) | 4 | |
 | pt-osc adapter | 5 | must not be bundled (GPL-2) |
