@@ -79,6 +79,16 @@ func engineBlock(a analyzer.EngineAssessment) string {
 			fmt.Fprintf(&b, "  [%s] %-33s %s\n", mark, r.Name, r.Detail)
 		}
 	}
+	if len(a.Environment) > 0 {
+		b.WriteString("  server prerequisites:\n")
+		for _, r := range a.Environment {
+			mark := "  ok"
+			if !r.Met {
+				mark = "FAIL"
+			}
+			fmt.Fprintf(&b, "  [%s] %-33s %s\n", mark, r.Name, r.Detail)
+		}
+	}
 
 	if len(a.Evidence) > 0 {
 		fmt.Fprintf(&b, "  evidence for this engine:\n")
@@ -129,6 +139,8 @@ func engineStatus(a analyzer.EngineAssessment) string {
 		return "not installed"
 	case !a.Wrapped:
 		return "no adapter in this build"
+	case !a.EnvironmentReady():
+		return "server not configured"
 	}
 	return "ready"
 }

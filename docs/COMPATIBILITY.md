@@ -36,6 +36,22 @@ statement can queue the whole server.
 | pt-osc | 3.x | not yet | adapter is unit tested against a fake binary (argv, defaults-file, defaults to --print); no real pt-online-schema-change has been run by this repository |
 | pt-osc | 2.x | no | no --resume, narrower ALTER grammar; percona-toolkit 3.x is required |
 
+## Server settings `advise` reads
+
+A suitabile engine on a server that cannot start it is still a failed migration,
+so these are checked and shown with the value the server reports right now.
+
+- log_bin: ON. gh-ost follows writes through the binary log; without it there is nothing to follow.
+- binlog_format: ROW. Statement-based logging cannot reproduce row images.
+- binlog_row_image: FULL. MINIMAL omits the column data gh-ost has to replay.
+- server_id: any non-zero value. gh-ost refuses server_id=0.
+- read_only / super_read_only: OFF. A read-only server rejects every migration.
+- performance_schema: ON. Without it the metadata-lock check cannot see other sessions, so the main outage cause goes undetected.
+- transaction_isolation: REPEATABLE-READ or lower. SERIALIZABLE widens locking during a copy.
+- innodb_file_per_table: ON. With it OFF, dropping a table never returns disk to the filesystem, so a rebuild does not free space.
+- sql_require_primary_key: OFF. When ON, DDL on a keyless table is rejected outright.
+- lower_case_table_names: whatever it is, keep host and server consistent; a mismatch breaks table naming in subtle ways.
+
 ## Findings
 
 Facts that cost someone an afternoon. They are here so the next person does not pay twice.

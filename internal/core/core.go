@@ -135,6 +135,8 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		return nil, err
 	}
 
+	settings, _ := collector.Settings(ctx)
+
 	alter, alterErr := parser.ParseAlter("ALTER TABLE `" + escapeIdent(req.Table) + "` " + alterBody(req.Alter))
 
 	// Duplicate probes run here because they depend on the planned indexes.
@@ -180,6 +182,7 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		EngineHintSource: req.EngineHintSource,
 		Live:             liveStateFrom(snap, duplicates),
 		Binaries:         req.Binaries,
+		Settings:         analyzer.SettingsFromMap(settings),
 	}
 
 	plan := analyzer.Analyze(input)

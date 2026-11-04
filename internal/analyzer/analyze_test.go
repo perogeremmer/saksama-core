@@ -864,7 +864,7 @@ func TestAssessSchemaPicksTheEnginePerTableShape(t *testing.T) {
 		map[string]EngineBinary{
 			"gh-ost":                  {Name: "gh-ost", Available: true, Version: "1.1.7"},
 			"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Version: "3.5.1"},
-		})
+		}, binlogOn())
 
 	byName := map[string]TableAssessment{}
 	for _, r := range got {
@@ -910,7 +910,7 @@ func TestAssessSchemaDescribesPrimaryKey(t *testing.T) {
 			t.Indexes[0].Parts = []model.IndexPart{{Column: "uuid"}}
 		}),
 	}
-	got := AssessSchema(tables, model.Server{Version: "8.0.36"}, nil)
+	got := AssessSchema(tables, model.Server{Version: "8.0.36"}, nil, nil)
 	byName := map[string]TableAssessment{}
 	for _, r := range got {
 		byName[r.Table] = r
@@ -927,5 +927,191 @@ func TestAssessSchemaDescribesPrimaryKey(t *testing.T) {
 	}
 	if !strings.Contains(byName["uuid"].PrimaryKey, "char(36)") {
 		t.Errorf("uuid PK = %q", byName["uuid"].PrimaryKey)
+	}
+}
+
+// --- server environment checks ----------------------------------------------
+
+// binlogOn is a server configured the way gh-ost needs it.
+func binlogOn() map[string]string {
+	return map[string]string{
+		"log_bin":                 "ON",
+		"binlog_format":           "ROW",
+		"binlog_row_image":        "FULL",
+		"server_id":               "1",
+		"read_only":               "OFF",
+		"super_read_only":         "OFF",
+		"performance_schema":      "ON",
+		"innodb_file_per_table":   "ON",
+		"sql_require_primary_key": "OFF",
+		"transaction_isolation":   "REPEATABLE-READ",
+	}
+}
+
+func binlogOff() map[string]string {
+	m := binlogOn()
+	m["log_bin"] = "OFF"
+	return m
+}
+
+func settingsPlan(t *testing.T, settings map[string]string, body string) Plan {
+	t.Helper()
+	return plan(t, baseTable(), "8.0.36", body, func(in *Input) {
+		in.Binaries = availableBinaries()
+		in.Settings = SettingsFromMap(settings)
+	})
+}
+
+func TestGhOstRequiresBinaryLogging(t *testing.T) {
+	p := settingsPlan(t, binlogOff(), "MODIFY COLUMN status varchar(64) NOT NULL")
+
+	gh, _ := assessmentFor(p, EngineGhOst)
+	if gh.Verdict != VerdictSuitable {
+		t.Fatalf("the engine still suits the table, got %q", gh.Verdict)
+	}
+	if gh.EnvironmentReady() {
+		t.Fatal("log_bin=OFF must leave the environment unmet")
+	}
+	if gh.Runnable() {
+		t.Fatal("an engine that cannot start must not be reported runnable")
+	}
+	// The tool picks the engine this server can actually run, and says why it did
+	// not pick the cheaper one.
+	if p.Recommendation.Engine != EnginePtOSC {
+		t.Fatalf("got %q, want pt-osc as the fallback", p.Recommendation.Engine)
+	}
+	if !hasCheck(p, "R9", SeverityWarn) {
+		t.Fatalf("expected R9 explaining the skipped engine: %+v", p.Checks)
+	}
+}
+
+// An explicit choice is honoured even when the server cannot run it: the plan
+// refuses with a fixable blocker instead of silently switching engines.
+func TestChosenEngineBlockedByServerConfig(t *testing.T) {
+	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", func(in *Input) {
+		in.Binaries = availableBinaries()
+		in.Settings = SettingsFromMap(binlogOff())
+		in.EngineHint = EngineGhOst
+		in.EngineHintSource = "recorded"
+	})
+
+	if p.Recommendation.Engine != EngineGhOst {
+		t.Fatalf("got %q, want the chosen gh-ost", p.Recommendation.Engine)
+	}
+	if !hasCheck(p, "R8", SeverityBlocker) {
+		t.Fatalf("expected R8 for the chosen engine: %+v", p.Checks)
+	}
+	if p.Recommendation.Executable {
+		t.Fatal("the plan must not claim it can run")
+	}
+	if !strings.Contains(p.Recommendation.ExecutableReason, "not configured") {
+		t.Fatalf("reason = %q", p.Recommendation.ExecutableReason)
+	}
+}
+
+func TestGhOstRunnableWhenServerIsConfigured(t *testing.T) {
+	p := settingsPlan(t, binlogOn(), "MODIFY COLUMN status varchar(64) NOT NULL")
+
+	gh, _ := assessmentFor(p, EngineGhOst)
+	if !gh.EnvironmentReady() {
+		t.Fatalf("unmet prerequisites: %v", gh.EnvironmentProblems())
+	}
+	if !gh.Runnable() {
+		t.Fatal("gh-ost should be runnable on a properly configured server")
+	}
+	if p.Recommendation.Engine != EngineGhOst {
+		t.Fatalf("got %q, want gh-ost", p.Recommendation.Engine)
+	}
+}
+
+func TestBinlogRowImageMustBeFull(t *testing.T) {
+	m := binlogOn()
+	m["binlog_row_image"] = "MINIMAL"
+	p := settingsPlan(t, m, "MODIFY COLUMN status varchar(64) NOT NULL")
+
+	gh, _ := assessmentFor(p, EngineGhOst)
+	if gh.EnvironmentReady() {
+		t.Fatal("MINIMAL row image must block gh-ost")
+	}
+	var named bool
+	for _, problem := range gh.EnvironmentProblems() {
+		if problem == "binlog_row_image is FULL" {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("problems = %v", gh.EnvironmentProblems())
+	}
+}
+
+func TestReadOnlyServerBlocksEveryEngine(t *testing.T) {
+	m := binlogOn()
+	m["read_only"] = "ON"
+	p := settingsPlan(t, m, "MODIFY COLUMN status varchar(64) NOT NULL")
+
+	for _, e := range []Engine{EngineNative, EngineGhOst, EnginePtOSC} {
+		a, ok := assessmentFor(p, e)
+		if !ok {
+			t.Fatalf("%s missing", e)
+		}
+		if a.EnvironmentReady() {
+			t.Errorf("%s should be blocked by read_only", e)
+		}
+	}
+}
+
+func TestSettingChecksGradeEachRow(t *testing.T) {
+	checks := SettingChecks(SettingsFromMap(binlogOff()))
+	bySetting := map[string]SettingCheck{}
+	for _, c := range checks {
+		bySetting[c.Setting] = c
+	}
+
+	if bySetting["log_bin"].Status != EnvFail {
+		t.Errorf("log_bin = %q, want fail", bySetting["log_bin"].Status)
+	}
+	if bySetting["log_bin"].Required != "ON" {
+		t.Errorf("required = %q", bySetting["log_bin"].Required)
+	}
+	if bySetting["binlog_format"].Status != EnvOK {
+		t.Errorf("binlog_format = %q", bySetting["binlog_format"].Status)
+	}
+	if len(bySetting["log_bin"].NeededBy) == 0 {
+		t.Error("log_bin must name the engines that need it")
+	}
+
+	fails, _, _ := EnvironmentSummary(checks)
+	if fails != 1 {
+		t.Errorf("fails = %d, want 1", fails)
+	}
+	if hints := FixHints(checks); len(hints) != 1 {
+		t.Errorf("hints = %v", hints)
+	}
+}
+
+func TestSettingChecksReportUnknownWithoutLiveState(t *testing.T) {
+	checks := SettingChecks(SettingsFromMap(nil))
+	for _, c := range checks {
+		if c.Status != EnvUnknown {
+			t.Errorf("%s = %q, want unknown when the server was not inspected", c.Setting, c.Status)
+		}
+		if c.Current != "(not inspected)" {
+			t.Errorf("%s current = %q", c.Setting, c.Current)
+		}
+	}
+	if hints := FixHints(checks); len(hints) != 0 {
+		t.Errorf("no fix hints should be offered for unknown settings: %v", hints)
+	}
+}
+
+func TestUnknownSettingsDoNotBlockRunnable(t *testing.T) {
+	// Offline plans must not pretend the environment is broken.
+	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", func(in *Input) {
+		in.Binaries = availableBinaries()
+		in.Settings = ServerSettings{}
+	})
+	gh, _ := assessmentFor(p, EngineGhOst)
+	if !gh.EnvironmentReady() {
+		t.Fatalf("unknown settings should not fail: %v", gh.EnvironmentProblems())
 	}
 }

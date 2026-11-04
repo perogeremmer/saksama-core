@@ -1011,7 +1011,8 @@ func TestIntrospectSchemaTablesReadsEveryTable(t *testing.T) {
 	}
 
 	// And the assessment must turn that into a usable recommendation.
-	rows := analyzer.AssessSchema(tables, model.Server{Version: "8.0.46", Vendor: "mysql"}, nil)
+	settings, _ := c.Settings(context.Background())
+	rows := analyzer.AssessSchema(tables, model.Server{Version: "8.0.46", Vendor: "mysql"}, nil, settings)
 	byTable := map[string]analyzer.TableAssessment{}
 	for _, r := range rows {
 		byTable[r.Table] = r
@@ -1024,5 +1025,61 @@ func TestIntrospectSchemaTablesReadsEveryTable(t *testing.T) {
 	}
 	if byTable["audit"].RebuildEngine != analyzer.EngineNone {
 		t.Errorf("audit rebuild engine = %q, want none", byTable["audit"].RebuildEngine)
+	}
+}
+
+// --- server settings doctor -------------------------------------------------
+
+func TestSettingsAreReadFromAServerWithoutBinlog(t *testing.T) {
+	// This container is started without --log-bin by the integration target, so on
+	// MySQL 8.0 the value depends on the server default. Assert the read works and
+	// that the doctor agrees with what the server says, whichever it is.
+	schema, db := fixtureSchema(t)
+	_ = schema
+
+	c := introspect.NewCollector(db, schema, "")
+	settings, err := c.Settings(context.Background())
+	if err != nil {
+		t.Fatalf("settings: %v", err)
+	}
+	for _, key := range []string{"log_bin", "binlog_format", "read_only", "performance_schema"} {
+		if _, ok := settings[key]; !ok {
+			t.Errorf("missing %s in the settings read", key)
+		}
+	}
+
+	checks := analyzer.SettingChecks(analyzer.SettingsFromMap(settings))
+	if len(checks) == 0 {
+		t.Fatal("no setting checks produced")
+	}
+	// The check must reflect the server, not a guess.
+	var logBin analyzer.SettingCheck
+	for _, c := range checks {
+		if c.Setting == "log_bin" {
+			logBin = c
+		}
+	}
+	if logBin.Current == "" || logBin.Current == "(not inspected)" {
+		t.Fatalf("log_bin was not read: %+v", logBin)
+	}
+	if logBin.Status == analyzer.EnvFail && !strings.EqualFold(logBin.Current, "OFF") {
+		t.Fatalf("log_bin=%q reported as a failure", logBin.Current)
+	}
+
+	// And the plan must carry that environment report, so `apply` can refuse on an
+	// unconfigured server rather than failing inside the engine.
+	runner, _ := newRunner(t)
+	runner.DB = db
+	mustExec(t, db,
+		"CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, `status` varchar(32) NOT NULL, "+
+			"PRIMARY KEY (`id`)) ENGINE=InnoDB")
+	prep, err := runner.PlanOnly(context.Background(),
+		applyRequest(schema, "t", "MODIFY COLUMN status varchar(64) NOT NULL"))
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	defer prep.Close()
+	if len(prep.Plan.Environment) == 0 {
+		t.Fatal("the plan carries no environment report")
 	}
 }

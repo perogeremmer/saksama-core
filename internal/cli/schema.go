@@ -10,7 +10,7 @@ const planJSONSchema = `{
   "$id": "https://saksama.dev/schema/plan-v1.json",
   "title": "Saksama plan",
   "type": "object",
-  "required": ["contract_version", "generated_at", "target", "alter", "server", "schema", "schema_fingerprint", "operations", "recommendation", "checks", "duration", "disk", "recovery", "verification", "engines", "table_facts"],
+  "required": ["contract_version", "generated_at", "target", "alter", "server", "schema", "schema_fingerprint", "operations", "recommendation", "checks", "duration", "disk", "recovery", "verification", "engines", "table_facts", "environment"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 1 },
@@ -167,6 +167,23 @@ const planJSONSchema = `{
         }
       }
     },
+    "environment": {
+      "description": "Server settings the engines need, next to what the server reports.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["setting", "current", "required", "status", "needed_by"],
+        "additionalProperties": false,
+        "properties": {
+          "setting": { "type": "string" },
+          "current": { "type": "string" },
+          "required": { "type": "string" },
+          "status": { "enum": ["ok", "fail", "warn", "unknown"] },
+          "needed_by": { "type": "array", "items": { "enum": ["native", "gh-ost", "pt-osc", "none"] } },
+          "note": { "type": "string" }
+        }
+      }
+    },
     "engines": {
       "description": "Suitability of every execution path for this specific change, including paths this build cannot run yet.",
       "type": "array",
@@ -180,6 +197,19 @@ const planJSONSchema = `{
           "summary": { "type": "string" },
           "executable": { "type": "boolean" },
           "installed": { "type": "boolean" },
+          "environment": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "met", "detail"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "met": { "type": "boolean" },
+                "detail": { "type": "string" }
+              }
+            }
+          },
           "wrapped": { "type": "boolean" },
           "install": { "type": "string" },
           "command": { "type": "string" },

@@ -35,7 +35,8 @@ type TableAssessment struct {
 }
 
 // AssessSchema judges every table in a schema for the copy engines.
-func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]EngineBinary) []TableAssessment {
+func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]EngineBinary, settings map[string]string) []TableAssessment {
+	env := SettingsFromMap(settings)
 	out := make([]TableAssessment, 0, len(tables))
 
 	for _, t := range tables {
@@ -48,7 +49,7 @@ func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]En
 			PrimaryKey:  describeKey(t),
 		}
 
-		in := Input{Server: srv, Table: t, Binaries: binaries}
+		in := Input{Server: srv, Table: t, Binaries: binaries, Settings: env}
 		for _, assess := range AssessEngines(in, t) {
 			switch assess.Engine {
 			case EngineGhOst:
@@ -59,11 +60,17 @@ func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]En
 		}
 
 		switch {
-		case a.GhOst == VerdictSuitable:
+		case a.GhOst == VerdictSuitable && ghOstEnvReady(env):
 			a.RebuildEngine = EngineGhOst
 		case a.PtOSC == VerdictSuitable:
 			a.RebuildEngine = EnginePtOSC
-			a.Notes = append(a.Notes, "pt-osc only: gh-ost cannot handle this table")
+			switch {
+			case a.GhOst == VerdictSuitable:
+				a.Notes = append(a.Notes,
+					"gh-ost suits this table but the server is not configured for it; see SERVER SETTINGS")
+			default:
+				a.Notes = append(a.Notes, "pt-osc only: gh-ost cannot handle this table")
+			}
 		default:
 			a.RebuildEngine = EngineNone
 			a.Blockers = rebuildBlockers(t)
@@ -84,6 +91,17 @@ func AssessSchema(tables []model.Table, srv model.Server, binaries map[string]En
 
 	sort.Slice(out, func(i, j int) bool { return out[i].SizeBytes > out[j].SizeBytes })
 	return out
+}
+
+// ghOstEnvReady reports whether the server is configured for gh-ost. Table shape
+// is not enough: a server without binary logging cannot run it at all.
+func ghOstEnvReady(settings ServerSettings) bool {
+	for _, r := range EngineEnvironment(settings, EngineGhOst) {
+		if !r.Met {
+			return false
+		}
+	}
+	return true
 }
 
 func describeKey(t model.Table) string {

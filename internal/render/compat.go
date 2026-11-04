@@ -46,6 +46,13 @@ func Compatibility(w io.Writer) error {
 			row.Engine, row.Version, row.Status.Mark(), row.Detail)
 	}
 
+	b.WriteString("\n## Server settings `advise` reads\n\n")
+	b.WriteString("A suitabile engine on a server that cannot start it is still a failed migration,\n")
+	b.WriteString("so these are checked and shown with the value the server reports right now.\n\n")
+	for _, setting := range support.ServerSettings {
+		fmt.Fprintf(&b, "- %s\n", setting)
+	}
+
 	b.WriteString("\n## Findings\n\n")
 	b.WriteString("Facts that cost someone an afternoon. They are here so the next person does not pay twice.\n\n")
 	for _, f := range support.Findings {

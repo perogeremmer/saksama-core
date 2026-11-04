@@ -102,6 +102,35 @@ NEXT
   inspect one table in detail:     saksama advise --live -d <db> -t <table>
 ```
 
+Before the tables, `advise` reports the server settings the engines need — the
+`flutter doctor` part. An engine can suit a table perfectly and still refuse to
+start because binary logging is off:
+
+```
+SERVER SETTINGS (what the engines require, against what this server reports)
++----------------------+-----------------+--------------------------+--------+-----------+------------------------------------+
+| SETTING              | CURRENT         | REQUIRED                 | STATUS | NEEDED BY | WHY                                |
++----------------------+-----------------+--------------------------+--------+-----------+------------------------------------+
+| log_bin              | OFF             | ON                       | FAIL   | gh-ost    | gh-ost follows writes through it   |
+| binlog_format        | ROW             | ROW                      | ok     | gh-ost    | statement format loses row data    |
+| binlog_row_image     | FULL            | FULL                     | ok     | gh-ost    | MINIMAL omits needed columns       |
+| server_id            | 1               | non-zero                 | ok     | gh-ost    | gh-ost refuses server_id=0         |
+| read_only            | OFF             | OFF                      | ok     | all       | read-only rejects every write      |
+| performance_schema   | ON              | ON                       | ok     | native    | needed to see other sessions locks |
+| sql_require_primary_key | OFF          | OFF                      | ok     | all       | ON rejects DDL on keyless tables   |
++----------------------+-----------------+--------------------------+--------+-----------+------------------------------------+
+
+  1 blocking, 0 advisory, 0 unknown
+
+FIX FIRST
+  - log_bin: enable binary logging in your my.cnf (log_bin=ON) and restart the server
+```
+
+With `log_bin` off the recommendation quietly moves to `pt-osc` — the engine this
+server *can* start — and a note says why gh-ost was passed over. If you recorded
+`gh-ost` yourself, that choice is honoured and the plan refuses with `R8` naming
+the setting to fix, instead of swapping engines behind your back.
+
 Borders are ASCII (`+`, `-`, `|`) rather than box-drawing characters, because
 these commands run over SSH on servers with `TERM=dumb` and locale `C`. Pass
 `--plain` for borderless output when piping into another tool.
@@ -486,7 +515,7 @@ is stale.
 ## Development
 
 ```bash
-make test               # 182 unit tests
+make test               # 190 unit tests
 make lint               # go vet + gofmt check
 make cover              # per-package coverage
 make demo               # two plan cards side by side, no database needed

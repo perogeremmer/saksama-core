@@ -161,7 +161,10 @@ type Plan struct {
 	// TableFacts are the observed schema facts the advice is based on, stated
 	// once so every conclusion is traceable to something real.
 	TableFacts []Evidence `json:"table_facts"`
-	Notes      []string   `json:"notes,omitempty"`
+	// Environment is the server-settings doctor report: what the engines need,
+	// next to what the server actually reports right now.
+	Environment []SettingCheck `json:"environment"`
+	Notes       []string       `json:"notes,omitempty"`
 }
 
 // Input is everything the analyzer needs. No database handle, ever.
@@ -186,6 +189,9 @@ type Input struct {
 	// Binaries are the engine executables found on this machine, injected so the
 	// analyzer never spawns a process.
 	Binaries map[string]EngineBinary
+	// Settings are the server variables the engines depend on. Empty means the
+	// server was not inspected, and every environment check reports "unknown".
+	Settings ServerSettings
 	MaxLoad  int   // optional: current Threads_running observation
 	FreeDisk int64 // optional: bytes free on the data volume
 	// Live is the observation collected from a real server. Nil means the plan
@@ -281,11 +287,12 @@ func Analyze(in Input) Plan {
 
 	// Engine suitability drives routing, so it must be computed first.
 	p.Engines = AssessEngines(in, projected)
+	p.Environment = SettingChecks(in.Settings)
 	p.TableFacts = (&AdviceInput{Input: in, Projected: projected}).schemaFacts()
 
 	// Routing.
 	rec := route(in, p.Engines, anyRebuild, anyNative, anyBlocked, projected)
-	p.Checks = append(p.Checks, engineChecks(p.Engines, rec)...)
+	p.Checks = append(p.Checks, engineChecks(in, p.Engines, rec)...)
 	p.Checks = append(p.Checks, engineWarnings(in, p.Engines, rec)...)
 	for _, c := range p.Checks {
 		switch c.Severity {
@@ -301,9 +308,15 @@ func Analyze(in Input) Plan {
 	// operation, an impossible index, a touched constrained column. The exception
 	// is "engine not installed" (R3): that must keep naming the engine, because
 	// install this and retry is the whole answer.
+	// "Engine not installed" and "server not configured" are fixable around the
+	// engine, so they must keep naming it: install this, change that, retry.
+	fixableAround := map[string]bool{
+		chkEngineNotInstalled: true,
+		"R8":                  true,
+	}
 	hardBlockers := 0
 	for _, c := range p.Checks {
-		if c.Severity != SeverityBlocker || c.ID == chkEngineNotInstalled {
+		if c.Severity != SeverityBlocker || fixableAround[c.ID] {
 			continue
 		}
 		hardBlockers++
@@ -330,6 +343,9 @@ func Analyze(in Input) Plan {
 			rec.ExecutableReason = "the engine binary is not installed on this machine"
 		case !a.Wrapped:
 			rec.ExecutableReason = "this build has no adapter for the engine"
+		case !a.EnvironmentReady():
+			rec.ExecutableReason = "the server is not configured for it: " +
+				strings.Join(a.EnvironmentProblems(), ", ")
 		case rec.Blocked:
 			rec.ExecutableReason = fmt.Sprintf("%d blocker(s) must be resolved first", rec.Blockers)
 		}

@@ -29,10 +29,25 @@ func route(in Input, assessments []EngineAssessment, anyRebuild, anyNative, anyB
 	}
 
 	// 1. What would the rules pick on their own?
+	//
+	// Prefer an engine this server can actually start. A server without binary
+	// logging would otherwise get a recommendation it cannot follow, when the
+	// other copy engine would work right now. The blocked engine still says why in
+	// its own assessment, and an explicit choice is honoured below.
 	for _, want := range ladder {
-		if a, ok := findAssessment(assessments, want); ok && a.Verdict == VerdictSuitable {
+		if a, ok := findAssessment(assessments, want); ok && a.Verdict == VerdictSuitable && a.EnvironmentReady() {
 			rec.Engine = want
 			break
+		}
+	}
+	if rec.Engine == EngineNone {
+		// Nothing is fully available: name the best fit anyway, so the plan can say
+		// what to fix rather than shrugging.
+		for _, want := range ladder {
+			if a, ok := findAssessment(assessments, want); ok && a.Verdict == VerdictSuitable {
+				rec.Engine = want
+				break
+			}
 		}
 	}
 	rec.Analyzer = rec.Engine
@@ -46,10 +61,15 @@ func route(in Input, assessments []EngineAssessment, anyRebuild, anyNative, anyB
 		}
 	case EngineGhOst:
 		rec.Reasons = append(rec.Reasons,
-			"the change needs a table rebuild, and gh-ost is the cheapest engine that fits this table")
+			"the change needs a table rebuild, and gh-ost is the cheapest engine that fits this table and this server")
 	case EnginePtOSC:
-		rec.Reasons = append(rec.Reasons,
-			"the change needs a table rebuild; gh-ost does not fit this table, and pt-osc finds it cheap enough")
+		if gh, ok := findAssessment(assessments, EngineGhOst); ok && gh.Verdict == VerdictSuitable && !gh.EnvironmentReady() {
+			rec.Reasons = append(rec.Reasons,
+				"gh-ost suits this table but this server cannot start it, so the copy engine that works now is pt-osc")
+		} else {
+			rec.Reasons = append(rec.Reasons,
+				"the change needs a table rebuild; gh-ost does not fit this table, and pt-osc does")
+		}
 	}
 
 	// 2. The operator's decision wins, even when it disagrees.
@@ -83,7 +103,7 @@ func route(in Input, assessments []EngineAssessment, anyRebuild, anyNative, anyB
 }
 
 // engineChecks turns the routing decision into blockers the operator can act on.
-func engineChecks(assessments []EngineAssessment, rec Recommendation) []Check {
+func engineChecks(in Input, assessments []EngineAssessment, rec Recommendation) []Check {
 	var out []Check
 
 	effective, ok := findAssessment(assessments, rec.Engine)
@@ -132,6 +152,23 @@ func engineChecks(assessments []EngineAssessment, rec Recommendation) []Check {
 		})
 	}
 
+	// Server configuration is a precondition, not a detail. An engine that suits
+	// the table perfectly still cannot start without binary logging.
+	if ok && effective.Verdict == VerdictSuitable && effective.Installed && !effective.EnvironmentReady() {
+		var detail []string
+		for _, r := range effective.Environment {
+			if !r.Met {
+				detail = append(detail, fmt.Sprintf("%s (%s)", r.Name, r.Detail))
+			}
+		}
+		out = append(out, Check{
+			ID: "R8", Severity: SeverityBlocker,
+			Title:       fmt.Sprintf("the server is not configured for %s", effective.Engine),
+			Detail:      strings.Join(detail, "; "),
+			Remediation: strings.Join(FixHints(SettingChecks(in.Settings)), "; "),
+		})
+	}
+
 	return out
 }
 
@@ -163,6 +200,18 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 				Title:       "a copy engine was chosen although native would suffice",
 				Detail:      fmt.Sprintf("%s was chosen, but MySQL can do this change in place", rec.Engine),
 				Remediation: "native avoids copying the table and needs no extra disk; keep the copy engine only if you want its throttling or cut-over pause",
+			})
+		}
+	}
+
+	// Say out loud when a cheaper engine was passed over because of the server.
+	if rec.Engine != EngineGhOst && rec.Engine != EngineNone {
+		if gh, ok := findAssessment(assessments, EngineGhOst); ok && gh.Verdict == VerdictSuitable && !gh.EnvironmentReady() {
+			out = append(out, Check{
+				ID: "R9", Severity: SeverityWarn,
+				Title:       "gh-ost was passed over: the server is not configured for it",
+				Detail:      strings.Join(gh.EnvironmentProblems(), ", "),
+				Remediation: strings.Join(FixHints(SettingChecks(in.Settings)), "; "),
 			})
 		}
 	}

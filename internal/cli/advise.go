@@ -169,7 +169,9 @@ func adviseOffline(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdo
 			ops = []model.Op{{Kind: model.OpUnknown, Raw: strings.TrimSpace(o.alter)}}
 		}
 	} else {
-		rows := analyzer.AssessSchema([]model.Table{tbl}, srv, binaries)
+		// Offline: no server to ask, so the environment checks report "unknown"
+		// rather than pretending the settings are fine.
+		rows := analyzer.AssessSchema([]model.Table{tbl}, srv, binaries, nil)
 		if o.jsonOut {
 			enc := json.NewEncoder(stdout)
 			enc.SetIndent("", "  ")
@@ -345,7 +347,8 @@ func adviseSchema(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdou
 		}
 	}
 
-	rows := analyzer.AssessSchema(tables, srv, binaries)
+	settings, _ := collector.Settings(ctx)
+	rows := analyzer.AssessSchema(tables, srv, binaries, settings)
 	artifacts := introspect.FindArtifacts(tables)
 
 	if o.jsonOut {
@@ -360,6 +363,11 @@ func adviseSchema(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdou
 		return ExitOK
 	}
 
+	if err := render.Environment(stdout, analyzer.SettingChecks(analyzer.SettingsFromMap(settings)), !o.plain); err != nil {
+		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
+		return ExitInternal
+	}
+	fmt.Fprintln(stdout)
 	if err := render.SchemaReportStyled(stdout, o.database, rows, artifacts, !o.plain); err != nil {
 		fmt.Fprintf(stderr, "saksama advise: %v\n", err)
 		return ExitInternal

@@ -115,6 +115,22 @@ var Engines = []EngineRow{
 
 // Findings are hard-won facts that cost someone an afternoon. They belong in the
 // document because the next person will hit them too.
+// ServerSettings are the variables `saksama advise` reads before recommending a
+// copy engine. They are listed here because "which engine suits my table" and
+// "can my server start that engine" are different questions with different fixes.
+var ServerSettings = []string{
+	"log_bin: ON. gh-ost follows writes through the binary log; without it there is nothing to follow.",
+	"binlog_format: ROW. Statement-based logging cannot reproduce row images.",
+	"binlog_row_image: FULL. MINIMAL omits the column data gh-ost has to replay.",
+	"server_id: any non-zero value. gh-ost refuses server_id=0.",
+	"read_only / super_read_only: OFF. A read-only server rejects every migration.",
+	"performance_schema: ON. Without it the metadata-lock check cannot see other sessions, so the main outage cause goes undetected.",
+	"transaction_isolation: REPEATABLE-READ or lower. SERIALIZABLE widens locking during a copy.",
+	"innodb_file_per_table: ON. With it OFF, dropping a table never returns disk to the filesystem, so a rebuild does not free space.",
+	"sql_require_primary_key: OFF. When ON, DDL on a keyless table is rejected outright.",
+	"lower_case_table_names: whatever it is, keep host and server consistent; a mismatch breaks table naming in subtle ways.",
+}
+
 var Findings = []string{
 	"gh-ost validates the connection port against @@port and refuses to start when they differ. " +
 		"Any proxy, port mapping, or NAT triggers this. Saksama reads @@port and adds --skip-port-validation automatically when it sees the mismatch.",

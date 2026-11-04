@@ -50,6 +50,8 @@ type EngineAssessment struct {
 	Command string `json:"command,omitempty"`
 	// Steps are what the user does after (or instead of) running the command.
 	Steps []string `json:"steps,omitempty"`
+	// Environment lists the server prerequisites, with what is actually set.
+	Environment []Requirement `json:"environment,omitempty"`
 	// Installed reports whether the engine binary exists on this machine.
 	Installed bool `json:"installed"`
 	// Wrapped reports whether this build can drive the engine itself.
@@ -60,8 +62,36 @@ type EngineAssessment struct {
 }
 
 // Runnable reports whether Saksama can execute this engine for this change.
+//
+// Three independent things must hold: the engine must be able to do this change,
+// the binary must exist, and the server must be configured for it. They are
+// reported separately so a fix is obvious.
 func (x EngineAssessment) Runnable() bool {
-	return x.Verdict == VerdictSuitable && x.Installed && x.Wrapped
+	if x.Verdict != VerdictSuitable || !x.Installed || !x.Wrapped {
+		return false
+	}
+	return x.EnvironmentReady()
+}
+
+// EnvironmentReady reports whether every server-side prerequisite is met.
+func (x EngineAssessment) EnvironmentReady() bool {
+	for _, r := range x.Environment {
+		if !r.Met {
+			return false
+		}
+	}
+	return true
+}
+
+// EnvironmentProblems names the unmet server prerequisites.
+func (x EngineAssessment) EnvironmentProblems() []string {
+	var out []string
+	for _, r := range x.Environment {
+		if !r.Met {
+			out = append(out, r.Name)
+		}
+	}
+	return out
 }
 
 // EngineBinary is a locally discovered engine binary, injected so the analyzer
@@ -267,6 +297,7 @@ func (a *AdviceInput) assessNative() EngineAssessment {
 	x := a.newAssessment(EngineNative, "run ALTER TABLE directly and let MySQL do it in place")
 	x.Installed = true // the server is the engine; nothing to install
 	x.Wrapped = true
+	x.Environment = EngineEnvironment(a.Input.Settings, EngineNative)
 
 	for _, op := range in.Ops {
 		c := capabilityFor(op, in.Server, in.Table)
@@ -375,6 +406,7 @@ func (a *AdviceInput) assessGhOst() EngineAssessment {
 	in, t := a.Input, a.Projected
 	x := a.newAssessment(EngineGhOst, "GitHub's gh-ost: copy into a ghost table, cut over atomically")
 	x.Wrapped = true
+	x.Environment = EngineEnvironment(a.Input.Settings, EngineGhOst)
 
 	if v, err := model.ParseVersion(in.Server.Version); err != nil {
 		x.require("server version is known", false, "cannot parse "+in.Server.Version)
@@ -475,6 +507,7 @@ func (a *AdviceInput) assessPtOSC() EngineAssessment {
 	in, t := a.Input, a.Projected
 	x := a.newAssessment(EnginePtOSC, "Percona Toolkit's pt-online-schema-change: triggers plus a shadow table")
 	x.Wrapped = true
+	x.Environment = EngineEnvironment(a.Input.Settings, EnginePtOSC)
 
 	x.require("InnoDB storage engine", strings.EqualFold(t.Engine, "InnoDB"),
 		iff(strings.EqualFold(t.Engine, "InnoDB"), "table is InnoDB", "table engine is "+t.Engine))

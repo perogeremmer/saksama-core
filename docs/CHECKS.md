@@ -150,3 +150,37 @@ $ saksama plan -h db.prod -d shop -t orders --alter "ADD INDEX ix_created (creat
 - [ ] Test **negative**: normal case → check nggak nyala (wajib, supaya nggak false-positive)
 - [ ] Remediation text yang actionable (bukan cuma "perbaiki")
 - [ ] Referensi nomor error MySQL
+
+---
+
+## S. Server settings (the `advise` doctor)
+
+Checked by `saksama advise --live` and stored in the plan as `environment[]`.
+These are **not** table-shape checks: they decide whether an engine can *start*,
+not whether it suits the table. Both must pass.
+
+| ID | Setting | Required | Needed by | Status when wrong |
+|---|---|---|---|---|
+| S1 | `log_bin` | `ON` | gh-ost | FAIL: gh-ost follows writes through the binary log |
+| S2 | `binlog_format` | `ROW` | gh-ost | FAIL: statement format cannot reproduce row images |
+| S3 | `binlog_row_image` | `FULL` | gh-ost | FAIL: MINIMAL omits the columns gh-ost replays |
+| S4 | `server_id` | non-zero | gh-ost | FAIL: gh-ost refuses `server_id=0` |
+| S5 | `read_only` | `OFF` | all | FAIL: a read-only server rejects every migration |
+| S6 | `super_read_only` | `OFF` | all | FAIL: overrides `read_only` for privileged users |
+| S7 | `performance_schema` | `ON` | native, gh-ost | FAIL: the metadata-lock check goes blind |
+| S8 | `transaction_isolation` | not `SERIALIZABLE` | pt-osc | FAIL: SERIALIZABLE widens locking during the copy |
+| S9 | `sql_require_primary_key` | `OFF` | all | FAIL: DDL on keyless tables is rejected |
+| S10 | `innodb_file_per_table` | `ON` | advisory | WARN: a rebuild never returns disk to the filesystem |
+| S11 | `lower_case_table_names` | consistent with host | advisory | INFO only |
+| S12 | `gtid_mode` | either | advisory | INFO only: neither engine requires GTID |
+
+Rules:
+
+- **Unknown is not a pass.** An offline plan reports every row as `unknown` and
+  never claims the server is ready.
+- **A fixable blocker keeps the engine named.** When the chosen engine cannot
+  start, the plan refuses with `R8` (or `R3` for a missing binary) and names the
+  setting, because "install this / change that, then retry" is the useful answer.
+- **Automatic routing prefers a runnable engine.** If gh-ost suits the table but
+  the server cannot run it, the recommendation moves to pt-osc and `R9` explains
+  the skip. An explicit `engine set` is never overridden.
