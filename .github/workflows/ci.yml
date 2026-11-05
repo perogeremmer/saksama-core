@@ -87,18 +87,27 @@ jobs:
           docker run --rm -v "$PWD/bin/saksama:/saksama:ro" --entrypoint sh "${{ matrix.image }}" -c '
             set -e
             /saksama version
-            out=$(/saksama engine doctor pt-osc 2>&1)
+            # `engine doctor` exits 1 when something is missing - that is its job -
+            # so the substitution must not trip `set -e`.
+            out=$(/saksama engine doctor pt-osc 2>&1 || true)
             echo "$out"
-            id=$(sed -n "s/^ID=//p" /etc/os-release | tr -d "\"")
+            id=$(sed -n "s/^ID=//p" /etc/os-release | tr -d "\"\047")
+            # The verb differs too: dnf installs, pacman -S, apk add.
             case "$id" in
-              fedora|rhel|centos) pm="dnf" ;;
-              arch)               pm="pacman" ;;
-              alpine)             pm="apk" ;;
-              *) echo "unexpected ID $id in this job"; exit 1 ;;
+              fedora|rhel|centos) pm="dnf";  want="dnf install" ;;
+              arch)               pm="pacman"; want="pacman -S" ;;
+              alpine)             pm="apk";  want="apk add" ;;
+              *) echo "unexpected ID ${id} in this job"; exit 1 ;;
             esac
-            echo "$out" | grep -q "$pm install" || { echo "expected a $pm command, got none"; exit 1; }
-            if echo "$out" | grep -q "apt-get"; then echo "apt advice on $id"; exit 1; fi
-            echo "ok: $pm advice on $id"
+            if ! echo "$out" | grep -qF "$want"; then
+              echo "expected \"${want}\" in the advice, got none"
+              exit 1
+            fi
+            if echo "$out" | grep -q "apt-get"; then
+              echo "apt-get advice on ${id}"
+              exit 1
+            fi
+            echo "ok: ${pm} advice on ${id}"
           '
 
   integration:
