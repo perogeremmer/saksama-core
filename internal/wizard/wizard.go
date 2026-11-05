@@ -210,6 +210,45 @@ func (w *Wizard) acceptUnknownMDL(plan analyzer.Plan) bool {
 	return err == nil && ok
 }
 
+// allowNativeRebuild asks whether MySQL may rebuild this table in place.
+//
+// Only asked when the analyzer's plan carries R13, which is the check that says
+// native was passed over for exactly this reason. The question matters on a stock
+// 5.6 or 5.7 server: with no binary log gh-ost cannot run, and pt-osc may not be
+// installed, so the choice is between installing a copy engine and letting the
+// server rebuild a small table itself. Neither answer is wrong; only the operator
+// knows whether this table may be paused, and a "no" keeps the plan refused.
+func (w *Wizard) allowNativeRebuild(plan analyzer.Plan) bool {
+	offered := false
+	for _, c := range plan.Checks {
+		if c.ID == "R13" {
+			offered = true
+			break
+		}
+	}
+	if !offered {
+		return false
+	}
+	ok, err := w.p.Confirm(
+		"MySQL can rebuild this table in place, with nothing to install. It cannot be paused or throttled. Allow it?", false)
+	return err == nil && ok
+}
+
+// reanalyse re-plans with an acknowledgement applied and shows the result, so the
+// screen never keeps a blocker it has just been told to drop.
+func (w *Wizard) reanalyse(req core.Request, flag string) (*core.Prepared, error) {
+	prep, err := w.b.Analyze(context.Background(), req)
+	if err != nil {
+		return nil, err
+	}
+	w.p.Printf("\nre-read with %s:\n", flag)
+	if err := render.PlanCard(w.out, prep.Plan); err != nil {
+		return nil, err
+	}
+	w.printChecks(prep.Plan)
+	return prep, nil
+}
+
 // ensureTables reads the schema once per session, so a table can be picked from a
 // list rather than typed. Every screen that offers a table needs the same read.
 func (w *Wizard) ensureTables() bool {
@@ -493,17 +532,28 @@ func (w *Wizard) plan() {
 	// queue for lack of a grant.
 	if prep != nil && prep.Plan.Recommendation.Blockers > 0 && w.acceptUnknownMDL(prep.Plan) {
 		req.AcceptUnknownMDL = true
-		prep, err = w.b.Analyze(context.Background(), req)
+		prep, err = w.reanalyse(req, "--accept-unknown-mdl")
 		if err != nil {
 			w.fail(err)
 			return
 		}
-		w.p.Printf("\nre-read with --accept-unknown-mdl:\n")
-		if err := render.PlanCard(w.out, prep.Plan); err != nil {
+		if prep == nil {
+			return
+		}
+	}
+
+	// Asked on the second plan, not the first: on 5.6 in production both questions
+	// arrive together, and the lock-queue answer changes what the rebuild one says.
+	if prep != nil && prep.Plan.Recommendation.Blockers > 0 && w.allowNativeRebuild(prep.Plan) {
+		req.AllowNativeRebuild = true
+		prep, err = w.reanalyse(req, "--allow-native-rebuild")
+		if err != nil {
 			w.fail(err)
 			return
 		}
-		w.printChecks(prep.Plan)
+		if prep == nil {
+			return
+		}
 	}
 
 	if prep.Plan.Recommendation.Blockers > 0 {
@@ -748,8 +798,17 @@ func (w *Wizard) apply() {
 	// does this run need the operator to accept a risk that only exists on some
 	// servers? It writes nothing, so asking here costs a handful of queries.
 	if preview, err := w.b.Analyze(context.Background(), req); err == nil && preview != nil &&
-		preview.Plan.Recommendation.Blockers > 0 && w.acceptUnknownMDL(preview.Plan) {
-		req.AcceptUnknownMDL = true
+		preview.Plan.Recommendation.Blockers > 0 {
+		if w.acceptUnknownMDL(preview.Plan) {
+			req.AcceptUnknownMDL = true
+			preview, err = w.b.Analyze(context.Background(), req)
+			if err != nil || preview == nil {
+				preview = &core.Prepared{Plan: analyzer.Plan{Recommendation: analyzer.Recommendation{Blockers: 1}}}
+			}
+		}
+		if preview.Plan.Recommendation.Blockers > 0 && w.allowNativeRebuild(preview.Plan) {
+			req.AllowNativeRebuild = true
+		}
 	}
 	w.p.Printf("\nequivalent: %s\n", req.CommandLineFor("apply"))
 

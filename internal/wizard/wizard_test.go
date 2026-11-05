@@ -472,6 +472,75 @@ func TestBlockedMDLIsOfferedForAcceptanceAndThenReanalysed(t *testing.T) {
 	}
 }
 
+// A plan on a stock 5.6/5.7 server arrives with a copy engine it cannot install and
+// a rebuild the server could do itself. The analyzer names the second door with R13,
+// so the menu asks about it - otherwise the CLI could pass --allow-native-rebuild and
+// the menu could not, which is the same dead end E5b used to be.
+func TestOfferedNativeRebuildIsAcceptedAndThenReanalysed(t *testing.T) {
+	blocked := &core.Prepared{Plan: analyzer.Plan{
+		Target: analyzer.Target{Database: "shop", Table: "orders"},
+		Checks: []analyzer.Check{{
+			ID: "R13", Severity: analyzer.SeverityWarn,
+			Title: "native could rebuild this table, but that needs a decision",
+		}},
+		Recommendation: analyzer.Recommendation{Blockers: 1},
+	}}
+	accepted := &core.Prepared{Plan: analyzer.Plan{
+		Target:         analyzer.Target{Database: "shop", Table: "orders"},
+		Checks:         []analyzer.Check{{ID: "R12", Severity: analyzer.SeverityWarn}},
+		Recommendation: analyzer.Recommendation{},
+	}}
+
+	b := &countingBackend{fakeBackend: fakeBackend{}, plans: []*core.Prepared{blocked, accepted}}
+	w, p := newWizard(t, b, "0")
+	w.connected = true
+	w.database = "shop"
+	w.tables = []analyzer.TableAssessment{{Table: "orders"}}
+
+	p = drive(w, "orders", "1", "ix_status", "status", "y", "y", "n")
+	w.plan()
+
+	if len(b.analyzed) != 2 {
+		t.Fatalf("expected a second analysis after allowing the rebuild, got %d", len(b.analyzed))
+	}
+	if !b.analyzed[1].AllowNativeRebuild {
+		t.Fatalf("the second analysis must carry --allow-native-rebuild: %+v", b.analyzed[1])
+	}
+	out := p.output()
+	if !strings.Contains(out, "Allow it?") {
+		t.Fatalf("the rebuild must be asked about:\n%s", out)
+	}
+	if !strings.Contains(out, "--allow-native-rebuild") {
+		t.Fatalf("the equivalent command must show the flag:\n%s", out)
+	}
+}
+
+// Declining keeps the plan as it was: the copy engine stays the answer.
+func TestDecliningNativeRebuildLeavesThePlanAlone(t *testing.T) {
+	blocked := &core.Prepared{Plan: analyzer.Plan{
+		Target: analyzer.Target{Database: "shop", Table: "orders"},
+		Checks: []analyzer.Check{{
+			ID: "R13", Severity: analyzer.SeverityWarn,
+			Title: "native could rebuild this table, but that needs a decision",
+		}},
+		Recommendation: analyzer.Recommendation{Blockers: 1},
+	}}
+	b := &countingBackend{fakeBackend: fakeBackend{}, plans: []*core.Prepared{blocked}}
+	w, _ := newWizard(t, b, "0")
+	w.connected = true
+	w.database = "shop"
+	w.tables = []analyzer.TableAssessment{{Table: "orders"}}
+
+	drive(w, "orders", "1", "ix_status", "status", "y", "n")
+	w.plan()
+
+	for _, req := range b.analyzed {
+		if req.AllowNativeRebuild {
+			t.Fatalf("a declined rebuild must not reach the analyzer: %+v", req)
+		}
+	}
+}
+
 // Declining leaves the plan refused and records nothing.
 func TestDecliningMDLAcceptanceKeepsThePlanRefused(t *testing.T) {
 	blocked := &core.Prepared{Plan: analyzer.Plan{
