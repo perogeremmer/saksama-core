@@ -89,6 +89,10 @@ A tag is the version: `git tag -a vX.Y.Z -F notes.txt && git push origin vX.Y.Z`
 triggers `.github/workflows/release.yml`, which re-runs the tests, builds four
 static binaries plus SBOMs, and publishes them.
 
+Archives carry the binary and `LICENSE`, not the documentation: a README bundled into
+a tarball is a snapshot of the tag date, so every correction would need a release.
+Documents live in the repository at the tag.
+
 Replacing a tag is allowed and supported: `release.mode: replace` in
 `.goreleaser.yaml` means a second run overwrites the assets instead of failing every
 upload with `422 already_exists`. That is for the case this repository has already

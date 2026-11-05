@@ -185,9 +185,13 @@ install -m 0755 saksama ~/.local/bin/saksama   # no sudo, no system directories
 saksama version
 ```
 
-Use `darwin_arm64`, `linux_arm64`, or `darwin_amd64` as appropriate. Each archive
-carries `README.md`, `ARCHITECTURE.md`, `COMMANDS.md`, `LICENSE`, and `docs/`, so the
-documentation you have matches the binary you have.
+Use `darwin_arm64`, `linux_arm64`, or `darwin_amd64` as appropriate. The archive
+holds the binary and its licence; the documents live in this repository at the tag
+you downloaded, so a corrected README never means downloading again:
+
+```bash
+open https://github.com/perogeremmer/saksama-core/tree/${VERSION}   # or just read on
+```
 
 Prefer `go install github.com/perogeremmer/saksama-core/cmd/saksama@${VERSION}` if
 you have a Go toolchain and would rather build it locally.

@@ -25,13 +25,16 @@ archives:
   - id: default
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # The binary and its licence. Documentation is deliberately not bundled: a
+    # README inside a tarball is a snapshot of the day the tag was cut, so every
+    # correction to it needs a new release - and this repository has now paid that
+    # bill twice (v0.2.0 shipped a stale README, v0.3.0 shipped one written before
+    # the production-install section existed). The documents live in the repository
+    # at the tag, which is where a reader looks first anyway.
+    #
+    # LICENSE stays: MIT asks for the notice to travel with the binary.
     files:
-      - README.md
-      - ARCHITECTURE.md
-      - COMMANDS.md
       - LICENSE
-      - docs/CHECKS.md
-      - docs/COMPATIBILITY.md
 
 checksum:
   name_template: checksums.txt
