@@ -70,6 +70,19 @@ type FKCompat struct {
 	Description string
 }
 
+// mdlChainHelp is the one thing an operator needs when a plan says the lock queue is
+// not empty or a statement is holding it: who holds what, and which statement is
+// waiting behind it. Spelled out instead of described, because "look at the metadata
+// locks" is an instruction that arrives while everything is already on fire.
+const mdlChainHelp = "\n" +
+	"see who holds what, and who is waiting:" +
+	"\nSELECT t.PROCESSLIST_ID, t.PROCESSLIST_TIME, l.OBJECT_SCHEMA, l.OBJECT_NAME," +
+	"\n       l.LOCK_TYPE, l.LOCK_STATUS, LEFT(t.PROCESSLIST_INFO, 60) AS waiting_sql" +
+	"\n  FROM performance_schema.metadata_locks l" +
+	"\n  JOIN performance_schema.threads t ON t.THREAD_ID = l.OWNER_THREAD_ID" +
+	"\n WHERE l.OBJECT_SCHEMA NOT IN ('performance_schema','mysql','information_schema')" +
+	"\n ORDER BY l.LOCK_STATUS DESC, t.PROCESSLIST_TIME DESC"
+
 // liveChecks emits the checks that require a database connection.
 func liveChecks(in Input, projected model.Table) []Check {
 	var out []Check
@@ -98,7 +111,7 @@ func liveChecks(in Input, projected model.Table) []Check {
 			ID: "D1", Severity: sev,
 			Title:       "long-running statement may hold the metadata lock",
 			Detail:      detail + sqlSuffix(L.LongestQuerySQL),
-			Remediation: "wait for it to finish, or terminate it deliberately; DDL queues behind an open metadata lock and blocks every other query",
+			Remediation: "wait for it to finish, or terminate it deliberately; DDL queues behind an open metadata lock and blocks every other query." + mdlChainHelp,
 			MySQLError:  1205,
 		})
 	}
@@ -110,7 +123,7 @@ func liveChecks(in Input, projected model.Table) []Check {
 			ID: "D1b", Severity: SeverityBlocker,
 			Title:       "metadata locks are already pending",
 			Detail:      fmt.Sprintf("%d metadata lock request(s) are waiting; a DDL statement would enqueue behind them", L.PendingMDLocks),
-			Remediation: "resolve the existing lock queue first; adding this migration now would extend the outage",
+			Remediation: "resolve the queue before adding to it: the waiting DDL already blocks every query behind it, and one more statement makes the outage worse. Kill the queued DDL first if it is stale - the long SELECT underneath is usually the innocent party." + mdlChainHelp,
 			MySQLError:  1205,
 		})
 	case !L.MDLObservable && !mdlUnavailableByDesign(in.Server):

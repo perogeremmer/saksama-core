@@ -73,8 +73,8 @@ doctor (section S).
 
 | ID | Check | Severity | Status | Note |
 |---|---|---|---|---|
-| D1 | a statement has been running longer than the threshold | `WARN` at 30s, `BLOCKER` at 300s | done | DDL queues behind the metadata lock, and every query queues behind that |
-| D1b | the metadata lock queue is already non-empty, or could not be read | `BLOCKER` when non-empty, `WARN` when unreadable | done | adding this migration would extend the outage; a queue nobody could read is not an empty queue, and on a server that has the table this usually means the account cannot see `performance_schema` |
+| D1 | a statement has been running longer than the threshold | `WARN` at 30s, `BLOCKER` at 300s | done | DDL queues behind the metadata lock, and every query queues behind that; the remedy prints the query that shows who holds what and who is waiting, because "resolve the lock queue" is not something a person can type |
+| D1b | the metadata lock queue is already non-empty, or could not be read | `BLOCKER` when non-empty, `WARN` when unreadable | done | adding this migration would extend the outage; a queue nobody could read is not an empty queue, and on a server that has the table this usually means the account cannot see `performance_schema` | Same query as D1, and the same instruction: kill the queued DDL, not the long SELECT under it.
 | D1c | the account lacks `PROCESS`, so other sessions are invisible | `WARN` | done | the D1 hazard cannot be seen |
 | D2 | `lock_wait_timeout` is unbounded | `INFO` | done | the default is 86400 seconds, so a DDL can hang for a day |
 | D3 | a transaction older than the threshold is open | `WARN` | done | row locks and old row versions slow the copy |

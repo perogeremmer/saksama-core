@@ -66,7 +66,16 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 				fmt.Fprintf(&b, "          %s\n", oneLine(c.Detail))
 			}
 			if c.Remediation != "" {
-				fmt.Fprintf(&b, "          action: %s\n", oneLine(c.Remediation))
+				// A remedy that needs a query to act on cannot be one sentence:
+				// print the continuation lines aligned under "action:", so the SQL
+				// can be copied without picking it out of running prose.
+				for i, line := range strings.Split(strings.TrimSpace(c.Remediation), "\n") {
+					label := "          "
+					if i == 0 {
+						label += "action: "
+					}
+					fmt.Fprintf(&b, "%s%s\n", label, oneLine(line))
+				}
 			}
 			if c.MySQLError > 0 {
 				fmt.Fprintf(&b, "          mysql: ERROR %d\n", c.MySQLError)
