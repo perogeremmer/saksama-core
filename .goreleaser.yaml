@@ -60,6 +60,12 @@ changelog:
 release:
   draft: false
   prerelease: auto
+  # A tag can be replaced - the annotation was wrong, the run before it published
+  # nothing, a CVE fix has to ship under the same number. With the default mode a
+  # second run fails on every upload with "422 already_exists" and leaves a red
+  # workflow next to a release page that is actually fine. Replacing the assets makes
+  # re-releasing the tag it claims to be.
+  mode: replace
   footer: |
     ### Verified combinations
 

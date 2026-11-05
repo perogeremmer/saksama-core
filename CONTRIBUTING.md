@@ -83,6 +83,18 @@ MySQL rejects ALGORITHM=INSTANT together with LOCK (error 1221), so every
 ADD COLUMN failed at execution while the plan reported it as safe.
 ```
 
+## Releasing
+
+A tag is the version: `git tag -a vX.Y.Z -F notes.txt && git push origin vX.Y.Z`
+triggers `.github/workflows/release.yml`, which re-runs the tests, builds four
+static binaries plus SBOMs, and publishes them.
+
+Replacing a tag is allowed and supported: `release.mode: replace` in
+`.goreleaser.yaml` means a second run overwrites the assets instead of failing every
+upload with `422 already_exists`. That is for the case this repository has already
+hit twice - an annotation that came out wrong, or a release that published nothing -
+not for quietly changing what a version contains.
+
 ## Pull requests
 
 - One concern per PR.
