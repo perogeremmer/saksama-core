@@ -39,11 +39,67 @@ jobs:
       - name: Build static binary
         run: make build
 
+      # This step's name used to be the only thing that mentioned static linking: it
+      # printed `file` and asserted nothing. "Runs on any distro" rests entirely on
+      # that property, so it is checked rather than described.
       - name: Binary is static
         run: |
           make build
           file bin/saksama
           ./bin/saksama version
+          case "$(file -b bin/saksama)" in
+            *"statically linked"*) echo "file says: statically linked" ;;
+            *) echo "::error::the binary is not statically linked"; exit 1 ;;
+          esac
+          if ldd bin/saksama 2>&1 | grep -q "not a dynamic executable"; then
+            echo "ldd: no dynamic dependencies"
+          else
+            echo "::error::ldd found dynamic dependencies; a distro without them will not run this"
+            ldd bin/saksama || true
+            exit 1
+          fi
+
+  # A static binary makes the tool portable; the advice is not portable. The Perl
+  # modules pt-osc needs are libdbd-mysql-perl on Debian and perl-DBD-MySQL on
+  # Fedora, and printing an apt-get line on Fedora is advice nobody can follow. This
+  # job runs the shipped binary on three other distributions and checks that
+  # `engine doctor` names the package manager that is actually there.
+  distro-smoke:
+    name: Distro smoke (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["fedora:latest", "archlinux:latest", "alpine:latest"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build a static binary
+        run: CGO_ENABLED=0 go build -trimpath -o bin/saksama ./cmd/saksama
+
+      - name: The binary runs, and the advice matches the distribution
+        run: |
+          docker run --rm -v "$PWD/bin/saksama:/saksama:ro" --entrypoint sh "${{ matrix.image }}" -c '
+            set -e
+            /saksama version
+            out=$(/saksama engine doctor pt-osc 2>&1)
+            echo "$out"
+            id=$(sed -n "s/^ID=//p" /etc/os-release | tr -d "\"")
+            case "$id" in
+              fedora|rhel|centos) pm="dnf" ;;
+              arch)               pm="pacman" ;;
+              alpine)             pm="apk" ;;
+              *) echo "unexpected ID $id in this job"; exit 1 ;;
+            esac
+            echo "$out" | grep -q "$pm install" || { echo "expected a $pm command, got none"; exit 1; }
+            if echo "$out" | grep -q "apt-get"; then echo "apt advice on $id"; exit 1; fi
+            echo "ok: $pm advice on $id"
+          '
 
   integration:
     name: Integration (MySQL ${{ matrix.mysql }})
@@ -386,6 +442,16 @@ jobs:
         with:
           version: "~> v2"
           args: release --snapshot --clean
+
+      - name: The snapshot binary is static
+        run: |
+          bin=$(ls -d dist/*linux_amd64*/saksama 2>/dev/null | head -1)
+          test -n "$bin" || { echo "no linux_amd64 binary in dist/"; ls -R dist | head -20; exit 1; }
+          file "$bin"
+          case "$(file -b "$bin")" in
+            *"statically linked"*) echo "statically linked" ;;
+            *) echo "::error::$bin is not statically linked"; exit 1 ;;
+          esac
 
       - name: The snapshot must be usable
         run: |

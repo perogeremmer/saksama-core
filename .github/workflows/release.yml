@@ -38,7 +38,17 @@ jobs:
           go vet ./...
 
       - name: Build check
-        run: make build && ./bin/saksama version
+        run: |
+          make build
+          ./bin/saksama version
+          # The published binaries must be static: that is what makes one file work on
+          # a Debian box, a Fedora box, and Alpine's musl without a runtime to install.
+          case "$(file -b bin/saksama)" in
+            *"statically linked"*) echo "statically linked" ;;
+            *) echo "::error::the release build is not statically linked"; exit 1 ;;
+          esac
+          ldd bin/saksama 2>&1 | grep -q "not a dynamic executable" || {
+            echo "::error::the release build has dynamic dependencies"; ldd bin/saksama; exit 1; }
 
       # The config names syft as the SBOM generator; without it here the release
       # fails after the archives are already built.

@@ -376,3 +376,121 @@ func TestRowCovers(t *testing.T) {
 		}
 	}
 }
+
+// The remediation text is the one thing in this package a user acts on, and it is
+// distribution-specific: the same two Perl modules are libdbd-mysql-perl on Debian
+// and perl-DBD-MySQL on Fedora. Printing an apt-get line on Fedora is advice that
+// cannot be followed.
+func TestPackagesPerDistribution(t *testing.T) {
+	cases := []struct {
+		name      string
+		goos      string
+		osRelease string
+		fixDBD    string
+		fixPerl   string
+		label     string
+	}{
+		{
+			name: "debian", goos: "linux",
+			osRelease: "ID=debian\nVERSION_ID=\"12\"\n",
+			fixDBD:    "apt-get install libdbi-perl libdbd-mysql-perl",
+			fixPerl:   "apt-get install perl",
+			label:     "debian, apt-get",
+		},
+		{
+			name: "ubuntu via ID_LIKE", goos: "linux",
+			osRelease: "ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n",
+			fixDBD:    "apt-get install libdbi-perl libdbd-mysql-perl",
+			fixPerl:   "apt-get install perl",
+			label:     "debian, apt-get",
+		},
+		{
+			name: "fedora", goos: "linux",
+			osRelease: "ID=fedora\nVERSION_ID=41\n",
+			fixDBD:    "dnf install perl-DBD-MySQL",
+			fixPerl:   "dnf install perl",
+			label:     "fedora, dnf",
+		},
+		{
+			name: "rocky via ID_LIKE", goos: "linux",
+			osRelease: "ID=rocky\nID_LIKE=\"rhel centos fedora\"\n",
+			fixDBD:    "dnf install perl-DBD-MySQL",
+			fixPerl:   "dnf install perl",
+			label:     "fedora, dnf",
+		},
+		{
+			name: "arch", goos: "linux",
+			osRelease: "ID=arch\n",
+			fixDBD:    "pacman -S --needed perl-dbi perl-dbd-mysql",
+			fixPerl:   "pacman -S --needed perl",
+			label:     "arch, pacman",
+		},
+		{
+			name: "manjaro via ID_LIKE", goos: "linux",
+			osRelease: "ID=manjaro\nID_LIKE=arch\n",
+			fixDBD:    "pacman -S --needed perl-dbi perl-dbd-mysql",
+			fixPerl:   "pacman -S --needed perl",
+			label:     "arch, pacman",
+		},
+		{
+			name: "alpine", goos: "linux",
+			osRelease: "ID=alpine\nVERSION_ID=3.20.3\n",
+			fixDBD:    "apk add perl-dbi perl-dbd-mysql",
+			fixPerl:   "apk add perl",
+			label:     "alpine, apk",
+		},
+		{
+			name: "opensuse", goos: "linux",
+			osRelease: "ID=\"opensuse-leap\"\n",
+			fixDBD:    "zypper install perl-DBD-mysql",
+			fixPerl:   "zypper install perl",
+			label:     "suse, zypper",
+		},
+		{
+			name: "darwin", goos: "darwin",
+			fixDBD:  "install DBD::mysql for the system perl: `cpan DBD::mysql`, or your package manager if it packages it",
+			fixPerl: "install DBD::mysql for the system perl: `cpan DBD::mysql`, or your package manager if it packages it",
+			label:   "darwin",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := HostFrom(c.goos, c.osRelease)
+			if got := p.FixDBD(); got != c.fixDBD {
+				t.Errorf("DBD fix:\n  got  %s\n  want %s", got, c.fixDBD)
+			}
+			if got := p.FixPerl(); got != c.fixPerl {
+				t.Errorf("perl fix:\n  got  %s\n  want %s", got, c.fixPerl)
+			}
+			if got := p.Label(); got != c.label {
+				t.Errorf("label: got %q, want %q", got, c.label)
+			}
+		})
+	}
+}
+
+// An unrecognised distribution, or a container with no /etc/os-release, must not
+// produce a package command that would fail. Guessing `apt-get` is how the wrong
+// advice shipped in the first place.
+func TestUnknownDistributionGuessesNothing(t *testing.T) {
+	for _, c := range []struct{ goos, osRelease string }{
+		{"linux", ""},
+		{"linux", "ID=clear-linux-os\n"},
+		{"freebsd", ""},
+	} {
+		p := HostFrom(c.goos, c.osRelease)
+		if p.Install != "" {
+			t.Errorf("%s/%q produced a package manager: %q", c.goos, c.osRelease, p.Install)
+		}
+		fix := p.FixDBD()
+		for _, invented := range []string{"apt", "dnf", "pacman", "apk", "zypper"} {
+			if strings.Contains(fix, invented) {
+				t.Errorf("%s/%q invented a package manager: %q", c.goos, c.osRelease, fix)
+			}
+		}
+		if fix != p.Note || !strings.Contains(fix, "no package name is guessed") {
+			t.Errorf("%s/%q must say it does not know: %q", c.goos, c.osRelease, fix)
+		}
+	}
+}

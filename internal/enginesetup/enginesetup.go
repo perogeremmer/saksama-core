@@ -258,7 +258,7 @@ func Check(engine string, binaries map[string]analyzer.EngineBinary, settings an
 		c.Items = append(c.Items, Item{Name: "platform", State: state, Detail: detail})
 	} else {
 		c.Items = append(c.Items, Item{Name: "platform", State: StateOK,
-			Detail: "pt-osc is a Perl script, it runs anywhere perl does"})
+			Detail: "pt-osc is a Perl script: " + Host().Label()})
 		c.Items = append(c.Items, perlItems()...)
 	}
 
@@ -440,7 +440,7 @@ func perlItems() []Item {
 	if err != nil {
 		return []Item{
 			{Name: "perl", State: StateMissing, Detail: "perl is not on PATH",
-				Fix: "apt-get install perl"},
+				Fix: Host().FixPerl()},
 			{Name: "DBD::mysql", State: StateUnknown, Detail: "not checked: perl is missing"},
 		}
 	}
@@ -459,7 +459,7 @@ func perlItems() []Item {
 			detail = "pt-osc loads DBI and DBD::mysql at startup: " + detail
 		}
 		return append(items, Item{Name: "DBD::mysql", State: StateMissing, Detail: detail,
-			Fix: "apt-get install libdbi-perl libdbd-mysql-perl"})
+			Fix: Host().FixDBD()})
 	}
 	return append(items, Item{Name: "DBD::mysql", State: StateOK, Detail: "DBI and DBD::mysql load"})
 }

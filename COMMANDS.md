@@ -341,7 +341,10 @@ existing file. `--latest` is deliberately not implemented: installing a version
 no test in this repository has run would make `docs/COMPATIBILITY.md` a lie.
 
 A pt-osc file with no `DBI`/`DBD::mysql` is installed but reported as `cannot
-start`, with `apt-get install libdbi-perl libdbd-mysql-perl` as the fix. That is
+start`, with the fix for the distribution it detected (`libdbi-perl libdbd-mysql-perl`
+on Debian, `perl-DBD-MySQL` on Fedora, `perl-dbi perl-dbd-mysql` on Arch and Alpine).
+When it cannot tell, it says so instead of printing a package manager that is not
+there. That is
 the difference between "installed" and "runnable", and both `doctor` and
 `advise` report it.
 
