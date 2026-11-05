@@ -262,12 +262,27 @@ RESULT     ready (nothing has been changed)
 
 ---
 
-## H. Checklist for a new check
+## H. A remedy has to name a step
+
+Every `action:` line in a plan is written for someone who has to act on it, not for
+someone who will nod at it. "Resolve the lock queue first" is a diagnosis; the operator
+needs the query that shows who holds what, and the decision that follows from it - so
+that is what the line contains. Where a finding is a fact to know rather than an action
+("nothing to fix before applying, but budget for it: ..."), the line says so instead of
+inventing a ritual.
+
+`internal/analyzer/remedy_test.go` reads the source and fails when a remedy names no
+step: no SQL, no command, no flag, no backticked instruction, and no explicit
+"nothing to fix" clause. It can only judge literal strings - a remedy assembled by a
+function is reviewed where it is built - so it is a guard against the easy regression,
+not a proof about every word the tool prints.
+
+## I. Checklist for a new check
 
 - [ ] a stable ID that is never reused
 - [ ] the SQL that gathers the fact lives in `internal/introspect`
 - [ ] a fixture that triggers it
 - [ ] a **negative** test proving it does not fire on a healthy schema
-- [ ] remediation text that says what to do, not merely what is wrong
+- [ ] remediation text that says what to do, not merely what is wrong - the query, the command, or the flag, as described in [H](#h-a-remedy-has-to-name-a-step); `remedy_test.go` will fail the build if it does not
 - [ ] the MySQL error number it prevents, where one exists
 - [ ] this catalogue updated, with the correct status

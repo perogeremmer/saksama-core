@@ -101,7 +101,7 @@ func diskChecks(in Input, needsCopy bool) []Check {
 			ID: chkDiskHeadroom, Severity: SeverityBlocker,
 			Title:       "not enough free space for the copy",
 			Detail:      fmt.Sprintf("%s free but %s required", humanBytes(d.Free), humanBytes(need)),
-			Remediation: "free space or move to a larger volume; a copy engine builds a second table before swapping",
+			Remediation: "free space before planning again: a copy engine builds a full second table before it swaps, so it needs the table's data length free, not a fraction of it. Where the space went: du -xh --max-depth=1 <datadir>, and PURGE BINARY LOGS TO '<file>' reclaims binlogs you no longer need on a replica",
 		})
 	}
 
@@ -116,7 +116,7 @@ func diskChecks(in Input, needsCopy bool) []Check {
 				Title: fmt.Sprintf("volume is below %.0f%% free", DiskLowWaterPercent),
 				Detail: fmt.Sprintf("%s of %s free (%.1f%%), below the %.0f%% floor",
 					humanBytes(d.Free), humanBytes(d.Total), pct, DiskLowWaterPercent),
-				Remediation: "free space first; binlogs, undo, and application writes keep growing during a migration",
+				Remediation: "get back above the floor before starting: binlogs, undo, and ordinary writes keep growing during a migration, so the free space you have now is not the free space you will have at cut-over. Check what is growing: du -xh --max-depth=1 <datadir>",
 			})
 		case pct < DiskWarnFreePercent:
 			out = append(out, Check{

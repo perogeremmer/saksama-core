@@ -70,6 +70,19 @@ type FKCompat struct {
 	Description string
 }
 
+// The queries a remedy needs to be followable. Each was run against a real server
+// before being printed here: an action line with a broken query in it is worse than
+// no action line, because it costs the reader the time to find that out.
+const (
+	trxQuery = "SELECT trx_id, trx_started, trx_mysql_thread_id, LEFT(trx_query, 60) " +
+		"FROM information_schema.innodb_trx ORDER BY trx_started"
+	loadQuery   = "SHOW GLOBAL STATUS LIKE 'Threads_running'"
+	lagQuery    = "SHOW SLAVE STATUS\\G   -- Seconds_Behind_Master, Slave_SQL_Running"
+	grantsQuery = "SHOW GRANTS FOR CURRENT_USER()"
+	dupQuery    = "SELECT COUNT(*) AS duplicate_groups FROM (SELECT 1 FROM <table> " +
+		"GROUP BY <columns> HAVING COUNT(*) > 1) d"
+)
+
 // mdlChainHelp is the one thing an operator needs when a plan says the lock queue is
 // not empty or a statement is holding it: who holds what, and which statement is
 // waiting behind it. Spelled out instead of described, because "look at the metadata
@@ -142,9 +155,10 @@ func liveChecks(in Input, projected model.Table) []Check {
 	if L.LongTransactions > 0 {
 		out = append(out, Check{
 			ID: "D3", Severity: SeverityWarn,
-			Title:       "long-running transaction is open",
-			Detail:      fmt.Sprintf("%d transaction(s) older than the threshold; the oldest is %ds", L.LongTransactions, L.OldestTrxSeconds),
-			Remediation: "an open transaction keeps row locks and old row versions; commit or roll back before a copy-based migration",
+			Title:  "long-running transaction is open",
+			Detail: fmt.Sprintf("%d transaction(s) older than the threshold; the oldest is %ds", L.LongTransactions, L.OldestTrxSeconds),
+			Remediation: "an open transaction keeps row locks and old row versions, and a copy-based migration waits behind it; commit or roll it back first. Who is holding what:" +
+				"\n" + trxQuery + "\n  then KILL <trx_mysql_thread_id> if that session is stale",
 		})
 	}
 
@@ -153,9 +167,10 @@ func liveChecks(in Input, projected model.Table) []Check {
 	case L.ThreadsRunning >= 100:
 		out = append(out, Check{
 			ID: "D4", Severity: SeverityWarn,
-			Title:       "server is already heavily loaded",
-			Detail:      fmt.Sprintf("Threads_running is %d", L.ThreadsRunning),
-			Remediation: "a copy engine will throttle immediately and may never catch up; schedule a quieter window",
+			Title:  "server is already heavily loaded",
+			Detail: fmt.Sprintf("Threads_running is %d", L.ThreadsRunning),
+			Remediation: "a copy engine throttles to protect the server and may never catch up while this lasts; run it when the server is quieter. How loaded is it right now:" +
+				"\n" + loadQuery + "\n  the plan also accepts --max-load if you want the copy to tolerate more",
 		})
 	case L.ThreadsRunning >= 50:
 		out = append(out, Check{
@@ -172,23 +187,26 @@ func liveChecks(in Input, projected model.Table) []Check {
 		case !L.ReplicaRunning:
 			out = append(out, Check{
 				ID: "D5", Severity: SeverityBlocker,
-				Title:       "replica is configured but not running",
-				Detail:      "replication threads are stopped",
-				Remediation: "fix replication first; gh-ost reads from a replica and will refuse to start otherwise",
+				Title:  "replica is configured but not running",
+				Detail: "replication threads are stopped",
+				Remediation: "fix replication before planning again: gh-ost reads from a replica and refuses to start otherwise. What the replica says:" +
+					"\n" + lagQuery,
 			})
 		case L.ReplicaLagSeconds >= 30:
 			out = append(out, Check{
 				ID: "D5", Severity: SeverityBlocker,
-				Title:       "replica lag is already high",
-				Detail:      fmt.Sprintf("%.1fs behind", L.ReplicaLagSeconds),
-				Remediation: "a copy-based migration would push lag further; resolve lag before starting",
+				Title:  "replica lag is already high",
+				Detail: fmt.Sprintf("%.1fs behind", L.ReplicaLagSeconds),
+				Remediation: "a copy-based migration would push lag further, so drain it first: wait until Seconds_Behind_Master is small and Slave_SQL_Running is Yes, then plan again. What the replica says:" +
+					"\n" + lagQuery,
 			})
 		case L.ReplicaLagSeconds >= 5:
 			out = append(out, Check{
 				ID: "D5", Severity: SeverityWarn,
-				Title:       "replica lag is elevated",
-				Detail:      fmt.Sprintf("%.1fs behind", L.ReplicaLagSeconds),
-				Remediation: "throttling will engage early",
+				Title:  "replica lag is elevated",
+				Detail: fmt.Sprintf("%.1fs behind", L.ReplicaLagSeconds),
+				Remediation: "throttling will engage early and the copy will crawl; wait for the lag to drain, then plan again:" +
+					"\n" + lagQuery,
 			})
 		}
 	}
@@ -215,10 +233,12 @@ func liveChecks(in Input, projected model.Table) []Check {
 		}
 		out = append(out, Check{
 			ID: "A1", Severity: SeverityBlocker,
-			Title:       "foreign key columns disagree on charset or collation",
-			Detail:      fmt.Sprintf("constraint %q (%s %s): %s", fk.Constraint, fk.Direction, fk.PeerTable, fk.Description),
-			Remediation: "align charset and collation on both sides before any operation that recreates the constraint",
-			MySQLError:  3780,
+			Title:  "foreign key columns disagree on charset or collation",
+			Detail: fmt.Sprintf("constraint %q (%s %s): %s", fk.Constraint, fk.Direction, fk.PeerTable, fk.Description),
+			Remediation: "align charset and collation before anything recreates the constraint, or MySQL fails the ALTER with error 1215/1832. Which side is which:" +
+				"\nSELECT TABLE_NAME, COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLUMNS" +
+				"\n WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME IN ('<fk_column>', '<parent_column>')",
+			MySQLError: 3780,
 		})
 	}
 
@@ -237,10 +257,11 @@ func liveChecks(in Input, projected model.Table) []Check {
 		if n, ok := L.Duplicates[name]; ok && n > 0 {
 			out = append(out, Check{
 				ID: "B5", Severity: SeverityBlocker,
-				Title:       "unique index would fail: duplicate values exist",
-				Detail:      fmt.Sprintf("index %q has at least %d duplicate group(s)", name, n),
-				Remediation: "deduplicate the columns first, or use a non-unique index",
-				MySQLError:  1062,
+				Title:  "unique index would fail: duplicate values exist",
+				Detail: fmt.Sprintf("index %q has at least %d duplicate group(s)", name, n),
+				Remediation: "deduplicate before adding the index, or make it non-unique. How many groups collide:" +
+					"\n" + dupQuery,
+				MySQLError: 1062,
 			})
 		}
 	}
@@ -258,9 +279,10 @@ func privilegeChecks(g Grants, tbl, projected model.Table) []Check {
 	if !g.Known {
 		return []Check{{
 			ID: "D15", Severity: SeverityInfo,
-			Title:       "privileges could not be read",
-			Detail:      "SHOW GRANTS FOR CURRENT_USER() failed or returned nothing",
-			Remediation: "verify the account has the privileges the chosen path needs",
+			Title:  "privileges could not be read",
+			Detail: "SHOW GRANTS FOR CURRENT_USER() failed or returned nothing",
+			Remediation: "the plan could not read this account's grants, so it cannot tell whether the chosen path will work; check it before applying:" +
+				"\n" + grantsQuery + "\n  native needs ALTER, CREATE, INDEX, and SELECT on the table; gh-ost adds REPLICATION CLIENT/SLAVE, SUPER or SESSION_VARIABLES_ADMIN, and TRIGGER",
 		}}
 	}
 
@@ -272,7 +294,7 @@ func privilegeChecks(g Grants, tbl, projected model.Table) []Check {
 			ID: "D15", Severity: SeverityWarn,
 			Title:       "account may not be able to shorten lock_wait_timeout",
 			Detail:      fmt.Sprintf("user %s lacks SUPER and SESSION_VARIABLES_ADMIN", g.User),
-			Remediation: "grant SESSION_VARIABLES_ADMIN (or rds_superuser on RDS) so DDL can fail fast instead of queueing",
+			Remediation: "Saksama cannot shorten lock_wait_timeout with this account, so a DDL it runs may queue behind a metadata lock for the server default (up to a day). Either grant it: GRANT SESSION_VARIABLES_ADMIN ON *.* TO '<user>'@'<host>'; on RDS use rds_superuser - or set a short wait for the session yourself with SET SESSION lock_wait_timeout = 10 before the ALTER",
 			MySQLError:  1227,
 		})
 	}
@@ -281,9 +303,11 @@ func privilegeChecks(g Grants, tbl, projected model.Table) []Check {
 	if !g.Process && !g.AllPrivileges {
 		out = append(out, Check{
 			ID: "D1c", Severity: SeverityWarn,
-			Title:       "account cannot inspect other sessions",
-			Detail:      fmt.Sprintf("user %s lacks PROCESS, so long-running statements by other users are invisible", g.User),
-			Remediation: "grant PROCESS so the metadata-lock hazard can actually be detected",
+			Title:  "account cannot inspect other sessions",
+			Detail: fmt.Sprintf("user %s lacks PROCESS, so long-running statements by other users are invisible", g.User),
+			Remediation: "without PROCESS this tool cannot see other sessions, so a lock queue is invisible rather than absent. Grant it:" +
+				"\nGRANT PROCESS ON *.* TO '<user>'@'<host>'; FLUSH PRIVILEGES;" +
+				"\n  then plan again - D1 and D1b can finally answer",
 		})
 	}
 

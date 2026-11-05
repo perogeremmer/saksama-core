@@ -177,7 +177,7 @@ func engineChecks(in Input, assessments []EngineAssessment, rec Recommendation) 
 			ID: chkNoEngineFits, Severity: SeverityBlocker,
 			Title:       "no engine can perform this change",
 			Detail:      "every candidate fails at least one requirement. " + strings.Join(lines, "; "),
-			Remediation: "resolve the requirement above (add a key, remove the conflicting constraint, or rewrite the change) and plan again",
+			Remediation: "fix the unmet requirement listed for each engine above - a copy engine needs a key to chunk on, and neither engine can work while a foreign key covers the column being changed - then plan again. `saksama advise` prints the same matrix with what each engine wants",
 		})
 		return out
 	}
@@ -272,7 +272,7 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 			Title: "pt-osc will rename this table's foreign key constraints",
 			Detail: fmt.Sprintf("%s will keep its foreign keys, but with an underscore prefix: %s",
 				strings.Join(names, ", "), "_"+strings.Join(names, ", _")),
-			Remediation: "rename them back in a separate, reviewed change if other tooling refers to the constraint names; Saksama does not edit foreign keys in v1",
+			Remediation: "if other tooling refers to the constraint names, rename them back in a separate change after the copy: `ALTER TABLE <table> RENAME INDEX _<name> TO <name>` (Saksama does not edit foreign keys in v1), and update the verification list in the session record to match",
 		})
 	}
 
@@ -293,7 +293,7 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 				ID: "R7", Severity: SeverityWarn,
 				Title:       "a copy engine was chosen although native would suffice",
 				Detail:      fmt.Sprintf("%s was chosen, but MySQL can do this change in place", rec.Engine),
-				Remediation: "native avoids copying the table and needs no extra disk; keep the copy engine only if you want its throttling or cut-over pause",
+				Remediation: "native avoids the copy and the extra disk; keep this engine only if you want its throttling or its cut-over pause. To switch: plan again with `saksama engine set native`, or clear the recorded choice with `saksama engine clear`",
 			})
 		}
 	}
@@ -340,7 +340,7 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 				Title: "native will rebuild this table in place",
 				Detail: fmt.Sprintf("%s rewrites %s rows / %s inside one ALTER statement. It does not block writes, but it cannot be throttled, paused, resumed, or stopped cheaply: cancelling it rolls the whole rebuild back",
 					strings.Join(kinds, ", "), humanCount(in.Table.Rows), humanBytes(in.Table.DataLength)),
-				Remediation: "run it in a quiet window, or use gh-ost or pt-osc instead if you need throttling, a pause, or a lag cap",
+				Remediation: "run it in a quiet window, or switch to an engine that can be paused: `saksama engine set gh-ost` (or `pt-osc`) and plan again if you need throttling, a pause, or a lag cap",
 			})
 		}
 	}
@@ -350,7 +350,7 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 			ID: "R5", Severity: SeverityWarn,
 			Title:       "managed server may refuse gh-ost",
 			Detail:      "gh-ost needs privileges a managed service may not grant",
-			Remediation: "on RDS this usually needs rds_superuser; otherwise use pt-osc on the same table",
+			Remediation: "ask for rds_superuser on RDS, or run the copy with the other engine: `saksama engine set pt-osc`. Managed services rarely grant what gh-ost needs, and pt-osc asks for less",
 		})
 	}
 
@@ -359,7 +359,7 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 			ID: "R6", Severity: SeverityWarn,
 			Title:       "no replica: the copy load lands on the primary",
 			Detail:      "gh-ost will run with --allow-on-master",
-			Remediation: "schedule a quiet window, or add a replica so the copy can read from it",
+			Remediation: "gh-ost copies from the primary unless a replica exists: either run it in a quiet window, or point the copy at a replica with `gh-ost --host=<replica>` once one exists. Nothing in this plan changes where the load lands",
 		})
 	}
 

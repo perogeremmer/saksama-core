@@ -68,7 +68,7 @@ func checksCapability(in Input, ops []model.Op, anyBlocked, anyRebuild bool) []C
 				ID: chkUnknownOp, Severity: SeverityBlocker,
 				Title:       "operation is not understood",
 				Detail:      fmt.Sprintf("Saksama could not classify %q", op.Raw),
-				Remediation: "split the change into supported operations, or run it manually under a reviewed procedure",
+				Remediation: "rewrite it as operations Saksama models (see `saksama plan --help` for the list), or run this statement yourself with `mysql` and apply the same pre-flight checks by hand - this tool will not guess at a change it cannot classify",
 			})
 		case model.OpAddForeignKey, model.OpDropForeignKey:
 			out = append(out, Check{
@@ -85,7 +85,7 @@ func checksCapability(in Input, ops []model.Op, anyBlocked, anyRebuild bool) []C
 			ID: chkMariaDB, Severity: SeverityBlocker,
 			Title:       "MariaDB is not a verified target",
 			Detail:      "DDL capability, engine behaviour, and throttle semantics differ from MySQL",
-			Remediation: "use a MySQL 8.0 server, or wait for the MariaDB capability profile",
+			Remediation: "point Saksama at a MySQL server instead; MariaDB reports a version string MySQL-shaped but does not implement the same ONLINE DDL rules, so nothing here would be a verified claim. `--force` does not override E1",
 		})
 	}
 
@@ -110,7 +110,7 @@ func checksCapability(in Input, ops []model.Op, anyBlocked, anyRebuild bool) []C
 				Severity:    SeverityBlocker,
 				Title:       "MySQL older than 5.6 is not a verified target",
 				Detail:      fmt.Sprintf("server reports %d.%d.%d; 5.5 reached end of life in 2018 and gh-ost itself requires 5.6 or newer", v.Major, v.Minor, v.Patch),
-				Remediation: "upgrade to MySQL 5.6 or newer; for older servers use the copy engine directly under a reviewed procedure",
+				Remediation: "upgrade to MySQL 5.6 or newer, where this tool's rules were measured; on anything older run `pt-online-schema-change` or `gh-ost` yourself and treat its own output as the record",
 			})
 		}
 
@@ -141,7 +141,7 @@ func checksCapability(in Input, ops []model.Op, anyBlocked, anyRebuild bool) []C
 			ID: chkEngineNotInnoDB, Severity: SeverityBlocker,
 			Title:       "table is not InnoDB",
 			Detail:      fmt.Sprintf("engine is %q", e),
-			Remediation: "online DDL rules and both copy engines assume InnoDB",
+			Remediation: "convert the table first, in its own window: ALTER TABLE <table> ENGINE=InnoDB; both copy engines and every ONLINE DDL rule assume InnoDB, so neither native nor a copy engine means what this plan says on another storage engine",
 		})
 	}
 
@@ -150,7 +150,7 @@ func checksCapability(in Input, ops []model.Op, anyBlocked, anyRebuild bool) []C
 			ID: "D10", Severity: SeverityWarn,
 			Title:       "table is partitioned",
 			Detail:      "gh-ost does not support partitioned tables",
-			Remediation: "plan a native operation, or use pt-online-schema-change with a verified capability profile",
+			Remediation: "prefer a change MySQL can do natively, or run pt-online-schema-change with `saksama engine set pt-osc` so the plan is built for a partitioned table; gh-ost refuses partitioned tables outright",
 		})
 	}
 
@@ -179,7 +179,7 @@ func checksCharset(in Input, projected model.Table) []Check {
 			ID: chkConvertCharsetFK, Severity: SeverityBlocker,
 			Title:       "character set conversion on a table with foreign keys",
 			Detail:      fmt.Sprintf("%s has %d foreign key(s) in or out", in.Table.Name, len(in.Table.AllForeignKeys())),
-			Remediation: "convert the FK columns explicitly, or drop and rebuild the constraints under a reviewed procedure",
+			Remediation: "convert the foreign key columns explicitly, one table at a time: ALTER TABLE <child> MODIFY <col> varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci; and the same on the parent; then CONVERT TO CHARACTER SET. Saksama will not do it in one statement, because MySQL refuses mid-flight",
 			MySQLError:  1832,
 		})
 	}
@@ -196,7 +196,7 @@ func checksCharset(in Input, projected model.Table) []Check {
 					ID: chkFKColumnCharset, Severity: SeverityWarn,
 					Title:       "foreign key column uses a different character set than the table",
 					Detail:      fmt.Sprintf("%s.%s is %s but the table is %s", in.Table.Name, colName, col.Charset, in.Table.Charset),
-					Remediation: "align the charset/collation before any operation that recreates the constraint",
+					Remediation: "align the two columns before anything recreates the constraint, in this order: ALTER TABLE <child> MODIFY <col> <type> CHARACTER SET <parent_charset> COLLATE <parent_collation>; then plan again. Both sides are named in the detail above",
 					MySQLError:  3780,
 				})
 			}
@@ -215,7 +215,7 @@ func checksCharset(in Input, projected model.Table) []Check {
 			ID: chkUtf8mb3, Severity: SeverityWarn,
 			Title:       "deprecated utf8mb3 columns",
 			Detail:      fmt.Sprintf("%d column(s) use utf8mb3: %s", len(mb3), strings.Join(mb3, ", ")),
-			Remediation: "migrate to utf8mb4 to avoid deprecation issues and 3-byte truncation surprises",
+			Remediation: "plan the conversion as its own change: ALTER TABLE <table> CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; and note it rebuilds the table, so it belongs with the copy engines; check every index stays under the key limit first",
 		})
 	}
 
@@ -244,7 +244,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 				ID: chkIndexColumnMissing, Severity: SeverityBlocker,
 				Title:       "index refers to a column the table does not have",
 				Detail:      fmt.Sprintf("index %q uses %s; the table has no such column", ix.Name, strings.Join(missing, ", ")),
-				Remediation: "fix the column name; MySQL would reject this with error 1072",
+				Remediation: "use a column name that exists in this table (see `saksama advise -t <table>` for the list); MySQL would reject this ALTER with error 1072",
 				MySQLError:  1072,
 			})
 			continue
@@ -273,7 +273,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 				ID: chkKeyTooLong, Severity: SeverityBlocker,
 				Title:       "index key exceeds the InnoDB limit",
 				Detail:      fmt.Sprintf("index %q is %d bytes; limit is %d bytes for row format %s", ix.Name, bytes, limit, rowFormatOr(projected.RowFormat)),
-				Remediation: "reduce the number or width of indexed columns, or use a prefix length",
+				Remediation: "add a prefix length or index fewer columns: `ALTER TABLE <table> ADD INDEX ix (col(191))`. The InnoDB limit is 3072 bytes with ROW_FORMAT=DYNAMIC, and a utf8mb4 varchar counts 4 bytes per character, so col(191) is the usual ceiling",
 				MySQLError:  1071,
 			})
 		}
@@ -285,7 +285,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 					ID: chkPrefixIndex, Severity: SeverityInfo,
 					Title:       "prefix index",
 					Detail:      fmt.Sprintf("index %q indexes only the first %d characters of %s", ix.Name, p.PrefixLen, p.Column),
-					Remediation: "queries must filter on the same prefix column to benefit; the index cannot serve full-column ordering",
+					Remediation: "nothing to fix before applying: remember that a query benefits only when it filters on that same prefix, and the index cannot satisfy ORDER BY on the full column",
 				})
 			}
 		}
@@ -297,7 +297,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 			ID: chkCompactRowFormat, Severity: SeverityWarn,
 			Title:       "legacy row format limits index keys to 767 bytes",
 			Detail:      fmt.Sprintf("row format is %s", projected.RowFormat),
-			Remediation: "consider ROW_FORMAT=DYNAMIC in a separate rebuild, or keep keys under 767 bytes",
+			Remediation: "either keep every key under 767 bytes, or rebuild the table with a modern row format in its own window: ALTER TABLE <table> ROW_FORMAT=DYNAMIC; that rebuild is itself a copy-engine job",
 			MySQLError:  1071,
 		})
 	}
@@ -322,7 +322,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 			ID: chkNoUniqueKey, Severity: SeverityWarn,
 			Title:       "table has no unique key",
 			Detail:      "copy-based engines chunk by a unique key; without one they degrade to a single slow pass or refuse",
-			Remediation: "add a primary key or a unique index before using a copy engine",
+			Remediation: "add one before a copy engine can work, and expect that ALTER to be a rebuild: ALTER TABLE <table> ADD UNIQUE INDEX uq_id (<column>) - gh-ost needs a key to chunk on, and pt-osc needs one it can trust",
 		})
 	}
 
@@ -333,7 +333,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 				ID: chkCompositePK, Severity: SeverityInfo,
 				Title:       "composite primary key",
 				Detail:      fmt.Sprintf("primary key has %d columns", len(pk.Parts)),
-				Remediation: "gh-ost supports single-column keys only; a composite key forces pt-online-schema-change",
+				Remediation: "nothing to fix: this only rules out gh-ost, so the plan will choose pt-osc; set it explicitly with `saksama engine set pt-osc` if you would rather not leave it to the analyzer",
 			})
 		}
 		if len(pk.Parts) == 1 {
@@ -342,7 +342,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 					ID: chkUUIDPrimaryKey, Severity: SeverityWarn,
 					Title:       "UUID primary key",
 					Detail:      fmt.Sprintf("primary key %q is %s", col.Name, col.Type),
-					Remediation: "random UUIDv4 makes range chunking uneven; expect slower, less predictable copy throughput",
+					Remediation: "nothing to fix before applying, but size the window for it: random UUIDv4 spreads inserts across the whole index, so the copy is slower and less predictable than on an auto-increment key",
 				})
 			}
 		}
@@ -354,7 +354,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 			ID: chkUniqueNeedsScan, Severity: SeverityInfo,
 			Title:       "unique index not checked for duplicates",
 			Detail:      "duplicate detection requires a live query over the indexed columns",
-			Remediation: "run with a live connection, or verify duplicates manually before applying",
+			Remediation: "connect with --live so the duplicate probe can run, or check it yourself before applying: SELECT COUNT(*) FROM (SELECT 1 FROM <table> GROUP BY <columns> HAVING COUNT(*) > 1) d",
 			MySQLError:  1062,
 		})
 	}
@@ -377,7 +377,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 				ID: chkFKNoIndex, Severity: SeverityWarn,
 				Title:       "foreign key column has no index prefix",
 				Detail:      fmt.Sprintf("FK %q column %q is not the first column of any index", fk.Name, first),
-				Remediation: "add an index on the FK column; without one, parent row deletes scan the child table",
+				Remediation: "add the missing index in its own change: ALTER TABLE <child> ADD INDEX ix_<col> (<col>); without it, deleting a parent row scans this whole table, and MySQL needs the index anyway to keep the constraint fast",
 			})
 		}
 	}
@@ -388,7 +388,7 @@ func checksIndexes(in Input, projected model.Table) []Check {
 			ID: chkTooManyIndexes, Severity: SeverityInfo,
 			Title:       "many indexes",
 			Detail:      fmt.Sprintf("table would have %d indexes", len(projected.Indexes)),
-			Remediation: "each index slows writes and lengthens any future rebuild",
+			Remediation: "nothing to fix now: each index slows inserts and makes every future rebuild longer, so drop any this query did not justify - SHOW INDEX FROM <table> lists them with their cardinality",
 		})
 	}
 
@@ -412,7 +412,7 @@ func checksForeignKeys(in Input, projected model.Table) []Check {
 					ID: chkFKColumnTouched, Severity: SeverityBlocker,
 					Title:       "column is used by a foreign key on this table",
 					Detail:      fmt.Sprintf("FK %q constrains %s, which this ALTER changes", fk.Name, col),
-					Remediation: "MySQL refuses this (1832). Change the constraint in a reviewed procedure, or use an operation that does not touch the FK column",
+					Remediation: "MySQL refuses this with error 1832, so change the constraint first and in a separate step: ALTER TABLE <table> DROP FOREIGN KEY <fk>; then the column change; then ADD CONSTRAINT <fk> ... back. Saksama does not edit foreign keys in v1, and the ALTER above must not touch a constrained column",
 					MySQLError:  1832,
 				})
 			}
@@ -427,7 +427,7 @@ func checksForeignKeys(in Input, projected model.Table) []Check {
 					ID: chkFKReferencedTouched, Severity: SeverityBlocker,
 					Title:       "column is referenced by a foreign key from another table",
 					Detail:      fmt.Sprintf("FK %q on %s references %s.%s", fk.Name, fk.RefTable, in.Table.Name, col),
-					Remediation: "the child constraint blocks the change (1832); coordinate the child table or use a compatible native operation",
+					Remediation: "the child table owns this constraint and MySQL refuses with 1832, so the child comes first: on <child>, DROP FOREIGN KEY <fk>, then change this column, then ADD CONSTRAINT <fk> ... back on the child",
 					MySQLError:  1832,
 				})
 			}
@@ -441,7 +441,7 @@ func checksForeignKeys(in Input, projected model.Table) []Check {
 				ID: chkFKActionPreserve, Severity: SeverityInfo,
 				Title:       "foreign key carries a referential action",
 				Detail:      fmt.Sprintf("FK %q is ON DELETE %s / ON UPDATE %s", fk.Name, fk.OnDelete, fk.OnUpdate),
-				Remediation: "any reproduction of this constraint must keep these actions; dropping them silently changes data semantics",
+				Remediation: "keep the actions in the new definition, or a parent delete silently starts doing something else: ALTER TABLE <child> ADD CONSTRAINT <fk> FOREIGN KEY (<col>) REFERENCES <parent> (<id>) ON DELETE <action> ON UPDATE <action>",
 			})
 		}
 	}
@@ -452,7 +452,7 @@ func checksForeignKeys(in Input, projected model.Table) []Check {
 			ID: chkManyForeignKeys, Severity: SeverityWarn,
 			Title:       "many foreign key constraints",
 			Detail:      fmt.Sprintf("%d constraints involve this table", n),
-			Remediation: "each one is a potential integrity window during any constraint change",
+			Remediation: "nothing to fix before applying, but budget for it: every constraint listed above has to be dropped and re-added around a column change, and each gap is an integrity window - do them in one window, not several",
 		})
 	}
 
@@ -476,7 +476,7 @@ func checksOperational(in Input, anyRebuild bool) []Check {
 			ID: chkExistingTrigger, Severity: SeverityWarn,
 			Title:       "table already has triggers",
 			Detail:      fmt.Sprintf("%d existing trigger(s): %s", len(in.Table.Triggers), strings.Join(in.Table.Triggers, ", ")),
-			Remediation: "gh-ost and pt-osc create their own triggers; review interaction before using a copy engine",
+			Remediation: "gh-ost and pt-osc create their own triggers, and this table already has some. Read them before a copy-engine run: SHOW TRIGGERS FROM <database> WHERE `Table` = '<table>'; if they mutate the same columns, plan the trigger change first",
 		})
 	}
 
@@ -485,7 +485,7 @@ func checksOperational(in Input, anyRebuild bool) []Check {
 			ID: chkProductionTarget, Severity: SeverityWarn,
 			Title:       "target is marked as production",
 			Detail:      "apply requires typing the hostname to confirm",
-			Remediation: "confirm the hostname deliberately; this friction is intentional",
+			Remediation: "apply this plan yourself, typing the hostname when asked: --production --confirm <host>. The friction is the point - it is the difference between reading a plan and running it on the wrong server",
 		})
 	}
 
@@ -494,7 +494,7 @@ func checksOperational(in Input, anyRebuild bool) []Check {
 			ID: chkHugeTable, Severity: SeverityWarn,
 			Title:       "large table",
 			Detail:      fmt.Sprintf("table is %s", humanBytes(size)),
-			Remediation: "any rebuild will take a long time; plan a window and expect throttling",
+			Remediation: "give a rebuild a window rather than a pause: plan the copy engine (gh-ost or pt-osc) so it can be throttled and paused, and pass --free-disk and --disk-total so D6 can prove there is room",
 		})
 	}
 
