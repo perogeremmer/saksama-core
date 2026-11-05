@@ -73,7 +73,11 @@ func diskChecks(in Input, copiesByOp bool, engine Engine) []Check {
 			detail += fmt.Sprintf(". A copy needs roughly %s extra (the copy table plus the retained original)",
 				humanBytes(need))
 		}
-		remediation := "pass --free-disk and --disk-total, or run Saksama on the database host so the filesystem can be read"
+		// The two ways to answer the question honestly: give the numbers, or run
+		// where the numbers live. When the server is a container on this machine,
+		// "run it on the host" is not the only option - one command reads the
+		// container's own filesystem, and that is the situation people hit.
+		remediation := "pass --free-disk and --disk-total, or run Saksama on the database host so the filesystem can be read. If the server is a container on this machine: docker exec <container> df -B1 /var/lib/mysql"
 		if !copiesByOp && copiesByEngine {
 			// The change itself copies nothing; the chosen engine does. That is
 			// avoidable, and saying so is the difference between "buy more disk"
