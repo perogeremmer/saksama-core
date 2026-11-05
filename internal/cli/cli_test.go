@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -772,4 +773,23 @@ func TestEngineDoctorExitCodes(t *testing.T) {
 	if !strings.Contains(out, "not run") {
 		t.Fatalf("the server check must be reported as not run:\n%s", out)
 	}
+}
+
+// TestMain points every CLI test at a throwaway state directory.
+//
+// Without it these tests read the developer's own ~/.local/state/saksama, so anyone
+// who has ever run `saksama engine set` on their machine gets failures that have
+// nothing to do with their change: a recorded engine choice outranks the analyzer,
+// and the plan correctly refuses. CI never sees it, which is the worst kind of
+// flake - it only breaks the people actually using the tool.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "saksama-cli-tests-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot create a temporary state directory: %v\n", err)
+		os.Exit(1)
+	}
+	os.Setenv("SAKSAMA_STATE_DIR", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
 }
