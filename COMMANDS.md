@@ -157,6 +157,21 @@ Fix it first: chmod 600 /home/you/.my.cnf
 
 ---
 
+## TLS
+
+`--tls` takes `preferred` (default), `true`, `skip-verify`, or `false`.
+
+Two failures look alike and are not:
+
+| Error | Cause | Fix |
+|---|---|---|
+| `x509: certificate signed by unknown authority` | the certificate is self-signed or expired | `--tls skip-verify` accepts it without checking the chain |
+| `remote error: tls: handshake failure` | the server cannot negotiate any protocol or cipher this client accepts - typically an old MySQL build | `--tls skip-verify` fails the same way; only `--tls false` connects, and only on a link you trust (same host, SSH tunnel, local container) |
+
+The CLI prints both hints. `saksama wizard` asks instead: when a connection fails
+because of TLS, it offers to retry without it, once per session, and says so in the
+equivalent command line it prints.
+
 ## `saksama advise`
 
 Inspects a server, or a table definition, and reports what the engines require

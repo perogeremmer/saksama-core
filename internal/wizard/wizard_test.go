@@ -3,6 +3,7 @@ package wizard
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -641,4 +642,69 @@ func (c *countingBackend) Analyze(ctx context.Context, req core.Request) (*core.
 
 func (c *countingBackend) EngineChoices(ctx context.Context) ([]state.EngineChoice, error) {
 	return c.choices, nil
+}
+
+// A server whose TLS this client cannot negotiate used to be a dead end in the
+// menu: the CLI could pass --tls false and the wizard had no way to say it. The
+// question is asked once, and only for a TLS error - a wrong password must not
+// look like a reason to drop encryption.
+type tlsFailingBackend struct {
+	fakeBackend
+	calls []cred.Conn
+}
+
+func (b *tlsFailingBackend) Connect(c cred.Conn) error {
+	b.calls = append(b.calls, c)
+	if c.TLS != "false" {
+		return errors.New(`connecting to root@tcp(127.0.0.1:33308)/demo as root: remote error: tls: handshake failure`)
+	}
+	b.connected, b.conn = true, c
+	return nil
+}
+
+func TestTLSHandshakeFailureOffersToConnectWithoutTLS(t *testing.T) {
+	b := &tlsFailingBackend{}
+	w, p := newWizard(t, b, "0")
+	p = drive(w, "127.0.0.1", "33308", "root", "demo", "", "y")
+	w.connect()
+
+	if !w.connected {
+		t.Fatalf("the wizard gave up instead of retrying:\n%s", p.output())
+	}
+	if w.conn.TLS != "false" {
+		t.Fatalf("TLS mode after the retry = %q, want false", w.conn.TLS)
+	}
+	if len(b.calls) != 2 {
+		t.Fatalf("expected two connection attempts, got %d", len(b.calls))
+	}
+	out := p.output()
+	if !strings.Contains(out, "connect without TLS instead?") {
+		t.Fatalf("the operator must be asked, not silently downgraded:\n%s", out)
+	}
+	if !strings.Contains(out, "--tls false") {
+		t.Fatalf("the equivalent command must show the mode:\n%s", out)
+	}
+	if !strings.Contains(out, "not encrypted") {
+		t.Fatalf("the session must say it is unencrypted:\n%s", out)
+	}
+}
+
+type authFailingBackend struct{ fakeBackend }
+
+func (b *authFailingBackend) Connect(cred.Conn) error {
+	return errors.New("connecting to root@tcp(127.0.0.1:3306)/demo as root: Error 1045: Access denied for user 'root'@'localhost'")
+}
+
+func TestWrongPasswordDoesNotOfferToDropTLS(t *testing.T) {
+	b := &authFailingBackend{}
+	w, p := newWizard(t, b, "0")
+	p = drive(w, "127.0.0.1", "33308", "root", "demo", "")
+	w.connect()
+
+	if w.connected {
+		t.Fatal("connected with nothing listening")
+	}
+	if strings.Contains(p.output(), "connect without TLS") {
+		t.Fatalf("a non-TLS failure must not offer to disable TLS:\n%s", p.output())
+	}
 }

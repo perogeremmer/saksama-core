@@ -249,6 +249,16 @@ func (w *Wizard) reanalyse(req core.Request, flag string) (*core.Prepared, error
 	return prep, nil
 }
 
+// tlsUnusable reports whether a connection error is the TLS negotiation failing,
+// rather than a wrong password or a missing host.
+func tlsUnusable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "tls: ") || strings.Contains(msg, "x509: ")
+}
+
 // ensureTables reads the schema once per session, so a table can be picked from a
 // list rather than typed. Every screen that offers a table needs the same read.
 func (w *Wizard) ensureTables() bool {
@@ -401,7 +411,13 @@ func (w *Wizard) connect() {
 		return
 	}
 
-	w.connectWith(cred.Conn{Host: host, Port: port, User: dbUser, Database: database, TLS: "preferred"})
+	// Keep whatever worked last time: a server without usable TLS should be asked
+	// about once, not on every reconnect.
+	tls := w.conn.TLS
+	if tls == "" {
+		tls = "preferred"
+	}
+	w.connectWith(cred.Conn{Host: host, Port: port, User: dbUser, Database: database, TLS: tls})
 }
 
 func (w *Wizard) connectWith(c cred.Conn) {
@@ -425,7 +441,24 @@ func (w *Wizard) connectWith(c cred.Conn) {
 
 	if err := w.b.Connect(c); err != nil {
 		w.p.Printf("\ncould not connect: %v\n", err)
-		return
+		// The CLI has --tls; the menu had no way to say the same thing, so a server
+		// whose TLS this client cannot negotiate was a dead end here. Ask, and only
+		// when the error is actually about TLS: disabling it is a security decision
+		// and the person at the keyboard is the one who knows the network path.
+		if !tlsUnusable(err) || c.TLS == "false" {
+			return
+		}
+		ok, cerr := w.p.Confirm(
+			"this server's TLS handshake fails; connect without TLS instead? (only on a trusted link)", false)
+		if cerr != nil || !ok {
+			return
+		}
+		c.TLS = "false"
+		if err := w.b.Connect(c); err != nil {
+			w.p.Printf("\ncould not connect without TLS either: %v\n", err)
+			return
+		}
+		w.p.Printf("\nnote: this session runs without TLS; the connection is not encrypted\n")
 	}
 
 	w.conn = c
@@ -434,8 +467,12 @@ func (w *Wizard) connectWith(c cred.Conn) {
 	w.tables = nil
 
 	w.p.Printf("\nconnected to %s as %s\n", c.Describe(), c.User)
-	w.p.Printf("equivalent: saksama advise --live -h %s -P %s -u %s -d %s\n",
+	w.p.Printf("equivalent: saksama advise --live -h %s -P %s -u %s -d %s",
 		c.Host, c.Port, c.User, orDash(c.Database))
+	if c.TLS == "false" {
+		w.p.Printf(" --tls false")
+	}
+	w.p.Printf("\n")
 }
 
 // --- inspect ----------------------------------------------------------------
