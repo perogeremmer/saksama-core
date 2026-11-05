@@ -34,6 +34,21 @@ There is no telemetry, no update check, and no call home. Nothing installs itsel
 `plan`, `advise`, and `apply` never download, and the wizard only prints the
 command.
 
+One download is not a command: the install script in this repository's README
+(`curl .../install.sh | sh`) fetches the release archive and its `checksums.txt`. It
+is a shell script, not part of the binary, and it runs once, before Saksama exists on
+the machine. If you would rather not pipe a script into a shell, the README's second
+half does the same steps by hand.
+
+### What the install script trusts
+
+The same shape as `engine install`, and the same limit stated plainly: the archive and
+the `checksums.txt` come from the same origin, so the checksum proves the download
+arrived intact and that a mirror did not swap it. It does not prove the publisher was
+not compromised - nothing fetched from one origin can. Pinning `SAKSAMA_VERSION` and
+comparing the digest against a value you got from somewhere else is the only way to
+close that gap.
+
 ### What `engine install` trusts
 
 - **HTTPS to the publisher.** `github.com/github/gh-ost` releases, and

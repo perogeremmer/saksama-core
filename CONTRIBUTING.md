@@ -111,6 +111,7 @@ not for quietly changing what a version contains.
 | Distro smoke (Fedora, Arch, Alpine) | the shipped binary runs there, and `engine doctor` names the package manager that distribution actually has |
 | Engine flag matrix | every flag the wrappers emit exists in the real binaries |
 | Release config | a snapshot builds, archives, checksums, and SBOMs, and the snapshot binary is static |
+| Install script | the one-liner installs a clean archive, and refuses a tampered one or a release with no `checksums.txt` - without writing a binary in either failure case. The release workflow runs the same script against the assets it just published |
 | Offline plan demo | three plans that must route, refuse, and explain without a database |
 
 Nightly, not per pull request: `TestCopyWithConcurrentWritesLosesNothing` copies 131k
