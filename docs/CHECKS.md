@@ -74,7 +74,7 @@ doctor (section S).
 | ID | Check | Severity | Status | Note |
 |---|---|---|---|---|
 | D1 | a statement has been running longer than the threshold | `WARN` at 30s, `BLOCKER` at 300s | done | DDL queues behind the metadata lock, and every query queues behind that |
-| D1b | the metadata lock queue is already non-empty | `BLOCKER` | done | adding this migration would extend the outage |
+| D1b | the metadata lock queue is already non-empty, or could not be read | `BLOCKER` when non-empty, `WARN` when unreadable | done | adding this migration would extend the outage; a queue nobody could read is not an empty queue, and on a server that has the table this usually means the account cannot see `performance_schema` |
 | D1c | the account lacks `PROCESS`, so other sessions are invisible | `WARN` | done | the D1 hazard cannot be seen |
 | D2 | `lock_wait_timeout` is unbounded | `INFO` | done | the default is 86400 seconds, so a DDL can hang for a day |
 | D3 | a transaction older than the threshold is open | `WARN` | done | row locks and old row versions slow the copy |
@@ -137,6 +137,7 @@ The engine matrix decides these. Each names the engine so a fix is obvious.
 | R8 | the server is not configured for the chosen engine | `BLOCKER` | done | names the setting, and how to change it |
 | R9 | gh-ost was passed over because the server cannot start it | `WARN` | done | explains the automatic fallback to pt-osc |
 | R10 | the engine may rename foreign key constraints during the copy | `INFO` | done | some pt-osc builds keep an underscore prefix; verification matches structure, not names |
+| R11 | gh-ost cannot check the metadata lock queue on this server | `WARN` | done | `performance_schema.metadata_locks` arrives in 5.7; on 5.6 gh-ost refuses to start without `--skip-metadata-lock-check`, so the wrapper passes it and the plan says the check is off |
 
 ---
 

@@ -55,12 +55,14 @@ var MySQL = []MySQLRow{
 	{
 		Version: "8.4.x", Status: Verified,
 		Native: "INSTANT add/drop column, INPLACE index",
-		Detail: "8.4.13 via mysql:8.4 container: 24/24 integration tests pass",
+		// Deliberately no test count: it was hand-maintained and went stale the moment
+		// the suite grew. What a reader needs is what ran, not a number that rots.
+		Detail: "8.4.13 via mysql:8.4 container: the full integration suite passes, including a real copy-engine migration",
 	},
 	{
 		Version: "8.0.x", Status: Verified,
 		Native: "INSTANT add column (8.0.12+), INSTANT drop column (8.0.29+), INPLACE index",
-		Detail: "8.0.46 via mysql:8.0 container: 24/24 integration tests pass, including a real gh-ost migration",
+		Detail: "8.0.46 via mysql:8.0 container: the full integration suite passes, including a real gh-ost migration and the INSTANT boundary test",
 	},
 	{
 		Version: "8.0.29+", Status: Verified,
@@ -75,7 +77,7 @@ var MySQL = []MySQLRow{
 	{
 		Version: "5.7.44", Status: Verified,
 		Native: "INPLACE add/drop index; every column change is a rebuild",
-		Detail: "43 of 44 integration tests pass (the INSTANT ones skip); with pt-osc 3.7.2 the full suite runs, and gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows",
+		Detail: "the full integration suite passes, except the cases that assert INSTANT behaviour and skip themselves there; gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows, and pt-osc 3.7.2 runs its own cases",
 	},
 	{
 		Version: "5.6.51", Status: Verified,

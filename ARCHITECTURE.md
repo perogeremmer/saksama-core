@@ -95,7 +95,7 @@ An open source tool for backend developers and startup founders who:
 
 | MySQL | Native INSTANT | Native INPLACE | gh-ost | pt-osc |
 |---|---|---|---|---|
-| 5.6 | no | `ADD INDEX` | no, needs 5.7 | 2.x |
+| 5.6 | no | `ADD INDEX` | yes, with `--skip-metadata-lock-check`: `performance_schema.metadata_locks` does not exist, so gh-ost cannot check the lock queue and refuses to start unless told to skip it | 3.x |
 | 5.7 | no | `ADD INDEX` | yes | 3.x |
 | 8.0.12 to 8.0.28 | add column | `ADD INDEX` | yes | 3.x |
 | 8.0.29+ | add and drop column | `ADD INDEX` | yes | 3.x |
@@ -170,6 +170,19 @@ flowchart TD
     AN -->|"Plan"| ORCH
     ENG -->|"verify through"| INTRO
 ```
+
+| Package | Responsibility | Never |
+|---|---|---|
+| `internal/cli` | flag parsing, dispatch, exit codes | decides whether a change is safe |
+| `internal/wizard` | numbered menus, prompts, the same commands printed before acting | owns policy, or downloads anything |
+| `internal/app` | connection and state-directory wiring shared by both frontends | business rules |
+| `internal/core` | Analyze (writes nothing), Prepare, Apply, Cancel, Cleanup, Reconcile, engine ownership and verification | prints |
+| `internal/analyzer` | pure decision layer: `(schema, ops, server, liveState) -> Plan` | touches a database |
+| `internal/introspect` | information_schema, performance_schema, settings, artifact discovery | decides |
+| `internal/engine` | native, gh-ost, pt-osc adapters; progress polled from the database | parses engine logs for state |
+| `internal/enginesetup` | the one place that downloads and writes an executable: verified version, checksum, pinned digest | runs from plan, advise, or apply |
+| `internal/stream` | tails an event log from a sequence number, for `attach` and the wizard | buffers unbounded |
+| `internal/state`, `internal/events`, `internal/render`, `internal/support` | session records, the event contract, presentation, the verified-claims table | — |
 
 The event contract is one way for commands and the other way for events, which is
 what makes a TUI, a web UI, and a CI job equal citizens rather than three

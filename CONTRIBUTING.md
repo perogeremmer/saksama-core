@@ -34,8 +34,21 @@ git clone git@github.com:perogeremmer/saksama-core.git
 cd saksama-core
 make test              # unit tests, no database needed
 make demo              # renders two plan cards
-make test-integration  # spins MySQL 8.0 in docker, runs 20 tests
+make test-integration  # spins MySQL 8.0 in docker, runs the whole integration suite
 ```
+
+Two things that surprise people the first time:
+
+- **The copy-engine tests skip when the engines are missing.** `TestKilledCopy…`,
+  the `pt-osc` cases and the flag matrix need `gh-ost` and
+  `pt-online-schema-change` on `PATH`. Without them the suite is green and half of
+  it never ran, so install both before you trust a local run:
+  `saksama engine doctor` says what is missing, `saksama engine install gh-ost`
+  and `… pt-osc` put the verified builds in place.
+- **The slow tests are opt-in.** `SAKSAMA_VOLUME_TESTS=1 go test -tags=integration
+  -run TestCopyWithConcurrentWrites ./test/integration/` builds 131k rows and writes
+  to them while the copy runs. It takes minutes and runs nightly in CI, not per
+  pull request.
 
 ## Adding a check
 
@@ -73,5 +86,6 @@ ADD COLUMN failed at execution while the plan reported it as safe.
 ## Pull requests
 
 - One concern per PR.
-- Include the output of `make test` and, if you touched execution, `make test-integration`.
+- Include the output of `make test` and, if you touched execution, `make test-integration`
+  with the engines installed, so the copy-engine tests actually ran instead of skipping.
 - Update `README.md` and `ARCHITECTURE.md` when something moves from "not built" to "done".

@@ -219,7 +219,7 @@ The MySQL Clone Plugin is deliberately absent: it clones an instance, not a tabl
 | `ALTER` parser, 19 operations, fail closed | done |
 | `SHOW CREATE TABLE` parser including FK actions | done |
 | Version gated capability matrix | done |
-| Checks catalogue, 49 checks plus a 12-setting server doctor | done |
+| Checks catalogue, 55 checks plus a 12-setting server doctor | done |
 | Offline plan, plan card, JSON, exit codes | done |
 | Live introspection and the server-settings doctor | done |
 | Native execution with explicit algorithm and lock | done |
@@ -228,7 +228,11 @@ The MySQL Clone Plugin is deliberately absent: it clones an instance, not a tabl
 | Engine choice with table, database, and global scope | done |
 | Session state, table lock, event log, audit export | done |
 | Cutover gate, cancel, cleanup with ownership, attach, reconcile | done |
-| Daemon with a socket, TUI | not built |
+| Terminal menu (`saksama`, `saksama wizard`) over the same core | done |
+| `engine doctor` and verified `engine install` | done |
+| MySQL 5.6, with its unobservable lock queue stated in every plan | done |
+| Deferred claims published, not assumed: boundary pairs, killed-engine recovery, nightly volume | done |
+| Daemon with a socket, full-screen TUI | not built |
 
 Commands that are not implemented exit `2` with an explicit message. They are
 never stubbed into something that looks like it works.

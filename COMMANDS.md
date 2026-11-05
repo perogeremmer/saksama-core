@@ -196,9 +196,26 @@ saksama plan --ddl orders.sql --alter "<ALTER>" --mysql-version 8.0.36 --json
 | `--disk-total <bytes>` | volume size, so the 10 percent floor can be applied |
 | `--rows`, `--data-bytes`, `--index-bytes` | sizing facts for the estimate |
 | `--json` | emit the plan JSON instead of the card |
+| `--accept-unknown-mdl` | accept the one risk that cannot be fixed: on MySQL 5.6 the metadata lock queue cannot be read |
 
 Exit code `1` means the plan exists and contains blockers. That is the intended
 CI gate, so a pipeline fails on a change the tool refuses.
+
+### The one blocker you can accept
+
+MySQL 5.6 has no `performance_schema.metadata_locks`, so the queue a DDL statement
+would join is invisible there. That is not a reason to refuse the server - 5.6 is
+supported - and it is not a reason to pretend the check passed. So:
+
+| Situation | What the plan says |
+|---|---|
+| 5.7 or newer | `E5b` does not appear; `D1b` blocks when the queue is non-empty |
+| 5.6, not production | `E5b` **WARN**, naming what cannot be seen |
+| 5.6, `--production` | `E5b` **BLOCKER**, exit `1` |
+| 5.6, `--production --accept-unknown-mdl` | the blocker clears; the warning stays, and the audit trail records the acceptance |
+
+`--accept-unknown-mdl` is also a flag on `apply`, and the wizard asks the same
+question instead of asking you to leave the menu.
 
 ---
 
