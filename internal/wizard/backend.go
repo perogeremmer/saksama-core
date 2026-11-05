@@ -163,7 +163,7 @@ func (l *live) ClearEngine(database, table string, global bool) (state.EngineCho
 	if err != nil {
 		return state.EngineChoice{}, err
 	}
-	if err := l.store.ClearEngineChoice(choice); err != nil {
+	if _, err := l.store.ClearEngineChoice(choice); err != nil {
 		return state.EngineChoice{}, err
 	}
 	return choice, nil

@@ -74,6 +74,9 @@ func cmdAdvise(args []string, stdout, stderr io.Writer) int {
 	fs.Int64Var(&o.indexBytes, "index-bytes", 0, "table index bytes")
 	fs.Bool("no-color", false, "accepted for compatibility")
 
+	if !live && explainMissingLive("advise", args, stderr) {
+		return ExitUsage
+	}
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}

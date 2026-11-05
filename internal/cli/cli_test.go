@@ -793,3 +793,34 @@ func TestMain(m *testing.M) {
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
+
+// A live command typed without --live used to answer with a bare flag list, which is
+// how "advise -h 127.0.0.1" looked like a typo instead of a mode mistake. The flag is
+// real, the mode is missing, and the message has to say which.
+func TestConnectionFlagsWithoutLiveSayWhy(t *testing.T) {
+	for _, sub := range []string{"advise", "plan"} {
+		for _, flag := range []string{"-h", "--host", "-P", "-u", "--tls"} {
+			var out, errOut bytes.Buffer
+			code := Run([]string{sub, flag, "127.0.0.1", "-d", "shop"}, &out, &errOut)
+			if code != ExitUsage {
+				t.Errorf("%s %s: exit = %d, want %d", sub, flag, code, ExitUsage)
+			}
+			msg := errOut.String()
+			if !strings.Contains(msg, "--live") {
+				t.Errorf("%s %s: the message must name --live:\n%s", sub, flag, msg)
+			}
+			if !strings.Contains(msg, "connects to a server") {
+				t.Errorf("%s %s: the message must explain what the flag does:\n%s", sub, flag, msg)
+			}
+		}
+	}
+}
+
+// The offline path must not be affected by that message.
+func TestOfflineAdviseDoesNotMentionLive(t *testing.T) {
+	var out, errOut bytes.Buffer
+	Run([]string{"advise", "--mysql-version", "8.0.36", "-a", "ADD INDEX ix (a)"}, &out, &errOut)
+	if strings.Contains(errOut.String(), "connects to a server") {
+		t.Fatalf("offline advice should not talk about live mode:\n%s", errOut.String())
+	}
+}

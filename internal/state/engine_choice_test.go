@@ -160,17 +160,26 @@ func TestClearEngineChoice(t *testing.T) {
 	if err := s.SetEngineChoice(choice); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ClearEngineChoice(choice); err != nil {
+	removed, err := s.ClearEngineChoice(choice)
+	if err != nil {
 		t.Fatalf("clear: %v", err)
+	}
+	if !removed {
+		t.Fatal("clearing a recorded choice must report that it removed one")
 	}
 	got, _ := s.ResolveEngine("shop", "orders")
 	if got != nil {
 		t.Fatalf("choice survived clear: %+v", got)
 	}
-	// Clearing something that is not there is not an error.
+	// Clearing something that is not there is not an error, but it must not be
+	// reported as a removal either: a wider scope may still be deciding.
 	missing, _ := NewChoice("native", false, "shop", "nothing")
-	if err := s.ClearEngineChoice(missing); err != nil {
+	removed, err = s.ClearEngineChoice(missing)
+	if err != nil {
 		t.Fatalf("clear missing: %v", err)
+	}
+	if removed {
+		t.Fatal("clearing a choice that was never recorded must report false")
 	}
 }
 
@@ -181,7 +190,7 @@ func TestClearingGlobalLeavesTableChoice(t *testing.T) {
 	tc, _ := NewChoice("gh-ost", false, "shop", "orders")
 	_ = s.SetEngineChoice(tc)
 
-	if err := s.ClearEngineChoice(g); err != nil {
+	if _, err := s.ClearEngineChoice(g); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.ResolveEngine("shop", "orders"); got == nil || got.Engine != "gh-ost" {

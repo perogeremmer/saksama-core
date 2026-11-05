@@ -357,11 +357,23 @@ func cmdEngineClear(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "saksama engine clear: %v\n", err)
 		return ExitInternal
 	}
-	if err := store.ClearEngineChoice(choice); err != nil {
+	removed, err := store.ClearEngineChoice(choice)
+	if err != nil {
 		fmt.Fprintf(stderr, "saksama engine clear: %v\n", err)
 		return ExitInternal
 	}
-	fmt.Fprintf(stdout, "cleared %s\n", describeScope(choice))
+	if !removed {
+		fmt.Fprintf(stdout, "no recorded choice for %s\n", describeScope(choice))
+	} else {
+		fmt.Fprintf(stdout, "cleared %s\n", describeScope(choice))
+	}
+
+	// Clearing a narrow scope says nothing about a wider one, and the wider one is
+	// what still decides the engine. Say so, with the command that ends it.
+	if c, err := store.ResolveEngine(*database, *table); err == nil && c != nil {
+		fmt.Fprintf(stdout, "%s still applies to %s; clear it with: saksama engine clear%s\n",
+			c.Engine, describeScope(choice), core.EngineScopeFlags(*c))
+	}
 	return ExitOK
 }
 

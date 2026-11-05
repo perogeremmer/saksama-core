@@ -177,13 +177,20 @@ func (s *Store) ResolveEngine(database, table string) (*EngineChoice, error) {
 	return s.loadChoicePath(s.engineChoicePath(EngineChoice{Scope: ScopeGlobal}))
 }
 
-// ClearEngineChoice removes a recorded choice.
-func (s *Store) ClearEngineChoice(c EngineChoice) error {
+// ClearEngineChoice removes a recorded choice and reports whether one was there.
+//
+// The boolean matters: clearing a table-scoped choice that was never recorded used to
+// report success while a global choice carried on deciding the engine, so the operator
+// was told a decision had been undone when nothing had changed.
+func (s *Store) ClearEngineChoice(c EngineChoice) (bool, error) {
 	err := os.Remove(s.engineChoicePath(c))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return false, nil
 	}
-	return err
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ListEngineChoices returns every recorded choice, most specific first.
