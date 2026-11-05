@@ -20,6 +20,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # A dispatched run releases the tag that was typed, not whatever the default
+          # branch happens to point at. The input existed before this line and did
+          # nothing, which is the kind of quiet lie this repository tries not to tell.
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
