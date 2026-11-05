@@ -59,9 +59,6 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if hasFlag(args[1:], "--live") {
 			return cmdPlanLive(removeFlag(args[1:], "--live"), stdout, stderr)
 		}
-		if explainMissingLive("plan", args[1:], stderr) {
-			return ExitUsage
-		}
 		return cmdPlan(args[1:], stdout, stderr)
 	case "advise":
 		return cmdAdvise(args[1:], stdout, stderr)
@@ -285,6 +282,9 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
 	fs.Bool("no-color", false, "accepted for compatibility")
 
+	if missing := missingLiveFlag(fs, args); explainMissingLive("plan", missing, args, stderr) {
+		return ExitUsage
+	}
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}

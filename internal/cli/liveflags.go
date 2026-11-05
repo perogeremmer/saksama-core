@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -10,41 +11,48 @@ import (
 // live command and is one, except the flag set it lands on is the offline one, so the
 // answer was a bare flag list with no hint that --live was missing.
 var connectionFlags = map[string]bool{
-	"-h": true, "-host": true, "--host": true,
-	"-P": true, "-port": true, "--port": true,
-	"-u": true, "-user": true, "--user": true,
-	"--tls":                 true,
-	"--defaults-extra-file": true,
-	"--ask-pass":            true,
-	"--no-defaults":         true,
+	"h": true, "host": true,
+	"P": true, "port": true,
+	"u": true, "user": true,
+	"tls":                 true,
+	"defaults-extra-file": true,
+	"ask-pass":            true,
+	"no-defaults":         true,
 }
 
-// firstConnectionFlag returns the connection flag in args, if any.
-func firstConnectionFlag(args []string) string {
+// missingLiveFlag returns the first connection flag that the offline flag set does not
+// define, which is the only case worth explaining.
+//
+// It asks the flag set rather than guessing from a list, because the same name can
+// mean different things in the two modes: `--host` is a live connection on `advise`
+// and a reporting label on offline `plan`, where it parses fine and must keep working.
+func missingLiveFlag(fs *flag.FlagSet, args []string) string {
 	for _, a := range args {
-		name := a
+		name := strings.TrimLeft(a, "-")
 		if i := strings.IndexByte(name, '='); i >= 0 {
 			name = name[:i]
 		}
-		if connectionFlags[name] {
+		if name == "" || !connectionFlags[name] {
+			continue
+		}
+		if fs.Lookup(name) == nil {
 			return name
 		}
 	}
 	return ""
 }
 
-// explainMissingLive turns "flag provided but not defined" into the sentence the
-// person needed: this is a live flag, and live mode is opt-in.
-func explainMissingLive(cmd string, args []string, stderr io.Writer) bool {
-	flag := firstConnectionFlag(args)
-	if flag == "" {
+// explainMissingLive turns a flag the offline set cannot accept into the sentence the
+// person needed: this flag connects to a server, and live mode is opt-in.
+func explainMissingLive(cmd, flagName string, args []string, stderr io.Writer) bool {
+	if flagName == "" {
 		return false
 	}
 	fmt.Fprintf(stderr,
-		"saksama %s: %s connects to a server, and %s only does that with --live.\n"+
+		"saksama %s: -%s connects to a server, and %s only does that with --live.\n"+
 			"  live:     saksama %s --live %s\n"+
 			"  offline:  saksama %s --ddl <file|-> --mysql-version <X.Y.Z> [-t <table>] [-a \"<ALTER>\"]\n",
-		cmd, flag, cmd, cmd, strings.Join(summarise(args), " "), cmd)
+		cmd, flagName, cmd, cmd, strings.Join(summarise(args), " "), cmd)
 	return true
 }
 
@@ -54,7 +62,8 @@ func summarise(args []string) []string {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		// A password must never be echoed, even as a flag name with its value.
-		if strings.Contains(strings.ToLower(a), "password") || strings.Contains(strings.ToLower(a), "ask-pass") {
+		lower := strings.ToLower(a)
+		if strings.Contains(lower, "password") || strings.Contains(lower, "ask-pass") {
 			continue
 		}
 		out = append(out, a)

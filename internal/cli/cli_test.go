@@ -798,8 +798,18 @@ func TestMain(m *testing.M) {
 // how "advise -h 127.0.0.1" looked like a typo instead of a mode mistake. The flag is
 // real, the mode is missing, and the message has to say which.
 func TestConnectionFlagsWithoutLiveSayWhy(t *testing.T) {
-	for _, sub := range []string{"advise", "plan"} {
-		for _, flag := range []string{"-h", "--host", "-P", "-u", "--tls"} {
+	// -h/--host are only live flags on advise: offline plan accepts them as the
+	// reporting label, which TestOfflinePlanAcceptsHostAsALabel pins down.
+	cases := []struct {
+		sub   string
+		flags []string
+	}{
+		{"advise", []string{"-h", "--host", "-P", "-u", "--tls"}},
+		{"plan", []string{"-P", "-u", "--tls"}},
+	}
+	for _, c := range cases {
+		sub := c.sub
+		for _, flag := range c.flags {
 			var out, errOut bytes.Buffer
 			code := Run([]string{sub, flag, "127.0.0.1", "-d", "shop"}, &out, &errOut)
 			if code != ExitUsage {
@@ -813,6 +823,35 @@ func TestConnectionFlagsWithoutLiveSayWhy(t *testing.T) {
 				t.Errorf("%s %s: the message must explain what the flag does:\n%s", sub, flag, msg)
 			}
 		}
+	}
+}
+
+// `--host` is a live connection on advise and a reporting label on offline plan, where
+// it must keep working. This test exists because a first attempt broke exactly that:
+// a blanket list of "connection flags" turned a valid offline plan into a usage error.
+func TestOfflinePlanAcceptsHostAsALabel(t *testing.T) {
+	dir := t.TempDir()
+	ddl := dir + "/t.sql"
+	if err := os.WriteFile(ddl, []byte("CREATE TABLE `t` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := Run([]string{"plan", "--ddl", ddl, "--mysql-version", "8.0.36", "--host", "db.prod", "--alter", "ADD INDEX ix (id)"}, &out, &errOut)
+	if code != ExitOK {
+		t.Fatalf("exit = %d, stderr = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "db.prod") {
+		t.Fatalf("the host label must appear in the report:\n%s", out.String())
+	}
+
+	// -P is not a label anywhere offline, so it gets the explanation.
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"plan", "--ddl", ddl, "--mysql-version", "8.0.36", "-P", "3306"}, &out, &errOut); code != ExitUsage {
+		t.Fatalf("exit = %d, want usage error", code)
+	}
+	if !strings.Contains(errOut.String(), "--live") {
+		t.Fatalf("-P must be explained:\n%s", errOut.String())
 	}
 }
 
