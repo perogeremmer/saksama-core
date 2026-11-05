@@ -175,8 +175,24 @@ printed by `saksama compat`. What the tool will not do is in
 
 ### 1. Take a binary you can verify
 
+No Go toolchain, no package manager, no root:
+
 ```bash
-VERSION=v0.3.0
+curl -fsSL https://raw.githubusercontent.com/perogeremmer/saksama-core/master/install.sh | sh
+```
+
+It works out the platform, downloads the archive for it, verifies the checksum
+against the release's `checksums.txt`, and installs to `/usr/local/bin` when that is
+writable or `~/.local/bin` otherwise. It refuses to install an archive it cannot
+verify, and says so instead of unpacking it. Pin a version or a directory with
+`SAKSAMA_VERSION=v0.4.0` and `SAKSAMA_INSTALL_DIR=...`, and point it at an internal
+mirror with `SAKSAMA_BASE_URL=...` (CI runs the same script against a local mirror on
+every push, including the tampered-archive and missing-checksums paths).
+
+The long way, if you would rather check each step by hand:
+
+```bash
+VERSION=v0.4.0
 curl -fsSLO https://github.com/perogeremmer/saksama-core/releases/download/$VERSION/saksama_${VERSION#v}_linux_amd64.tar.gz
 curl -fsSLO https://github.com/perogeremmer/saksama-core/releases/download/$VERSION/checksums.txt
 sha256sum -c checksums.txt --ignore-missing --quiet && echo verified

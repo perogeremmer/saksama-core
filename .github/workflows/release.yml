@@ -62,3 +62,22 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Most people installing this do not have a Go toolchain, and the one-liner
+      # in the README is the only thing standing between the release and them. Run
+      # it against the assets that were just published, so "the documented command
+      # works" is a fact about this release rather than a memory of an older one.
+      - name: The documented install one-liner installs this release
+        run: |
+          tag="${{ github.event.inputs.tag || github.event.ref }}"
+          tag="${tag#refs/tags/}"
+          version="${tag#v}"
+          for attempt in $(seq 1 30); do
+            if curl -fsSL -o /dev/null "https://github.com/perogeremmer/saksama-core/releases/download/$tag/checksums.txt"; then
+              break
+            fi
+            echo "assets not published yet (attempt $attempt)"; sleep 10
+          done
+          SAKSAMA_VERSION="$version" SAKSAMA_INSTALL_DIR="$RUNNER_TEMP/sk-install" sh install.sh
+          got=$("$RUNNER_TEMP/sk-install/saksama" version | awk '{print $2}')
+          test "$got" = "$version" || { echo "::error::installed $got, expected $version"; exit 1; }

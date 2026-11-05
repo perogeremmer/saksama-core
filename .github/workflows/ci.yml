@@ -332,6 +332,65 @@ jobs:
         run: |
           go test -tags=integration -count=1 -v ./test/integration/
 
+  # install.sh is the only install path for people without a Go toolchain, so its
+  # failure modes matter more than its success path. Run it against a local mirror
+  # (curl accepts file://) to prove that a clean archive installs, and that a
+  # tampered archive or a missing checksums.txt refuses - forever, on every push,
+  # without touching GitHub.
+  install-script:
+    name: Install script (clean, tampered, missing checksums)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build a mirror from the binary this commit produces
+        run: |
+          set -eu
+          make build
+          version=$(./bin/saksama version | awk '{print $2}')
+          echo "SAKSAMA_TEST_VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/mirror"
+          tar czf "$RUNNER_TEMP/mirror/saksama_${version}_linux_amd64.tar.gz" -C bin saksama
+          (cd "$RUNNER_TEMP/mirror" && sha256sum "saksama_${version}_linux_amd64.tar.gz" > checksums.txt)
+
+      - name: A clean archive installs and runs
+        run: |
+          set -eu
+          SAKSAMA_BASE_URL="file://$RUNNER_TEMP/mirror" SAKSAMA_VERSION="$SAKSAMA_TEST_VERSION" \
+            SAKSAMA_INSTALL_DIR="$RUNNER_TEMP/good" sh install.sh
+          got=$("$RUNNER_TEMP/good/saksama" version | awk '{print $2}')
+          test "$got" = "$SAKSAMA_TEST_VERSION" || { echo "::error::installed $got"; exit 1; }
+
+      - name: A tampered archive is refused before it is unpacked
+        run: |
+          set -eu
+          printf 'x' >> "$RUNNER_TEMP/mirror/saksama_${SAKSAMA_TEST_VERSION}_linux_amd64.tar.gz"
+          set +e
+          output=$(SAKSAMA_BASE_URL="file://$RUNNER_TEMP/mirror" SAKSAMA_VERSION="$SAKSAMA_TEST_VERSION" \
+            SAKSAMA_INSTALL_DIR="$RUNNER_TEMP/bad" sh install.sh 2>&1)
+          code=$?
+          set -e
+          test "$code" -ne 0 || { echo "::error::install.sh accepted a tampered archive"; exit 1; }
+          echo "$output" | grep -q "checksum mismatch" || { echo "::error::the refusal did not name the checksum"; echo "$output"; exit 1; }
+          test ! -e "$RUNNER_TEMP/bad/saksama" || { echo "::error::a tampered binary was installed"; exit 1; }
+
+      - name: A release without checksums is refused
+        run: |
+          set -eu
+          rm -f "$RUNNER_TEMP/mirror/checksums.txt"
+          set +e
+          output=$(SAKSAMA_BASE_URL="file://$RUNNER_TEMP/mirror" SAKSAMA_VERSION="$SAKSAMA_TEST_VERSION" \
+            SAKSAMA_INSTALL_DIR="$RUNNER_TEMP/nosum" sh install.sh 2>&1)
+          code=$?
+          set -e
+          test "$code" -ne 0 || { echo "::error::install.sh installed without a checksum"; exit 1; }
+          echo "$output" | grep -q "no checksums.txt" || { echo "::error::the refusal did not say why"; echo "$output"; exit 1; }
+
   # The INSTANT boundary. 8.0.28 and 8.0.29 do not agree about ADD COLUMN in the
   # middle of a row, or about DROP COLUMN, and the capability matrix has a row for
   # each side. One test, two pinned servers, both must match the matrix: a row

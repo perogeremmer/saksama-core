@@ -30,6 +30,30 @@ Exit codes are part of the contract:
 
 ---
 
+## Install
+
+No Go toolchain needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/perogeremmer/saksama-core/master/install.sh | sh
+```
+
+It works out the platform, downloads the archive for it, verifies it against the
+release's `checksums.txt`, and installs to `/usr/local/bin` when that is writable or
+`~/.local/bin` otherwise. An archive it cannot verify is refused, not unpacked.
+
+| Variable | Effect |
+|---|---|
+| `SAKSAMA_VERSION` | tag to install, for example `0.4.0` (default: the latest release) |
+| `SAKSAMA_INSTALL_DIR` | where the binary goes (default: `/usr/local/bin`, else `~/.local/bin`) |
+| `SAKSAMA_BASE_URL` | where the archive comes from, for an internal mirror |
+
+`go install github.com/perogeremmer/saksama-core/cmd/saksama@latest` produces the same
+binary if you do have Go. Nothing else is required at runtime: the binary is static,
+which the CI job asserts rather than assumes.
+
+---
+
 ## `saksama wizard`
 
 An interactive menu for people who do not want to remember flags. Every step calls
