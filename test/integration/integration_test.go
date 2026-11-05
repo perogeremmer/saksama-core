@@ -497,11 +497,11 @@ func TestApplyForeignKeyRebuildRoutesToPtOSC(t *testing.T) {
 
 	runner, store := newRunner(t)
 	runner.DB = db
-	// Relaxing nullability, not widening: a widening that fits inside the varchar
-	// length byte is now planned in place on 5.7 and 8.0, so it no longer needs a
-	// copy engine and would not exercise the foreign-key routing this test is
-	// about. This change rebuilds on every supported version.
-	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(32) NULL")
+	// Narrowing, not widening and not a nullability change: MySQL refuses
+	// ALGORITHM=INPLACE for both of those on at least one supported version, and
+	// the ones it accepts are planned natively for a small table, so they would
+	// not exercise the foreign-key routing this test is about.
+	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(16) NOT NULL")
 	// Report the engine binary as present so the plan is judged on the schema, not
 	// on this machine's PATH.
 	req.Binaries = map[string]analyzer.EngineBinary{
@@ -869,7 +869,7 @@ func TestAdviseLiveDetectsForeignKeyAndSuggestsPtOSC(t *testing.T) {
 	runner.DB = db
 	// A rebuild on every version, so the routing question is about the foreign key
 	// and nothing else (see the note in TestApplyForeignKeyRebuildRoutesToPtOSC).
-	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(32) NULL")
+	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(16) NOT NULL")
 	req.Binaries = map[string]analyzer.EngineBinary{
 		"gh-ost":                  {Name: "gh-ost", Available: true, Path: "/usr/bin/gh-ost", Version: "1.1.7"},
 		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: "/usr/bin/pt-online-schema-change", Version: "3.5.1"},
@@ -1619,10 +1619,15 @@ func TestHoldCutoverCreatesAndReleasesTheGate(t *testing.T) {
 	// A stub engine that waits for the gate file to disappear, like gh-ost does.
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "gh-ost")
+	// The stub touches "$gate.started" once it has seen the gate. Waiting for the
+	// pid alone is not enough: the core knows the pid as soon as exec returns, and
+	// can record it before this script's first line runs. Releasing on that signal
+	// made the test fail about one run in three with "gate missing at start".
 	script := "#!/bin/sh\n" +
 		"gate=$(printf '%s\\n' \"$@\" | sed -n 's/^--postpone-cut-over-flag-file=//p')\n" +
 		"[ -n \"$gate\" ] || { echo 'no gate given' >&2; exit 2; }\n" +
 		"[ -f \"$gate\" ] || { echo 'gate missing at start' >&2; exit 3; }\n" +
+		": > \"$gate.started\"\n" +
 		"while [ -f \"$gate\" ]; do sleep 0.2; done\n" +
 		"exit 0\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
@@ -1678,6 +1683,19 @@ func TestHoldCutoverCreatesAndReleasesTheGate(t *testing.T) {
 	}
 	if _, err := os.Stat(gate); err != nil {
 		t.Fatalf("the gate file must exist before the engine starts: %v", err)
+	}
+	// Wait for the engine to confirm it saw the gate, so the release below cannot
+	// race a script that has not started yet.
+	var started bool
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(gate + ".started"); err == nil {
+			started = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !started {
+		t.Fatal("the stub engine never reported that it saw the gate")
 	}
 
 	// Releasing it is a separate command, as it would be from another terminal.

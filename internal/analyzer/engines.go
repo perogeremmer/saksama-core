@@ -324,12 +324,18 @@ func (a *AdviceInput) assessNative() EngineAssessment {
 		})
 	}
 
-	var rebuild, blocked []string
+	var rebuild, blocked, copyOnly []string
 	for _, op := range in.Ops {
 		c := capabilityFor(op, in.Server, in.Table)
 		switch {
 		case c.Blocked:
 			blocked = append(blocked, string(op.Kind))
+		case !c.Native:
+			// A COPY-algorithm statement is not something this engine emits: it
+			// runs ALTER TABLE with an explicit ALGORITHM, so it can only do
+			// INSTANT and INPLACE. Saying "native" here would be a promise the
+			// engine breaks at execution time.
+			copyOnly = append(copyOnly, string(op.Kind))
 		case c.Rebuild:
 			rebuild = append(rebuild, string(op.Kind))
 		}
@@ -339,10 +345,22 @@ func (a *AdviceInput) assessNative() EngineAssessment {
 		len(in.Ops) > 0 && len(blocked) == 0,
 		iff(len(blocked) == 0 && len(in.Ops) > 0, "every operation has a verified rule",
 			"not supported: "+strings.Join(append(blocked, "unknown"), ", ")))
+	// A rebuild is not a wall any more, it is a price. On 5.6 and 5.7 the server
+	// performs ADD/DROP COLUMN in place with LOCK=NONE - no tool to install, no
+	// restart, writes not blocked - but rewrites every row. That is the right
+	// answer for a table of a few thousand rows on a VPS nobody wants to
+	// reconfigure, and the wrong answer for thirty million: MySQL cannot throttle,
+	// pause, resume, or cap replication lag on an in-place rebuild. So the size
+	// decides, and production needs the operator to say it out loud.
+	rebuildOK, rebuildWhy := nativeRebuildVerdict(in, rebuild)
+	x.require("no operation needs the COPY algorithm",
+		len(copyOnly) == 0,
+		iff(len(copyOnly) == 0, "every operation can run as INSTANT or INPLACE",
+			"these operations require ALGORITHM=COPY, which native does not run: "+strings.Join(dedupe(copyOnly), ", ")))
+
 	x.require("no table rebuild required",
-		len(rebuild) == 0,
-		iff(len(rebuild) == 0, "MySQL can do this in place or instantly",
-			"these operations rebuild the table: "+strings.Join(rebuild, ", ")))
+		len(rebuild) == 0 || rebuildOK,
+		iff(len(rebuild) == 0, "MySQL can do this in place or instantly", rebuildWhy))
 
 	touched := touchedColumns(in.Ops)
 	var fkHits []string

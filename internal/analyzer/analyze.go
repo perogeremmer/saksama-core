@@ -79,13 +79,16 @@ type SchemaInfo struct {
 
 // OpPlan is the per-operation verdict.
 type OpPlan struct {
-	Kind    model.OpKind `json:"kind"`
-	Raw     string       `json:"raw"`
-	RuleID  string       `json:"rule_id"`
-	Method  Method       `json:"method"`
-	Lock    string       `json:"lock,omitempty"`
-	Reason  string       `json:"reason"`
-	Blocked bool         `json:"blocked,omitempty"`
+	Kind   model.OpKind `json:"kind"`
+	Raw    string       `json:"raw"`
+	RuleID string       `json:"rule_id"`
+	Method Method       `json:"method"`
+	Lock   string       `json:"lock,omitempty"`
+	// Rebuild is the cost, independent of the algorithm: the server can run an
+	// INPLACE statement that still rewrites every row.
+	Rebuild bool   `json:"rebuild,omitempty"`
+	Reason  string `json:"reason"`
+	Blocked bool   `json:"blocked,omitempty"`
 }
 
 // Recommendation is the routing decision.
@@ -189,9 +192,13 @@ type Input struct {
 	// metadata lock queue cannot be observed. Without it, a production plan on
 	// such a server is blocked rather than merely warned.
 	AcceptUnknownMDL bool
-	SchemaSource     string   // live | ddl | json
-	Ignored          []string // schema fragments the parser could not model
-	EngineHint       Engine   // resolved override; empty means auto
+	// AllowNativeRebuild is the operator's decision to let MySQL rebuild a table
+	// in place instead of installing a copy engine. It is only consulted in
+	// production: outside it, a small enough table needs no decision.
+	AllowNativeRebuild bool
+	SchemaSource       string   // live | ddl | json
+	Ignored            []string // schema fragments the parser could not model
+	EngineHint         Engine   // resolved override; empty means auto
 	// EngineHintSource records whether the override came from a flag or a
 	// recorded decision, so the audit trail can tell them apart.
 	EngineHintSource string
@@ -278,7 +285,8 @@ func Analyze(in Input) Plan {
 		cap := capabilityFor(op, in.Server, in.Table)
 		p.Operations = append(p.Operations, OpPlan{
 			Kind: op.Kind, Raw: op.Raw, RuleID: cap.RuleID,
-			Method: cap.Method, Lock: cap.Lock, Reason: cap.Reason, Blocked: cap.Blocked,
+			Method: cap.Method, Lock: cap.Lock, Rebuild: cap.Rebuild,
+			Reason: cap.Reason, Blocked: cap.Blocked,
 		})
 		if cap.Blocked {
 			anyBlocked = true

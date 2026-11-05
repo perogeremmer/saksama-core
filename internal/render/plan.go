@@ -49,7 +49,12 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 			if op.Lock != "" {
 				method += ", LOCK=" + op.Lock
 			}
-			fmt.Fprintf(&b, "  %-12s %-22s %s\n", method, op.RuleID, oneLine(op.Raw))
+			if op.Rebuild {
+				// INPLACE is not the same as free: say so next to the label,
+				// because "INPLACE" is the word people read as "cheap".
+				method += " +rebuild"
+			}
+			fmt.Fprintf(&b, "  %-20s %-30s %s\n", method, op.RuleID, oneLine(op.Raw))
 		}
 	}
 

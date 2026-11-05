@@ -114,34 +114,51 @@ func TestInstantBoundarySidesAgreeWithTheVersion(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE `dropme` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, "+
 		"`legacy` int NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB")
 
-	midMethod, _, midRule := predict(t, db, schema, "mid", "ADD COLUMN `mid` int NULL AFTER `id`")
-	dropMethod, _, dropRule := predict(t, db, schema, "dropme", "DROP COLUMN `legacy`")
+	mid := predictVerbose(t, db, schema, "mid", "ADD COLUMN `mid` int NULL AFTER `id`")
+	drop := predictVerbose(t, db, schema, "dropme", "DROP COLUMN `legacy`")
 
+	// The cost is the claim that has to hold on every version: below the INSTANT
+	// boundary both of these rewrite the table, whatever algorithm the server uses
+	// for it. Method only says INSTANT from 8.0.29 on.
 	switch {
 	case srv.AtLeast(8, 0, 29):
-		if midMethod != analyzer.MethodInstant {
-			t.Errorf("%s: middle ADD COLUMN must be INSTANT (rule %s), got %s", raw, midRule, midMethod)
+		if mid.Method != analyzer.MethodInstant {
+			t.Errorf("%s: middle ADD COLUMN must be INSTANT (rule %s), got %s", raw, mid.RuleID, mid.Method)
 		}
-		if dropMethod != analyzer.MethodInstant {
-			t.Errorf("%s: DROP COLUMN must be INSTANT (rule %s), got %s", raw, dropRule, dropMethod)
+		if drop.Method != analyzer.MethodInstant {
+			t.Errorf("%s: DROP COLUMN must be INSTANT (rule %s), got %s", raw, drop.RuleID, drop.Method)
+		}
+		if mid.Rebuild || drop.Rebuild {
+			t.Errorf("%s: INSTANT changes must not be priced as rebuilds", raw)
 		}
 	case srv.AtLeast(8, 0, 12):
-		if midMethod != analyzer.MethodCopy {
-			t.Errorf("%s: middle ADD COLUMN must be a rebuild before 8.0.29, got %s", raw, midMethod)
-		}
-		if dropMethod != analyzer.MethodCopy {
-			t.Errorf("%s: DROP COLUMN must be a rebuild before 8.0.29, got %s", raw, dropMethod)
+		// 8.0.12 - 8.0.28: the appended case is INSTANT, these two rebuild.
+		if !mid.Rebuild || !drop.Rebuild {
+			t.Errorf("%s: both cases must be a rebuild before 8.0.29, got rebuild=%v / %v",
+				raw, mid.Rebuild, drop.Rebuild)
 		}
 	default:
-		if midMethod != analyzer.MethodCopy || dropMethod != analyzer.MethodCopy {
-			t.Errorf("%s: both cases must be a rebuild before 8.0.12, got %s / %s",
-				raw, midMethod, dropMethod)
+		if !mid.Rebuild || !drop.Rebuild {
+			t.Errorf("%s: both cases must be a rebuild before 8.0.12, got rebuild=%v / %v (methods %s / %s)",
+				raw, mid.Rebuild, drop.Rebuild, mid.Method, drop.Method)
 		}
 	}
 }
 
 // predict asks the analyzer what it thinks of one ALTER on a live table.
+//
+// The third value is the algorithm, the second the lock; callers that care about
+// cost read plan.Rebuild through predictVerbose.
 func predict(t *testing.T, db *sql.DB, schema, table, alter string) (analyzer.Method, string, string) {
+	t.Helper()
+	op := predictVerbose(t, db, schema, table, alter)
+	return op.Method, op.Lock, op.RuleID
+}
+
+// predictVerbose returns the whole analyzer verdict, including whether the
+// statement rebuilds the table - which is a different fact from the algorithm the
+// server runs, and the one that decides between native and a copy engine.
+func predictVerbose(t *testing.T, db *sql.DB, schema, table, alter string) analyzer.OpPlan {
 	t.Helper()
 	runner, _ := newRunner(t)
 	runner.DB = db
@@ -153,8 +170,7 @@ func predict(t *testing.T, db *sql.DB, schema, table, alter string) (analyzer.Me
 	if len(prep.Plan.Operations) != 1 {
 		t.Fatalf("expected one operation for %q, got %d", alter, len(prep.Plan.Operations))
 	}
-	op := prep.Plan.Operations[0]
-	return op.Method, op.Lock, op.RuleID
+	return prep.Plan.Operations[0]
 }
 
 func mustAlter(t *testing.T, db *sql.DB, table, alter, failure string) {

@@ -14,11 +14,13 @@ import (
 // What the plan promises about a native ALTER, in the terms the server can be
 // asked about:
 //
-//	INSTANT  the server accepts ALGORITHM=INSTANT, and the table is not rebuilt
-//	INPLACE  the server accepts ALGORITHM=INPLACE (with the promised LOCK), and
-//	         the table is not rebuilt
-//	COPY     the server refuses ALGORITHM=INPLACE, or accepts it and visibly
-//	         rebuilds the table
+//	INSTANT           the server accepts ALGORITHM=INSTANT, and no rebuild
+//	INPLACE, no cost  the server accepts ALGORITHM=INPLACE (with the promised
+//	                  LOCK), and no rebuild
+//	INPLACE + rebuild the server accepts ALGORITHM=INPLACE and the rebuild is
+//	                  real: the tablespace id changes
+//	COPY              the server refuses ALGORITHM=INPLACE, or accepts it and
+//	                  visibly rebuilds the table
 //
 // The COPY direction is the one nobody checked, and it is the one that matters on
 // 5.6 and 5.7: if the matrix says COPY where the server can do the change in
@@ -77,8 +79,9 @@ func TestNativeClassificationMatchesTheServer(t *testing.T) {
 			mustExec(t, db, "DROP TABLE IF EXISTS `t`", c.ddl)
 			fillTable(t, db, "t")
 
-			method, lock, ruleID := predict(t, db, schema, "t", c.alter)
-			t.Logf("%s: plan says %s (rule %s, lock %q)", version, method, ruleID, lock)
+			op := predictVerbose(t, db, schema, "t", c.alter)
+			method, lock, ruleID := op.Method, op.Lock, op.RuleID
+			t.Logf("%s: plan says %s (rule %s, lock %q, rebuild %v)", version, method, ruleID, lock, op.Rebuild)
 
 			switch method {
 			case analyzer.MethodInstant:
@@ -104,12 +107,16 @@ func TestNativeClassificationMatchesTheServer(t *testing.T) {
 				if err := tryAlter(db, "t", c.alter+clause); err != nil {
 					t.Fatalf("the plan promised INPLACE%s and the server refused it: %v", clause, err)
 				}
-				// The promise is "no table copy". A secondary index build
-				// writes as much as a rebuild, so the table id is the evidence,
-				// not the bytes.
-				if after := tableID(t, db, schema, "t"); after != before {
+				// The table id is the evidence, not the bytes: a secondary index
+				// build writes as much as a rebuild. Rebuild is a separate field
+				// from Method precisely because INPLACE does not mean free.
+				rebuilt := tableID(t, db, schema, "t") != before
+				if op.Rebuild && !rebuilt {
+					t.Errorf("the plan says this INPLACE change rewrites every row, but the server did it without rebuilding the table")
+				}
+				if !op.Rebuild && rebuilt {
 					t.Errorf("the plan promised INPLACE without a table copy, but the server rebuilt the table (table id %s -> %s)",
-						before, after)
+						before, tableID(t, db, schema, "t"))
 				}
 
 			case analyzer.MethodCopy:

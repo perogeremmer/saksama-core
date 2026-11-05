@@ -120,7 +120,12 @@ func capabilityFor(op model.Op, srv model.Server, tbl model.Table) Capability {
 				Reason: "MySQL 8.0.12+ supports INSTANT ADD COLUMN when the column is appended. INSTANT cannot be combined with an explicit LOCK clause, so none is emitted",
 			}
 		}
-		return rebuild("R-ADD-COLUMN-COPY", "INSTANT ADD COLUMN requires MySQL 8.0.12+")
+		// Measured on mysql:5.6.51 and mysql:5.7.44: the server accepts
+		// ALGORITHM=INPLACE, LOCK=NONE and then rebuilds the table. So the label
+		// is INPLACE (that is what the server runs) while the cost is a rebuild
+		// (every row is rewritten), and those two facts decide different things.
+		return inplaceRebuild("R-ADD-COLUMN-REBUILD-INPLACE",
+			"before MySQL 8.0.12 an added column is performed in place with LOCK=NONE, but the table is rebuilt: every row is rewritten")
 
 	case model.OpDropColumn:
 		if v.AtLeast(8, 0, 29) {
@@ -129,7 +134,13 @@ func capabilityFor(op model.Op, srv model.Server, tbl model.Table) Capability {
 				Reason: "MySQL 8.0.29+ supports INSTANT DROP COLUMN. INSTANT cannot be combined with an explicit LOCK clause, so none is emitted",
 			}
 		}
-		return rebuild("R-DROP-COLUMN-COPY", "INSTANT DROP COLUMN requires MySQL 8.0.29+; earlier versions rebuild the table")
+		if v.AtLeast(8, 0, 0) {
+			// 8.0.0 - 8.0.28 is left as a rebuild without the stronger claim: no
+			// test here has asked that server whether it accepts INPLACE.
+			return rebuild("R-DROP-COLUMN-COPY", "INSTANT DROP COLUMN requires MySQL 8.0.29+; earlier versions rebuild the table")
+		}
+		return inplaceRebuild("R-DROP-COLUMN-REBUILD-INPLACE",
+			"before MySQL 8.0.12 the server drops a column in place with LOCK=NONE, but the table is rebuilt: every row is rewritten")
 
 	case model.OpSetDefault, model.OpDropDefault:
 		if v.AtLeast(8, 0, 12) {
@@ -165,6 +176,9 @@ func capabilityFor(op model.Op, srv model.Server, tbl model.Table) Capability {
 
 	case model.OpModifyColumn, model.OpChangeColumn:
 		if c, ok := widenInPlace(op, v, tbl); ok {
+			return c
+		}
+		if c, ok := relaxNullInPlace(op, tbl); ok {
 			return c
 		}
 		return rebuild("R-MODIFY-COLUMN-COPY",
@@ -288,6 +302,35 @@ func lengthPrefixBytes(n int) int {
 		return 2
 	}
 	return 1
+}
+
+// inplaceRebuild is an operation the server performs without a shadow table and
+// without blocking writes, but which still rewrites every row.
+//
+// Both halves matter and they answer different questions: LOCK=NONE is why it does
+// not need a copy engine to be safe, and the rebuild is why it should have one when
+// the table is big - MySQL cannot throttle, pause, resume, or cap lag on it.
+func inplaceRebuild(ruleID, reason string) Capability {
+	return Capability{RuleID: ruleID, Method: MethodInplace, Lock: "NONE", Rebuild: true, Native: true, Reason: reason}
+}
+
+// relaxNullInPlace reports the other MODIFY shape MySQL does in place while
+// rewriting rows: keeping the type and only letting the column become nullable.
+// Measured on 5.6.51, 5.7.44 and 8.0.46 - the server accepts ALGORITHM=INPLACE,
+// LOCK=NONE and the tablespace id changes.
+func relaxNullInPlace(op model.Op, tbl model.Table) (Capability, bool) {
+	if op.Column == nil {
+		return Capability{}, false
+	}
+	cur, ok := findColumn(tbl, op.Column.Name)
+	if !ok || cur.Nullable || !op.Column.Nullable {
+		return Capability{}, false
+	}
+	if !strings.EqualFold(cur.Type, op.Column.Type) {
+		return Capability{}, false
+	}
+	return inplaceRebuild("R-MODIFY-COLUMN-RELAX-NULL-INPLACE",
+		"MySQL performs this nullability change in place with LOCK=NONE, but the table is rebuilt: every row is rewritten"), true
 }
 
 func rebuild(ruleID, reason string) Capability {

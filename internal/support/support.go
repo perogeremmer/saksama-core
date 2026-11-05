@@ -76,12 +76,12 @@ var MySQL = []MySQLRow{
 	},
 	{
 		Version: "5.7.44", Status: Verified,
-		Native: "INPLACE add/drop index, INPLACE varchar widening within the length byte, metadata-only default change; every other column change is a rebuild",
+		Native: "INPLACE add/drop index, INPLACE varchar widening within the length byte, metadata-only default change, and ADD/DROP COLUMN as an in-place rebuild (LOCK=NONE, every row rewritten)",
 		Detail: "the full integration suite passes, except the cases that assert INSTANT behaviour and skip themselves there; gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows, and pt-osc 3.7.2 runs its own cases. The native classification test measured the widening: the server accepts ALGORITHM=INPLACE and the tablespace id does not change",
 	},
 	{
 		Version: "5.6.51", Status: Verified,
-		Native: "INPLACE index, metadata-only default change; a varchar widening is a rebuild here, and so is every other column change",
+		Native: "INPLACE index, metadata-only default change, and ADD/DROP COLUMN as an in-place rebuild (LOCK=NONE, every row rewritten); a varchar widening is refused here and needs the COPY algorithm",
 		Detail: "integration suite against mysql:5.6 with gh-ost 1.1.11 performing real migrations; the native classification test asks the server directly, which is how the widening was found to be refused here (error 1846) while 5.7 accepts it. Every fact the matrix needs is present. One caveat no version number hides: performance_schema.metadata_locks arrived in 5.7, so the lock queue cannot be read here; every plan carries E5b, and a production run blocks until --accept-unknown-mdl says the risk is understood",
 	},
 	{

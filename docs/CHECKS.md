@@ -138,6 +138,8 @@ The engine matrix decides these. Each names the engine so a fix is obvious.
 | R9 | gh-ost was passed over because the server cannot start it | `WARN` | done | explains the automatic fallback to pt-osc |
 | R10 | the engine may rename foreign key constraints during the copy | `INFO` | done | some pt-osc builds keep an underscore prefix; verification matches structure, not names |
 | R11 | gh-ost cannot check the metadata lock queue on this server | `WARN` | done | `performance_schema.metadata_locks` arrives in 5.7; on 5.6 gh-ost refuses to start without `--skip-metadata-lock-check`, so the wrapper passes it and the plan says the check is off |
+| R12 | native will rebuild this table in place | `WARN` | done | the ALTER does not block writes, but it cannot be throttled, paused, or resumed; cancelling rolls the whole rebuild back |
+| R13 | native could rebuild this table, but that needs a decision | `WARN` | done | names `--allow-native-rebuild`, so a blocked production run does not look like "install a copy engine or else" |
 
 ---
 
@@ -197,20 +199,33 @@ a different volume, which is worse than reporting nothing.
 | Operation | 5.6 | 5.7 | 8.0.12+ | 8.0.29+ |
 |---|---|---|---|---|
 | `ADD INDEX`, `DROP INDEX` | INPLACE, `LOCK=NONE` | INPLACE | INPLACE | INPLACE |
-| `ADD COLUMN`, appended | rebuild | rebuild | INSTANT | INSTANT |
-| `ADD COLUMN` with `FIRST` or `AFTER` | rebuild | rebuild | rebuild | INSTANT |
-| `DROP COLUMN` | rebuild | rebuild | rebuild | INSTANT |
+| `ADD COLUMN`, appended | INPLACE, `LOCK=NONE`, rebuilds | INPLACE, `LOCK=NONE`, rebuilds | INSTANT | INSTANT |
+| `ADD COLUMN` with `FIRST` or `AFTER` | INPLACE, `LOCK=NONE`, rebuilds | INPLACE, `LOCK=NONE`, rebuilds | rebuild | INSTANT |
+| `DROP COLUMN` | INPLACE, `LOCK=NONE`, rebuilds | INPLACE, `LOCK=NONE`, rebuilds | rebuild | INSTANT |
 | `SET DEFAULT`, `DROP DEFAULT` | INPLACE, `LOCK=NONE` | INPLACE, `LOCK=NONE` | INSTANT | INSTANT |
 | `RENAME COLUMN` | rebuild | rebuild | INPLACE | INPLACE |
 | `RENAME TABLE` | metadata | metadata | metadata | metadata |
 | `MODIFY`, `CHANGE` widening varchar/varbinary in the same length byte | rebuild | INPLACE, `LOCK=NONE` | INPLACE, `LOCK=NONE` | INPLACE, `LOCK=NONE` |
-| `MODIFY`, `CHANGE` anything else: narrower, nullability, type change, or crossing the length byte | rebuild | rebuild | rebuild | rebuild |
+| `MODIFY`, `CHANGE` relaxing `NOT NULL` to `NULL`, same type | INPLACE, `LOCK=NONE`, rebuilds | INPLACE, `LOCK=NONE`, rebuilds | INPLACE, `LOCK=NONE`, rebuilds | INPLACE, `LOCK=NONE`, rebuilds |
+| `MODIFY`, `CHANGE` anything else: narrower, type change, or crossing the length byte | rebuild | rebuild | rebuild | rebuild |
 | `ADD` or `DROP PRIMARY KEY` | rebuild | rebuild | rebuild | rebuild |
 | `CONVERT TO CHARACTER SET` | rebuild | rebuild | rebuild | rebuild |
 | anything unrecognised | blocked | blocked | blocked | blocked |
 
 **Fail-safe rule:** an operation not in this table is assumed to rebuild, so it is
 routed to a copy engine. It is never assumed cheap.
+
+**"INPLACE, rebuilds" is one fact with two halves**, and they answer different
+questions. `LOCK=NONE` is why the change does not need a copy engine to be safe:
+writes are not blocked and nothing has to be installed. The rebuild is why it should
+still use one when the table is big: MySQL cannot throttle, pause, resume, or cap
+replication lag on an in-place rebuild.
+
+So native runs a rebuild only when the table is small enough for that to be seconds
+(at most 100,000 rows and 64 MiB by default, both measured facts from
+`information_schema`), and in `--production` only with `--allow-native-rebuild`. Above
+that, or when the size was not measured, the answer is a copy engine - which is what
+`R12` and `R13` exist to say out loud.
 
 **How these rows are known.** They are not read off documentation: `test/integration/
 native_test.go` asks the server to perform the ALTER the plan predicted, and for a

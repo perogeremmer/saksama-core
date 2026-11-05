@@ -208,11 +208,13 @@ func TestAddColumnVersionMatrix(t *testing.T) {
 		wantEng  Engine
 		wantRule string
 	}{
-		{"8.0.11", "ADD COLUMN a INT NOT NULL DEFAULT 0", EngineGhOst, "R-ADD-COLUMN-COPY"},
+		{"8.0.11", "ADD COLUMN a INT NOT NULL DEFAULT 0", EngineGhOst, "R-ADD-COLUMN-REBUILD-INPLACE"},
 		{"8.0.12", "ADD COLUMN a INT NOT NULL DEFAULT 0", EngineNative, "R-ADD-COLUMN-INSTANT-8012"},
 		{"8.0.12", "ADD COLUMN a INT NOT NULL DEFAULT 0 AFTER status", EngineGhOst, "R-ADD-COLUMN-MIDDLE-COPY"},
 		{"8.0.29", "ADD COLUMN a INT NOT NULL DEFAULT 0 AFTER status", EngineNative, "R-ADD-COLUMN-INSTANT-8029"},
-		{"5.7.44", "ADD COLUMN a INT NOT NULL DEFAULT 0", EngineGhOst, "R-ADD-COLUMN-COPY"},
+		// 59M rows: the rule is INPLACE-with-rebuild, and the size is what keeps
+		// the answer a copy engine.
+		{"5.7.44", "ADD COLUMN a INT NOT NULL DEFAULT 0", EngineGhOst, "R-ADD-COLUMN-REBUILD-INPLACE"},
 	}
 	for _, tc := range cases {
 		p := plan(t, baseTable(), tc.version, tc.body)
@@ -735,13 +737,13 @@ func TestAdvisePtOSCUnsuitableWithoutKey(t *testing.T) {
 func TestAdviseNativeUnsuitableWhenFKColumnTouched(t *testing.T) {
 	p := plan(t, withFK(baseTable()), "8.0.36", "MODIFY COLUMN spot_id bigint unsigned NOT NULL")
 	native, _ := assessmentFor(p, EngineNative)
-	// Two requirements fail here: MODIFY COLUMN needs a rebuild, and the column is
-	// constrained by a foreign key.
+	// Two requirements fail here: the change needs the COPY algorithm, which this
+	// engine does not run, and the column is constrained by a foreign key.
 	if native.Verdict != VerdictUnsuitable {
 		t.Fatalf("native verdict = %q, want unsuitable", native.Verdict)
 	}
-	if !unmetContains(native, "no table rebuild required") {
-		t.Fatalf("rebuild requirement should fail: %v", unmet(native))
+	if !unmetContains(native, "no operation needs the COPY algorithm") {
+		t.Fatalf("the COPY-algorithm requirement should fail: %v", unmet(native))
 	}
 	if !unmetContains(native, "no foreign-key column is modified") {
 		t.Fatalf("expected the FK-column requirement to fail: %v", unmet(native))
@@ -1417,6 +1419,10 @@ func TestGhOstOnMySQL56AdmitsItCannotCheckTheLockQueue(t *testing.T) {
 		Ops:      []model.Op{{Kind: model.OpModifyColumn}},
 		Binaries: binaries,
 		Settings: SettingsFromMap(binlogOn()),
+		// Forced on purpose: on a small table the analyzer would now prefer
+		// native rebuild, and this test is about what gh-ost reports on 5.6.
+		EngineHint:       EngineGhOst,
+		EngineHintSource: "flag",
 	}
 	p := Analyze(in)
 	if p.Recommendation.Engine != EngineGhOst {
@@ -1431,6 +1437,114 @@ func TestGhOstOnMySQL56AdmitsItCannotCheckTheLockQueue(t *testing.T) {
 	if p57.Recommendation.Engine == EngineGhOst && hasCheck(p57, "R11", SeverityWarn) {
 		t.Errorf("gh-ost on 5.7 can check the lock queue and must not warn about it")
 	}
+}
+
+// The rebuild gate, as a table: the size decides, and production needs the
+// operator to say the trade out loud. On 5.6 and 5.7 the server performs ADD
+// COLUMN in place with LOCK=NONE, so a small table needs no install and no
+// restart - while thirty million rows is exactly what a copy engine is for.
+func TestNativeRebuildIsGatedBySizeAndProduction(t *testing.T) {
+	small := func() model.Table {
+		tbl := baseTable()
+		tbl.Rows = 4_000
+		tbl.DataLength = 512 << 10
+		tbl.IndexLength = 0
+		return tbl
+	}
+	const addColumn = "ADD COLUMN note varchar(64) NULL"
+
+	t.Run("thirty million rows is a copy engine", func(t *testing.T) {
+		p := plan(t, baseTable(), "5.6.51", addColumn)
+		if p.Recommendation.Engine == EngineNative {
+			t.Fatalf("a 59M-row table must not be rebuilt by native: %+v", p.Recommendation)
+		}
+		if !hasRule(p, "R-ADD-COLUMN-REBUILD-INPLACE") {
+			t.Fatalf("the operation should still be described as an in-place rebuild: %+v", p.Operations)
+		}
+		if !strings.Contains(nativeRequirement(p), "throttle") {
+			t.Fatalf("the refusal must say what a copy engine gives that native does not: %q", nativeRequirement(p))
+		}
+	})
+
+	t.Run("a few thousand rows runs natively", func(t *testing.T) {
+		p := plan(t, small(), "5.6.51", addColumn)
+		if p.Recommendation.Engine != EngineNative {
+			t.Fatalf("a 4k-row table should need no install: got %q", p.Recommendation.Engine)
+		}
+		if !hasCheck(p, "R12", SeverityWarn) {
+			t.Fatalf("a native rebuild must carry R12: %+v", p.Checks)
+		}
+	})
+
+	t.Run("production needs the flag", func(t *testing.T) {
+		// AcceptUnknownMDL isolates the rebuild gate from E5b, which is a
+		// separate production blocker on 5.6 and has its own tests.
+		p := plan(t, small(), "5.6.51", addColumn, func(in *Input) {
+			in.Production = true
+			in.AcceptUnknownMDL = true
+		})
+		if p.Recommendation.Engine == EngineNative {
+			t.Fatal("production must not rebuild in place without --allow-native-rebuild")
+		}
+		if !hasCheck(p, "R13", SeverityWarn) {
+			t.Fatalf("the operator must be told the flag exists: %+v", p.Checks)
+		}
+		if !strings.Contains(checkDetail(p, "R13"), "--allow-native-rebuild") {
+			t.Fatalf("R13 must name the flag: %q", checkDetail(p, "R13"))
+		}
+	})
+
+	t.Run("production with the flag runs natively", func(t *testing.T) {
+		p := plan(t, small(), "5.6.51", addColumn, func(in *Input) {
+			in.Production = true
+			in.AcceptUnknownMDL = true
+			in.AllowNativeRebuild = true
+		})
+		if p.Recommendation.Engine != EngineNative {
+			t.Fatalf("with the flag, native should run: got %q", p.Recommendation.Engine)
+		}
+		if !hasCheck(p, "R12", SeverityWarn) {
+			t.Fatalf("the trade must still be named: %+v", p.Checks)
+		}
+	})
+
+	t.Run("unknown size is not a pass", func(t *testing.T) {
+		tbl := baseTable()
+		tbl.Rows = 0
+		tbl.DataLength = 0
+		p := plan(t, tbl, "5.6.51", addColumn)
+		if p.Recommendation.Engine == EngineNative {
+			t.Fatal("an unmeasured table must not be rebuilt in place")
+		}
+		if !strings.Contains(nativeRequirement(p), "not measured") {
+			t.Fatalf("the refusal must say the size is unknown: %q", nativeRequirement(p))
+		}
+	})
+}
+
+// nativeRequirement returns the unmet "no table rebuild required" detail from
+// native's own assessment, which is where the reasoning lives.
+func nativeRequirement(p Plan) string {
+	for _, a := range p.Engines {
+		if a.Engine != EngineNative {
+			continue
+		}
+		for _, r := range a.Requirements {
+			if r.Name == "no table rebuild required" {
+				return r.Detail
+			}
+		}
+	}
+	return ""
+}
+
+func checkDetail(p Plan, id string) string {
+	for _, c := range p.Checks {
+		if c.ID == id {
+			return c.Title + " " + c.Detail + " " + c.Remediation
+		}
+	}
+	return ""
 }
 
 // The byte-prefix line, as a table. Measured on real servers: on a utf8mb4 column

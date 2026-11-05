@@ -195,6 +195,8 @@ Advise options:
 Apply options:
   --production             require --confirm <host> before any mutation
   --accept-unknown-mdl     allow 5.6 in production: the lock queue cannot be seen
+  --allow-native-rebuild   in production, let MySQL rebuild a small table in place
+                           instead of installing a copy engine (no throttle, no pause)
   --force-kill             cancel: SIGKILL an engine that ignores SIGTERM
   --confirm <host>         must equal the target host name when --production
   --dry-run                build statements and stop
@@ -236,21 +238,22 @@ Exit codes:
 }
 
 type planOpts struct {
-	ddlPath          string
-	schemaPath       string
-	dumpSchema       bool
-	alter            string
-	mysqlVer         string
-	host             string
-	engine           string
-	production       bool
-	acceptUnknownMDL bool
-	freeDisk         int64
-	diskTotal        int64
-	rows             int64
-	dataBytes        int64
-	indexBytes       int64
-	jsonOut          bool
+	ddlPath            string
+	schemaPath         string
+	dumpSchema         bool
+	alter              string
+	mysqlVer           string
+	host               string
+	engine             string
+	production         bool
+	acceptUnknownMDL   bool
+	allowNativeRebuild bool
+	freeDisk           int64
+	diskTotal          int64
+	rows               int64
+	dataBytes          int64
+	indexBytes         int64
+	jsonOut            bool
 }
 
 func cmdPlan(args []string, stdout, stderr io.Writer) int {
@@ -267,6 +270,8 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.host, "host", "", "target host label")
 	fs.StringVar(&o.engine, "engine", "", "force engine")
 	fs.BoolVar(&o.production, "production", false, "mark target as production")
+	fs.BoolVar(&o.allowNativeRebuild, "allow-native-rebuild", false,
+		"in production, let MySQL rebuild a small table in place (no throttle, no pause)")
 	fs.BoolVar(&o.acceptUnknownMDL, "accept-unknown-mdl", false,
 		"allow a production plan where the metadata lock queue cannot be observed (MySQL 5.6)")
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free disk bytes")
@@ -374,19 +379,20 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	}
 
 	in := analyzer.Input{
-		Server:           srv,
-		Table:            tbl,
-		Ops:              alter.Ops,
-		RawAlter:         strings.TrimSpace(o.alter),
-		Algorithm:        alter.Algorithm,
-		Lock:             alter.Lock,
-		Host:             o.host,
-		Production:       o.production,
-		AcceptUnknownMDL: o.acceptUnknownMDL,
-		SchemaSource:     src,
-		Ignored:          ignored,
-		FreeDisk:         o.freeDisk,
-		Disk:             analyzer.DiskFacts{Free: o.freeDisk, Total: o.diskTotal, Measured: o.freeDisk > 0, Source: "operator"},
+		Server:             srv,
+		Table:              tbl,
+		Ops:                alter.Ops,
+		RawAlter:           strings.TrimSpace(o.alter),
+		Algorithm:          alter.Algorithm,
+		Lock:               alter.Lock,
+		Host:               o.host,
+		Production:         o.production,
+		AcceptUnknownMDL:   o.acceptUnknownMDL,
+		AllowNativeRebuild: o.allowNativeRebuild,
+		SchemaSource:       src,
+		Ignored:            ignored,
+		FreeDisk:           o.freeDisk,
+		Disk:               analyzer.DiskFacts{Free: o.freeDisk, Total: o.diskTotal, Measured: o.freeDisk > 0, Source: "operator"},
 	}
 	// Engine precedence: flag, then the choice recorded for this table, then the
 	// analyzer's recommendation.

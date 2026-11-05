@@ -149,6 +149,7 @@ saksama advise --schema <file>                             offline, from dumped 
 | `--mysql-version <v>` | server version, required offline |
 | `--no-probe` | skip detecting installed engine binaries |
 | `--accept-unknown-mdl` | proceed on MySQL 5.6 in production, where the metadata lock queue cannot be read |
+| `--allow-native-rebuild` | in production, let MySQL rebuild a small table in place instead of installing a copy engine |
 | `--chunk-size <n>` | rows per copy chunk; `0` keeps the engine default of 1000 |
 | `--plain` | borderless output, for scripts and logs |
 | `--json` | machine-readable output |
@@ -197,6 +198,7 @@ saksama plan --ddl orders.sql --alter "<ALTER>" --mysql-version 8.0.36 --json
 | `--rows`, `--data-bytes`, `--index-bytes` | sizing facts for the estimate |
 | `--json` | emit the plan JSON instead of the card |
 | `--accept-unknown-mdl` | accept the one risk that cannot be fixed: on MySQL 5.6 the metadata lock queue cannot be read |
+| `--allow-native-rebuild` | accept that a small table will be rebuilt in place: no throttle, no pause, no resume |
 
 Exit code `1` means the plan exists and contains blockers. That is the intended
 CI gate, so a pipeline fails on a change the tool refuses.
@@ -213,6 +215,32 @@ supported - and it is not a reason to pretend the check passed. So:
 | 5.6, not production | `E5b` **WARN**, naming what cannot be seen |
 | 5.6, `--production` | `E5b` **BLOCKER**, exit `1` |
 | 5.6, `--production --accept-unknown-mdl` | the blocker clears; the warning stays, and the audit trail records the acceptance |
+
+### When nothing is installed
+
+On a stock MySQL 5.6 or 5.7 server there is no binary log, so gh-ost cannot start, and
+pt-osc may not be installed either. That is the common case on a single VPS, and it is
+not a dead end: MySQL performs `ADD COLUMN`, `DROP COLUMN`, and a nullability change
+in place with `LOCK=NONE` on those versions - writes are not blocked, nothing has to be
+installed, and no restart is needed.
+
+The catch is that "in place" here still rewrites every row, and MySQL cannot throttle,
+pause, resume, or cap replication lag on that. So Saksama runs it natively only when the
+table is small enough for that to be seconds (at most 100,000 rows and 64 MiB, read
+from `information_schema`), and in `--production` only with `--allow-native-rebuild`:
+
+```
+ENGINE     native [INPLACE, LOCK=NONE] (5.6.51)
+  - every operation has a verified native DDL rule; add_column rebuilds the table in
+    place, which needs no install and no restart, but MySQL cannot throttle or pause it
+OPERATIONS
+  INPLACE, LOCK=NONE +rebuild  R-ADD-COLUMN-REBUILD-INPLACE  ADD COLUMN note varchar(64) NULL
+  WARN  [R12] native will rebuild this table in place
+          add_column rewrites 4,000 rows / 512.0 kB inside one ALTER statement ...
+```
+
+Thirty million rows is a different conversation, and the plan says so: `R13` names
+`--allow-native-rebuild` and `pt-osc` as the two doors, and the size is why.
 
 `--accept-unknown-mdl` is also a flag on `apply`, and the wizard asks the same
 question instead of asking you to leave the menu.

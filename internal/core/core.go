@@ -45,7 +45,10 @@ type Request struct {
 	// AcceptUnknownMDL says the operator knows this server cannot report its
 	// metadata lock queue, and accepts the risk. Only MySQL 5.6 needs it.
 	AcceptUnknownMDL bool
-	EngineHint       analyzer.Engine
+	// AllowNativeRebuild lets MySQL rebuild a table in place in production.
+	// Outside production a small table needs no such decision.
+	AllowNativeRebuild bool
+	EngineHint         analyzer.Engine
 	// EngineHintSource is "flag" or "recorded"; it only affects reporting.
 	EngineHintSource string
 	Force            bool
@@ -198,27 +201,28 @@ func (r *Runner) Analyze(ctx context.Context, req Request) (*Prepared, error) {
 	}
 
 	input := analyzer.Input{
-		Server:           snap.Server,
-		Table:            snap.Table,
-		Ops:              ops,
-		RawAlter:         strings.TrimSpace(req.Alter),
-		Algorithm:        alter.Algorithm,
-		Lock:             alter.Lock,
-		Host:             req.Conn.Describe(),
-		DBUser:           req.Conn.User,
-		DBPort:           req.Conn.Port,
-		Production:       req.Production,
-		AcceptUnknownMDL: req.AcceptUnknownMDL,
-		SchemaSource:     "live",
-		Ignored:          ignored,
-		EngineHint:       req.EngineHint,
-		EngineHintSource: req.EngineHintSource,
-		Live:             liveStateFrom(snap, duplicates),
-		Binaries:         req.Binaries,
-		Settings:         analyzer.SettingsFromMap(settings),
-		Disk:             diskFacts(snap, req),
-		Force:            req.Force,
-		ForExecution:     req.ForExecution,
+		Server:             snap.Server,
+		Table:              snap.Table,
+		Ops:                ops,
+		RawAlter:           strings.TrimSpace(req.Alter),
+		Algorithm:          alter.Algorithm,
+		Lock:               alter.Lock,
+		Host:               req.Conn.Describe(),
+		DBUser:             req.Conn.User,
+		DBPort:             req.Conn.Port,
+		Production:         req.Production,
+		AcceptUnknownMDL:   req.AcceptUnknownMDL,
+		AllowNativeRebuild: req.AllowNativeRebuild,
+		SchemaSource:       "live",
+		Ignored:            ignored,
+		EngineHint:         req.EngineHint,
+		EngineHintSource:   req.EngineHintSource,
+		Live:               liveStateFrom(snap, duplicates),
+		Binaries:           req.Binaries,
+		Settings:           analyzer.SettingsFromMap(settings),
+		Disk:               diskFacts(snap, req),
+		Force:              req.Force,
+		ForExecution:       req.ForExecution,
 	}
 
 	return &Prepared{Snapshot: snap, Plan: analyzer.Analyze(input), Alter: alter}, nil

@@ -87,15 +87,16 @@ func newStore() (*state.Store, error) {
 
 type livePlanOpts struct {
 	connFlags
-	table            string
-	alter            string
-	production       bool
-	acceptUnknownMDL bool
-	engine           string
-	force            bool
-	jsonOut          bool
-	freeDisk         int64
-	diskTotal        int64
+	table              string
+	alter              string
+	production         bool
+	acceptUnknownMDL   bool
+	allowNativeRebuild bool
+	engine             string
+	force              bool
+	jsonOut            bool
+	freeDisk           int64
+	diskTotal          int64
 }
 
 func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
@@ -108,6 +109,8 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.alter, "a", "", "ALTER statement (also: --alter)")
 	fs.StringVar(&o.alter, "alter", "", "ALTER statement")
 	fs.BoolVar(&o.production, "production", false, "mark the target as production")
+	fs.BoolVar(&o.allowNativeRebuild, "allow-native-rebuild", false,
+		"in production, let MySQL rebuild a small table in place (no throttle, no pause)")
 	fs.BoolVar(&o.acceptUnknownMDL, "accept-unknown-mdl", false,
 		"proceed even though the metadata lock queue cannot be observed (MySQL 5.6)")
 	fs.StringVar(&o.engine, "engine", "", "force native|gh-ost|pt-osc")
@@ -151,16 +154,17 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 
 	runner := core.New(db, store)
 	req := core.Request{
-		Conn:             conn,
-		Database:         o.database,
-		Table:            o.table,
-		Alter:            o.alter,
-		Production:       o.production,
-		AcceptUnknownMDL: o.acceptUnknownMDL,
-		Force:            o.force,
-		FreeDisk:         o.freeDisk,
-		DiskTotal:        o.diskTotal,
-		Actor:            currentActor(),
+		Conn:               conn,
+		Database:           o.database,
+		Table:              o.table,
+		Alter:              o.alter,
+		Production:         o.production,
+		AcceptUnknownMDL:   o.acceptUnknownMDL,
+		AllowNativeRebuild: o.allowNativeRebuild,
+		Force:              o.force,
+		FreeDisk:           o.freeDisk,
+		DiskTotal:          o.diskTotal,
+		Actor:              currentActor(),
 	}
 	if !*noProbe {
 		req.Binaries = probe.Binaries()
@@ -214,23 +218,24 @@ func parseEngine(s string) (analyzer.Engine, error) {
 
 type applyOpts struct {
 	connFlags
-	table             string
-	alter             string
-	production        bool
-	acceptUnknownMDL  bool
-	engine            string
-	force             bool
-	jsonOut           bool
-	confirm           string
-	dryRun            bool
-	lockWait          int
-	chunkSize         int
-	holdCutover       bool
-	allowArgvPassword bool
-	freeDisk          int64
-	diskTotal         int64
-	session           string
-	detach            bool
+	table              string
+	alter              string
+	production         bool
+	acceptUnknownMDL   bool
+	allowNativeRebuild bool
+	engine             string
+	force              bool
+	jsonOut            bool
+	confirm            string
+	dryRun             bool
+	lockWait           int
+	chunkSize          int
+	holdCutover        bool
+	allowArgvPassword  bool
+	freeDisk           int64
+	diskTotal          int64
+	session            string
+	detach             bool
 }
 
 func cmdApply(args []string, stdout, stderr io.Writer) int {
@@ -245,6 +250,8 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.alter, "a", "", "ALTER statement (also: --alter)")
 	fs.StringVar(&o.alter, "alter", "", "ALTER statement")
 	fs.BoolVar(&o.production, "production", false, "mark the target as production, requiring --confirm")
+	fs.BoolVar(&o.allowNativeRebuild, "allow-native-rebuild", false,
+		"in production, let MySQL rebuild a small table in place (no throttle, no pause)")
 	fs.BoolVar(&o.acceptUnknownMDL, "accept-unknown-mdl", false,
 		"proceed although the metadata lock queue cannot be observed on this server")
 	fs.StringVar(&o.engine, "engine", "", "force native|gh-ost|pt-osc")
@@ -305,6 +312,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		Alter:                  o.alter,
 		Production:             o.production,
 		AcceptUnknownMDL:       o.acceptUnknownMDL,
+		AllowNativeRebuild:     o.allowNativeRebuild,
 		Force:                  o.force,
 		DryRun:                 o.dryRun,
 		LockWaitTimeoutSeconds: o.lockWait,

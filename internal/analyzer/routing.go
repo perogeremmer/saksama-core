@@ -21,7 +21,6 @@ var ladder = []Engine{EngineNative, EngineGhOst, EnginePtOSC}
 // separate policy rule that would drift out of sync.
 func route(in Input, assessments []EngineAssessment, anyRebuild, anyNative, anyBlocked bool, projected model.Table) Recommendation {
 	rec := Recommendation{Engine: EngineNone, EngineSource: "recommendation"}
-	_ = anyRebuild
 	_ = anyNative
 
 	if anyBlocked {
@@ -54,10 +53,16 @@ func route(in Input, assessments []EngineAssessment, anyRebuild, anyNative, anyB
 
 	switch rec.Engine {
 	case EngineNative:
-		rec.Reasons = append(rec.Reasons,
-			"every operation has a verified native DDL rule; no table copy is needed")
-		if allInstant(in.Ops) {
-			rec.Reasons = append(rec.Reasons, "all changes are metadata-only INSTANT operations")
+		switch {
+		case anyRebuild:
+			rec.Reasons = append(rec.Reasons,
+				fmt.Sprintf("every operation has a verified native DDL rule; %s rebuilds the table in place, which needs no install and no restart, but MySQL cannot throttle or pause it", strings.Join(rebuildKinds(in), ", ")))
+		case allInstant(in.Ops):
+			rec.Reasons = append(rec.Reasons,
+				"every operation has a verified native DDL rule; all changes are metadata-only INSTANT operations")
+		default:
+			rec.Reasons = append(rec.Reasons,
+				"every operation has a verified native DDL rule; no table copy is needed")
 		}
 	case EngineGhOst:
 		rec.Reasons = append(rec.Reasons,
@@ -100,6 +105,57 @@ func route(in Input, assessments []EngineAssessment, anyRebuild, anyNative, anyB
 	}
 
 	return rec
+}
+
+// A rebuild of a table this size is seconds even on a slow disk; above it, the
+// time is dominated by IO that cannot be measured from here, and that is exactly
+// the case a copy engine exists for. These are policy numbers, not server facts.
+const (
+	nativeRebuildMaxRows  int64 = 100_000
+	nativeRebuildMaxBytes int64 = 64 << 20
+)
+
+// nativeRebuildVerdict decides whether native may rebuild the table, and says why
+// either way. Silence is not an option: the operator has to be able to see what
+// was traded.
+func nativeRebuildVerdict(in Input, rebuild []string) (bool, string) {
+	if len(rebuild) == 0 {
+		return true, ""
+	}
+	ops := strings.Join(dedupe(rebuild), ", ")
+	tbl := in.Table
+	size := fmt.Sprintf("%s rows / %s", humanCount(tbl.Rows), humanBytes(tbl.DataLength))
+
+	if tbl.Rows == 0 && tbl.DataLength == 0 {
+		return false, fmt.Sprintf("%s rebuilds the table, and its size was not measured: without that there is no telling whether an in-place rebuild is seconds or hours, so a copy engine is the answer",
+			ops)
+	}
+	if tbl.Rows > nativeRebuildMaxRows || tbl.DataLength > nativeRebuildMaxBytes {
+		return false, fmt.Sprintf("%s rebuilds %s in place. MySQL cannot throttle, pause, resume, or cap replication lag on that, which is the whole reason gh-ost and pt-osc exist; native is offered only below %s rows / %s",
+			ops, size, humanCount(nativeRebuildMaxRows), humanBytes(nativeRebuildMaxBytes))
+	}
+	if in.Production && !in.AllowNativeRebuild {
+		return false, fmt.Sprintf("%s rebuilds the table in place. At %s that is seconds, but production wants the throttling and pause a copy engine gives, so it stays blocked until --allow-native-rebuild says the trade is understood",
+			ops, size)
+	}
+	return true, fmt.Sprintf("%s rebuilds the table, but at %s that is seconds: native runs it in place with LOCK=NONE and needs no install and no restart, though it cannot be throttled or paused",
+		ops, size)
+}
+
+func humanCount(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	// Group thousands without importing a formatting package for four lines.
+	s := fmt.Sprintf("%d", n)
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }
 
 // engineChecks turns the routing decision into blockers the operator can act on.
@@ -242,6 +298,27 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 		}
 	}
 
+	// When native was passed over only because a rebuild needs a decision, say so.
+	// Otherwise the operator reads "pt-osc is not installed" and never learns that
+	// the server could have done it - the exact advice nobody can follow this
+	// tool keeps having to fix.
+	if rec.Engine != EngineNative && rec.Engine != EngineNone {
+		if native, ok := findAssessment(assessments, EngineNative); ok && native.Verdict != VerdictSuitable {
+			for _, req := range native.Requirements {
+				if req.Met || req.Name != "no table rebuild required" || req.Detail == "" {
+					continue
+				}
+				out = append(out, Check{
+					ID: "R13", Severity: SeverityWarn,
+					Title:       "native could rebuild this table, but that needs a decision",
+					Detail:      req.Detail,
+					Remediation: "if rebuilding this table in place is acceptable, re-run with --allow-native-rebuild (production only; it needs no install and no restart), otherwise keep the copy engine for its throttling and pause",
+				})
+				break
+			}
+		}
+	}
+
 	// Say out loud when a cheaper engine was passed over because of the server.
 	if rec.Engine != EngineGhOst && rec.Engine != EngineNone {
 		if gh, ok := findAssessment(assessments, EngineGhOst); ok && gh.Verdict == VerdictSuitable && !gh.EnvironmentReady() {
@@ -250,6 +327,20 @@ func engineWarnings(in Input, assessments []EngineAssessment, rec Recommendation
 				Title:       "gh-ost was passed over: the server is not configured for it",
 				Detail:      strings.Join(gh.EnvironmentProblems(), ", "),
 				Remediation: strings.Join(FixHints(SettingChecks(in.Settings)), "; "),
+			})
+		}
+	}
+
+	// A native rebuild is cheap and needs nothing installed, but it is not free:
+	// say what it does not give, in production and outside it.
+	if rec.Engine == EngineNative {
+		if kinds := rebuildKinds(in); len(kinds) > 0 {
+			out = append(out, Check{
+				ID: "R12", Severity: SeverityWarn,
+				Title: "native will rebuild this table in place",
+				Detail: fmt.Sprintf("%s rewrites %s rows / %s inside one ALTER statement. It does not block writes, but it cannot be throttled, paused, resumed, or stopped cheaply: cancelling it rolls the whole rebuild back",
+					strings.Join(kinds, ", "), humanCount(in.Table.Rows), humanBytes(in.Table.DataLength)),
+				Remediation: "run it in a quiet window, or use gh-ost or pt-osc instead if you need throttling, a pause, or a lag cap",
 			})
 		}
 	}
@@ -294,6 +385,18 @@ func unmetRequirements(a EngineAssessment) []string {
 		}
 	}
 	return out
+}
+
+// rebuildKinds names the operations that rewrite rows, for the sentences that
+// have to state the cost.
+func rebuildKinds(in Input) []string {
+	var out []string
+	for _, op := range in.Ops {
+		if c := capabilityFor(op, in.Server, in.Table); c.Rebuild {
+			out = append(out, string(op.Kind))
+		}
+	}
+	return dedupe(out)
 }
 
 func allInstant(ops []model.Op) bool {
