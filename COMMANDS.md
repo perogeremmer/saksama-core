@@ -157,6 +157,31 @@ Fix it first: chmod 600 /home/you/.my.cnf
 
 ---
 
+## MySQL in a container
+
+A MySQL container on the same machine is a normal target, and one thing works
+differently: Saksama will not read a data directory whose server reports a different
+hostname, because a CI runner with MySQL preinstalled has `/var/lib/mysql` too and the
+free space would belong to the wrong filesystem. So `D6` reports the volume as
+unmeasured, and a run that copies or rebuilds the table needs the numbers.
+
+Three honest answers, in the order worth trying:
+
+```bash
+# 1. read them from the container the server says it is
+docker exec <container> df -B1 /var/lib/mysql
+
+# 2. tell Saksama
+saksama apply ... --free-disk <available> --disk-total <total>
+
+# 3. or let it run without the figure, recorded in the audit log
+saksama apply ... --force
+```
+
+Saksama prints (1) with the container name filled in when it can; it never runs it.
+A change that copies nothing - `ADD INDEX`, a metadata change - is never blocked for
+this.
+
 ## TLS
 
 `--tls` takes `preferred` (default), `true`, `skip-verify`, or `false`.

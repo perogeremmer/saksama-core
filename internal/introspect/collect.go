@@ -869,10 +869,13 @@ func (c *Collector) diskSpace(ctx context.Context) DiskSpace {
 
 	if local != "" && serverHost.String != "" && !strings.EqualFold(local, serverHost.String) {
 		return DiskSpace{
-			Path: c.DataDir,
+			Path:       c.DataDir,
+			ServerHost: serverHost.String,
 			Reason: fmt.Sprintf("the server reports hostname %q and this machine is %q, so its data directory is not on this host",
 				serverHost.String, local),
 		}
 	}
-	return ReadDiskSpace(c.DataDir)
+	space := ReadDiskSpace(c.DataDir)
+	space.ServerHost = serverHost.String
+	return space
 }

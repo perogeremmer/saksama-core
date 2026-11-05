@@ -18,6 +18,11 @@ type DiskFacts struct {
 	Source string `json:"source,omitempty"`
 	// Reason explains an unmeasured value.
 	Reason string `json:"reason,omitempty"`
+	// Path and ServerHost answer "where would I look": the data directory, and what
+	// the server calls itself. A container reports its id or service name there,
+	// which is what a docker command needs.
+	Path       string `json:"path,omitempty"`
+	ServerHost string `json:"server_host,omitempty"`
 }
 
 // FreePercent is the free share of the volume, or 0 when unmeasured.
@@ -40,6 +45,40 @@ const (
 	// the table size: the copy table plus the retained original.
 	DiskCopyFactor = 2
 )
+
+// containerDiskHint names the command that answers the disk question when the
+// server is a container. This is a common setup - a MySQL container on the same
+// machine - and the honest options there are to supply the numbers or to read them
+// from the container. The hint is printed, never run: a migration tool has no
+// business starting processes on the operator's behalf.
+func containerDiskHint(d DiskFacts) string {
+	if d.ServerHost == "" {
+		return ""
+	}
+	path := d.Path
+	if path == "" {
+		path = "/var/lib/mysql"
+	}
+	if isContainerID(d.ServerHost) {
+		return fmt.Sprintf("this looks like a container (the server calls itself %q): docker exec %s df -B1 %s",
+			d.ServerHost, d.ServerHost, path)
+	}
+	return fmt.Sprintf("if the server is a container (it calls itself %q): docker exec %s df -B1 %s",
+		d.ServerHost, d.ServerHost, path)
+}
+
+// isContainerID reports the 12- or 64-hex shape Docker uses for container ids.
+func isContainerID(s string) bool {
+	if len(s) != 12 && len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // diskChecks evaluates D6: is there room to run this, and is the volume healthy.
 //
@@ -77,7 +116,10 @@ func diskChecks(in Input, copiesByOp bool, engine Engine) []Check {
 		// where the numbers live. When the server is a container on this machine,
 		// "run it on the host" is not the only option - one command reads the
 		// container's own filesystem, and that is the situation people hit.
-		remediation := "pass --free-disk and --disk-total, or run Saksama on the database host so the filesystem can be read. If the server is a container on this machine: docker exec <container> df -B1 /var/lib/mysql"
+		remediation := "pass --free-disk and --disk-total, or run Saksama on the database host so the filesystem can be read"
+		if hint := containerDiskHint(d); hint != "" {
+			remediation += ". " + hint
+		}
 		if !copiesByOp && copiesByEngine {
 			// The change itself copies nothing; the chosen engine does. That is
 			// avoidable, and saying so is the difference between "buy more disk"
@@ -107,6 +149,7 @@ func diskChecks(in Input, copiesByOp bool, engine Engine) []Check {
 				Remediation: remediation,
 			}}
 		}
+		remediation += ", or --force to run with an unmeasured volume (recorded in the audit log)"
 		if in.Force {
 			return []Check{{
 				ID: chkDiskHeadroom, Severity: SeverityWarn,

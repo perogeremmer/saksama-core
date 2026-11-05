@@ -19,6 +19,10 @@ type DiskSpace struct {
 	Measured bool
 	// Reason explains an unmeasured result, so the operator knows why.
 	Reason string
+	// ServerHost is what the server calls itself (@@hostname). For a container
+	// that is usually its id or its compose service name, which is exactly what
+	// `docker exec` needs to answer the disk question.
+	ServerHost string
 }
 
 // Used reports the bytes occupied on the volume.

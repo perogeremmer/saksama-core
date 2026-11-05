@@ -1690,3 +1690,58 @@ func checksOf(p Plan, id string) []Check {
 	}
 	return out
 }
+
+// A MySQL in a container is a normal setup, and the disk question has one command as
+// an answer. The hint must name the container the server says it is, and must not
+// pretend to know when the server says nothing useful.
+func TestContainerDiskHint(t *testing.T) {
+	cases := []struct {
+		name  string
+		facts DiskFacts
+		want  string
+	}{
+		{"docker id", DiskFacts{ServerHost: "f261c7614f06", Path: "/var/lib/mysql/"}, "docker exec f261c7614f06 df -B1 /var/lib/mysql/"},
+		{"compose service name", DiskFacts{ServerHost: "mysql-prod", Path: "/var/lib/mysql"}, "docker exec mysql-prod df -B1 /var/lib/mysql"},
+		{"no path falls back to the default", DiskFacts{ServerHost: "mysql-prod"}, "df -B1 /var/lib/mysql"},
+		{"nothing known", DiskFacts{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := containerDiskHint(c.facts)
+			if c.want == "" {
+				if got != "" {
+					t.Fatalf("hint = %q, want none", got)
+				}
+				return
+			}
+			if !strings.Contains(got, c.want) {
+				t.Fatalf("hint = %q, want it to contain %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The blocker offers all three answers: the numbers, the container command, and
+// --force with its audit trail.
+func TestDiskBlockerNamesEveryWayOut(t *testing.T) {
+	p := plan(t, baseTable(), "5.6.51", "ADD COLUMN note varchar(64) NULL",
+		func(in *Input) {
+			in.ForExecution = true
+			in.Disk = DiskFacts{Reason: "not on this host", ServerHost: "mysql-prod", Path: "/var/lib/mysql"}
+		})
+	var found bool
+	for _, c := range checksOf(p, "D6") {
+		if c.Severity != SeverityBlocker {
+			continue
+		}
+		found = true
+		for _, want := range []string{"--free-disk", "docker exec mysql-prod", "--force"} {
+			if !strings.Contains(c.Remediation, want) {
+				t.Errorf("the blocker must offer %q: %q", want, c.Remediation)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a D6 blocker: %+v", checksOf(p, "D6"))
+	}
+}

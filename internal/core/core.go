@@ -714,7 +714,11 @@ func diskFacts(snap introspect.Snapshot, req Request) analyzer.DiskFacts {
 			Source:   "operator",
 		}
 	}
-	return analyzer.DiskFacts{Reason: snap.Runtime.Disk.Reason}
+	return analyzer.DiskFacts{
+		Reason:     snap.Runtime.Disk.Reason,
+		Path:       snap.Runtime.Disk.Path,
+		ServerHost: snap.Runtime.Disk.ServerHost,
+	}
 }
 
 // binaryPath is the executable the plan verified, when it verified one.
