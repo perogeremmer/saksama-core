@@ -497,7 +497,11 @@ func TestApplyForeignKeyRebuildRoutesToPtOSC(t *testing.T) {
 
 	runner, store := newRunner(t)
 	runner.DB = db
-	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(64) NOT NULL")
+	// Relaxing nullability, not widening: a widening that fits inside the varchar
+	// length byte is now planned in place on 5.7 and 8.0, so it no longer needs a
+	// copy engine and would not exercise the foreign-key routing this test is
+	// about. This change rebuilds on every supported version.
+	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(32) NULL")
 	// Report the engine binary as present so the plan is judged on the schema, not
 	// on this machine's PATH.
 	req.Binaries = map[string]analyzer.EngineBinary{
@@ -863,7 +867,9 @@ func TestAdviseLiveDetectsForeignKeyAndSuggestsPtOSC(t *testing.T) {
 
 	runner, _ := newRunner(t)
 	runner.DB = db
-	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(64) NOT NULL")
+	// A rebuild on every version, so the routing question is about the foreign key
+	// and nothing else (see the note in TestApplyForeignKeyRebuildRoutesToPtOSC).
+	req := applyRequest(schema, "c", "MODIFY COLUMN status varchar(32) NULL")
 	req.Binaries = map[string]analyzer.EngineBinary{
 		"gh-ost":                  {Name: "gh-ost", Available: true, Path: "/usr/bin/gh-ost", Version: "1.1.7"},
 		"pt-online-schema-change": {Name: "pt-online-schema-change", Available: true, Path: "/usr/bin/pt-online-schema-change", Version: "3.5.1"},

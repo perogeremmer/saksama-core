@@ -200,16 +200,26 @@ a different volume, which is worse than reporting nothing.
 | `ADD COLUMN`, appended | rebuild | rebuild | INSTANT | INSTANT |
 | `ADD COLUMN` with `FIRST` or `AFTER` | rebuild | rebuild | rebuild | INSTANT |
 | `DROP COLUMN` | rebuild | rebuild | rebuild | INSTANT |
-| `SET DEFAULT`, `DROP DEFAULT` | rebuild | rebuild | INSTANT | INSTANT |
+| `SET DEFAULT`, `DROP DEFAULT` | INPLACE, `LOCK=NONE` | INPLACE, `LOCK=NONE` | INSTANT | INSTANT |
 | `RENAME COLUMN` | rebuild | rebuild | INPLACE | INPLACE |
 | `RENAME TABLE` | metadata | metadata | metadata | metadata |
-| `MODIFY`, `CHANGE` | rebuild | rebuild | rebuild | rebuild |
+| `MODIFY`, `CHANGE` widening varchar/varbinary in the same length byte | rebuild | INPLACE, `LOCK=NONE` | INPLACE, `LOCK=NONE` | INPLACE, `LOCK=NONE` |
+| `MODIFY`, `CHANGE` anything else: narrower, nullability, type change, or crossing the length byte | rebuild | rebuild | rebuild | rebuild |
 | `ADD` or `DROP PRIMARY KEY` | rebuild | rebuild | rebuild | rebuild |
 | `CONVERT TO CHARACTER SET` | rebuild | rebuild | rebuild | rebuild |
 | anything unrecognised | blocked | blocked | blocked | blocked |
 
 **Fail-safe rule:** an operation not in this table is assumed to rebuild, so it is
 routed to a copy engine. It is never assumed cheap.
+
+**How these rows are known.** They are not read off documentation: `test/integration/
+native_test.go` asks the server to perform the ALTER the plan predicted, and for a
+rebuild it checks that the table's InnoDB tablespace id actually changed - an index
+build writes as many bytes as a rebuild, so bytes alone cannot tell them apart.
+`boundary_test.go` does the same for the INSTANT boundary. Two rows here used to be
+wrong on 5.6 and 5.7 (default changes, and a varchar widening), and the test is what
+found them. The length-byte line is utf8mb4's: `varchar(63)` is 252 bytes and stays
+one length byte, `varchar(64)` is 256 and needs two, so it rebuilds.
 
 ---
 

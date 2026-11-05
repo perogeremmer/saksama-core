@@ -54,14 +54,14 @@ type EngineRow struct {
 var MySQL = []MySQLRow{
 	{
 		Version: "8.4.x", Status: Verified,
-		Native: "INSTANT add/drop column, INPLACE index",
+		Native: "INSTANT add/drop column and default change, INPLACE index, INPLACE varchar widening within the length byte",
 		// Deliberately no test count: it was hand-maintained and went stale the moment
 		// the suite grew. What a reader needs is what ran, not a number that rots.
-		Detail: "8.4.13 via mysql:8.4 container: the full integration suite passes, including a real copy-engine migration",
+		Detail: "8.4.13 via mysql:8.4 container: the full integration suite passes, including a real copy-engine migration and the native classification test",
 	},
 	{
 		Version: "8.0.x", Status: Verified,
-		Native: "INSTANT add column (8.0.12+), INSTANT drop column (8.0.29+), INPLACE index",
+		Native: "INSTANT add column (8.0.12+), INSTANT drop column (8.0.29+), INSTANT default change, INPLACE index, INPLACE varchar widening within the length byte",
 		Detail: "8.0.46 via mysql:8.0 container: the full integration suite passes, including a real gh-ost migration and the INSTANT boundary test",
 	},
 	{
@@ -76,13 +76,13 @@ var MySQL = []MySQLRow{
 	},
 	{
 		Version: "5.7.44", Status: Verified,
-		Native: "INPLACE add/drop index; every column change is a rebuild",
-		Detail: "the full integration suite passes, except the cases that assert INSTANT behaviour and skip themselves there; gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows, and pt-osc 3.7.2 runs its own cases",
+		Native: "INPLACE add/drop index, INPLACE varchar widening within the length byte, metadata-only default change; every other column change is a rebuild",
+		Detail: "the full integration suite passes, except the cases that assert INSTANT behaviour and skip themselves there; gh-ost 1.1.11 performs a real ADD COLUMN on a table with rows, and pt-osc 3.7.2 runs its own cases. The native classification test measured the widening: the server accepts ALGORITHM=INPLACE and the tablespace id does not change",
 	},
 	{
 		Version: "5.6.51", Status: Verified,
-		Native: "INPLACE index, no INSTANT column",
-		Detail: "integration suite against mysql:5.6 with gh-ost 1.1.11 performing real migrations. Every fact the matrix needs is present. One caveat no version number hides: performance_schema.metadata_locks arrived in 5.7, so the lock queue cannot be read here; every plan carries E5b, and a production run blocks until --accept-unknown-mdl says the risk is understood",
+		Native: "INPLACE index, metadata-only default change; a varchar widening is a rebuild here, and so is every other column change",
+		Detail: "integration suite against mysql:5.6 with gh-ost 1.1.11 performing real migrations; the native classification test asks the server directly, which is how the widening was found to be refused here (error 1846) while 5.7 accepts it. Every fact the matrix needs is present. One caveat no version number hides: performance_schema.metadata_locks arrived in 5.7, so the lock queue cannot be read here; every plan carries E5b, and a production run blocks until --accept-unknown-mdl says the risk is understood",
 	},
 	{
 		Version: "MariaDB 10.11", Status: Unsupported,

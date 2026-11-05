@@ -1432,3 +1432,98 @@ func TestGhOstOnMySQL56AdmitsItCannotCheckTheLockQueue(t *testing.T) {
 		t.Errorf("gh-ost on 5.7 can check the lock queue and must not warn about it")
 	}
 }
+
+// The byte-prefix line, as a table. Measured on real servers: on a utf8mb4 column
+// MySQL fills in place up to varchar(63) (252 bytes, one length byte) and refuses
+// varchar(64) (256 bytes, two), and on 5.6 it refuses the widening outright. The
+// rule has to reproduce that or it sends someone to gh-ost for nothing - or worse,
+// promises INPLACE for a change the server answers with error 1846.
+func TestWidenVarcharInPlaceFollowsTheBytePrefix(t *testing.T) {
+	latin1 := baseTable()
+	for i := range latin1.Columns {
+		if latin1.Columns[i].Name == "status" {
+			latin1.Columns[i].Charset = "latin1"
+			latin1.Columns[i].Collation = "latin1_swedish_ci"
+		}
+	}
+
+	cases := []struct {
+		name    string
+		table   model.Table
+		version string
+		alter   string
+		rule    string
+		engine  Engine
+	}{
+		{
+			name: "utf8mb4 32 to 40 stays in one length byte", table: baseTable(), version: "8.0.36",
+			alter: "MODIFY COLUMN status varchar(40) NOT NULL", rule: "R-MODIFY-COLUMN-WIDEN-INPLACE", engine: EngineNative,
+		},
+		{
+			name: "utf8mb4 32 to 64 crosses into two", table: baseTable(), version: "8.0.36",
+			alter: "MODIFY COLUMN status varchar(64) NOT NULL", rule: "R-MODIFY-COLUMN-COPY", engine: EngineGhOst,
+		},
+		{
+			name: "latin1 32 to 200 still fits", table: latin1, version: "5.7.44",
+			alter: "MODIFY COLUMN status varchar(200) NOT NULL", rule: "R-MODIFY-COLUMN-WIDEN-INPLACE", engine: EngineNative,
+		},
+		{
+			name: "latin1 32 to 300 crosses into two", table: latin1, version: "5.7.44",
+			alter: "MODIFY COLUMN status varchar(300) NOT NULL", rule: "R-MODIFY-COLUMN-COPY", engine: EngineGhOst,
+		},
+		{
+			name: "5.6 refuses the widening in place", table: latin1, version: "5.6.51",
+			alter: "MODIFY COLUMN status varchar(200) NOT NULL", rule: "R-MODIFY-COLUMN-COPY", engine: EngineGhOst,
+		},
+		{
+			name: "narrowing is a rebuild", table: latin1, version: "5.7.44",
+			alter: "MODIFY COLUMN status varchar(16) NOT NULL", rule: "R-MODIFY-COLUMN-COPY", engine: EngineGhOst,
+		},
+		{
+			name: "widening that also relaxes nullability is a rebuild", table: latin1, version: "5.7.44",
+			alter: "MODIFY COLUMN status varchar(200) NULL", rule: "R-MODIFY-COLUMN-COPY", engine: EngineGhOst,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := plan(t, c.table, c.version, c.alter)
+			if !hasRule(p, c.rule) {
+				t.Fatalf("%s on %s: want rule %s, got %+v", c.alter, c.version, c.rule, p.Operations)
+			}
+			if p.Recommendation.Engine != c.engine {
+				t.Fatalf("%s on %s: engine %q, want %q", c.alter, c.version, p.Recommendation.Engine, c.engine)
+			}
+		})
+	}
+}
+
+// A default change is metadata on every supported version: INSTANT on 8.0.12+,
+// in place with no rebuild before that. Calling it a rebuild on 5.6 and 5.7 sent
+// operators to gh-ost - and on 5.6 that means accepting the unobservable lock
+// queue - to change a default.
+func TestDefaultChangeIsMetadataEverywhere(t *testing.T) {
+	cases := []struct{ version, rule string }{
+		{"5.6.51", "R-DEFAULT-INPLACE"},
+		{"5.7.44", "R-DEFAULT-INPLACE"},
+		{"8.0.11", "R-DEFAULT-INPLACE"},
+		{"8.0.12", "R-DEFAULT-INSTANT"},
+		{"8.4.0", "R-DEFAULT-INSTANT"},
+	}
+	for _, c := range cases {
+		t.Run(c.version, func(t *testing.T) {
+			p := plan(t, baseTable(), c.version, "ALTER COLUMN status SET DEFAULT 'queued'")
+			if !hasRule(p, c.rule) {
+				t.Fatalf("want rule %s, got %+v", c.rule, p.Operations)
+			}
+			if p.Recommendation.Engine != EngineNative {
+				t.Fatalf("engine %q, want native", p.Recommendation.Engine)
+			}
+			for _, op := range p.Operations {
+				if op.Method == MethodCopy || op.Method == MethodUnsupported {
+					t.Fatalf("a default change must not be planned as a rebuild on %s: %+v", c.version, op)
+				}
+			}
+		})
+	}
+}

@@ -104,7 +104,7 @@ not for quietly changing what a version contains.
 | Job | What it proves |
 |---|---|
 | Unit tests | the analyzer, parsers, and graders, with the binary asserted **statically linked** (`file` and `ldd`), because "one file, any distribution" rests on it |
-| Integration (MySQL 8.0, 8.4) | the whole suite against real servers |
+| Integration (MySQL 8.0, 8.4) | the whole suite against real servers, including the native classification test: for every operation the matrix calls INSTANT/INPLACE/rebuild, it asks the server to perform the ALTER the plan predicted and checks whether InnoDB actually rebuilt the table |
 | INSTANT boundary (8.0.28, 8.0.29) | the capability matrix against both sides of the boundary that matters |
 | Claim checks | 5.6 plans with its caveat and blocks in production; MariaDB refused; 5.7 runs the full suite |
 | pt-osc against a real binary | the Perl engine end to end, not a stub |

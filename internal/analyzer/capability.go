@@ -7,6 +7,7 @@ package analyzer
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/perogeremmer/saksama-core/internal/model"
@@ -137,7 +138,15 @@ func capabilityFor(op model.Op, srv model.Server, tbl model.Table) Capability {
 				Reason: "changing a column default is an INSTANT metadata operation on MySQL 8.0.12+. INSTANT cannot be combined with an explicit LOCK clause, so none is emitted",
 			}
 		}
-		return rebuild("R-DEFAULT-COPY", "changing a column default requires a rebuild before MySQL 8.0.12")
+		// Measured on mysql:5.6.51 and mysql:5.7.44, not read off a matrix: both
+		// accept ALGORITHM=INPLACE, LOCK=NONE for a default change and write zero
+		// bytes to the tablespace. Calling it a rebuild sent 5.6 and 5.7 users to
+		// gh-ost - and on 5.6 that also means accepting the unobservable metadata
+		// lock queue - to change a default.
+		return Capability{
+			RuleID: "R-DEFAULT-INPLACE", Method: MethodInplace, Lock: "NONE", Native: true,
+			Reason: "changing a column default is a metadata operation on MySQL 5.6 and 5.7: the server performs it in place and rewrites no rows",
+		}
 
 	case model.OpRenameColumn:
 		if v.AtLeast(8, 0, 0) {
@@ -155,6 +164,9 @@ func capabilityFor(op model.Op, srv model.Server, tbl model.Table) Capability {
 		}
 
 	case model.OpModifyColumn, model.OpChangeColumn:
+		if c, ok := widenInPlace(op, v, tbl); ok {
+			return c
+		}
 		return rebuild("R-MODIFY-COLUMN-COPY",
 			"changing a column type or nullability is not proven in-place safe by Saksama; it is planned as a rebuild")
 
@@ -181,6 +193,101 @@ func capabilityFor(op model.Op, srv model.Server, tbl model.Table) Capability {
 		RuleID: "R-UNKNOWN-OP", Method: MethodUnsupported, Blocked: true,
 		Reason: "operation is not understood by Saksama; unknown operations are blocked rather than guessed",
 	}
+}
+
+// widenInPlace reports the one MODIFY COLUMN shape MySQL does without a rebuild:
+// same type, same length-prefix width, only longer.
+//
+// Measured on mysql:5.7.44 (zero bytes written for varchar(32) -> varchar(64)) and
+// refused there on 5.6 (error 1846), so the rule is gated at 5.7. Growing past 255
+// characters changes the one-byte length prefix to two and does rebuild, which is
+// why the prefix width has to match, not just the direction of the change.
+func widenInPlace(op model.Op, v model.Version, tbl model.Table) (Capability, bool) {
+	if op.Kind != model.OpModifyColumn || op.Column == nil {
+		return Capability{}, false
+	}
+	if !v.AtLeast(5, 7, 0) {
+		return Capability{}, false
+	}
+	cur, ok := findColumn(tbl, op.Column.Name)
+	if !ok {
+		return Capability{}, false
+	}
+	next := *op.Column
+	switch strings.ToLower(cur.DataType) {
+	case "varchar", "varbinary":
+	default:
+		return Capability{}, false
+	}
+	nextCharset := next.Charset
+	if nextCharset == "" {
+		nextCharset = cur.Charset
+	}
+	nextCollation := next.Collation
+	if nextCollation == "" {
+		nextCollation = cur.Collation
+	}
+	if !strings.EqualFold(cur.DataType, next.DataType) ||
+		cur.Nullable != next.Nullable ||
+		!strings.EqualFold(cur.Charset, nextCharset) ||
+		!strings.EqualFold(cur.Collation, nextCollation) ||
+		(cur.Default == nil) != (next.Default == nil) ||
+		(cur.Default != nil && next.Default != nil && *cur.Default != *next.Default) {
+		return Capability{}, false
+	}
+	curLen, okCur := declaredLength(cur.Type)
+	nextLen, okNext := declaredLength(next.Type)
+	if !okCur || !okNext || nextLen <= curLen {
+		return Capability{}, false
+	}
+	// The length prefix is measured in bytes, not characters, and that is the
+	// line MySQL draws. On a utf8mb4 column varchar(32) -> varchar(63) is in
+	// place (252 bytes, still one length byte) while varchar(64) is not (256
+	// bytes, two length bytes, rebuild) - measured on 8.0.46, where the server
+	// accepts the first ALGORITHM=INPLACE and refuses the second with error 1846.
+	perChar := charsetMaxLen(cur.Charset)
+	if strings.EqualFold(cur.DataType, "varbinary") {
+		perChar = 1
+	}
+	if lengthPrefixBytes(curLen*perChar) != lengthPrefixBytes(nextLen*perChar) {
+		return Capability{}, false
+	}
+	return Capability{
+		RuleID: "R-MODIFY-COLUMN-WIDEN-INPLACE", Method: MethodInplace, Lock: "NONE", Native: true,
+		Reason: "MySQL 5.7 and later widen varchar/varbinary in place: the server rewrites no rows as long as the one- or two-byte length prefix stays the same size",
+	}, true
+}
+
+func findColumn(tbl model.Table, name string) (model.Column, bool) {
+	for _, c := range tbl.Columns {
+		if strings.EqualFold(c.Name, name) {
+			return c, true
+		}
+	}
+	return model.Column{}, false
+}
+
+// declaredLength reads "varchar(191)" -> 191.
+func declaredLength(typ string) (int, bool) {
+	open := strings.IndexByte(typ, '(')
+	closeAt := strings.IndexByte(typ, ')')
+	if open < 0 || closeAt < open {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(typ[open+1 : closeAt]))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// lengthPrefixBytes is how many bytes varchar spends on its length: one up to 255
+// bytes of content, two above.
+func lengthPrefixBytes(n int) int {
+	if n > 255 {
+		return 2
+	}
+	return 1
 }
 
 func rebuild(ruleID, reason string) Capability {
