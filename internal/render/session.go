@@ -1,6 +1,7 @@
 package render
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -27,6 +28,28 @@ func Session(w io.Writer, s *state.Session) error {
 	fmt.Fprintf(&b, "ENGINE     %s\n", s.Engine)
 	if s.Actor != "" {
 		fmt.Fprintf(&b, "ACTOR      %s\n", s.Actor)
+	}
+
+	// A blocked session has to show the plan's findings: `apply` points here for
+	// "what to do about each blocker", so this is where that has to be true. The
+	// stored plan is the same document the operator saw at plan time.
+	if blocked := storedFindings(s.Plan); len(blocked) > 0 {
+		b.WriteString("\nBLOCKERS\n")
+		for _, f := range blocked {
+			fmt.Fprintf(&b, "  [%s] %s\n", f.ID, f.Title)
+			if f.Detail != "" {
+				fmt.Fprintf(&b, "         %s\n", oneLine(f.Detail))
+			}
+			if f.Remediation != "" {
+				for i, line := range strings.Split(strings.TrimSpace(f.Remediation), "\n") {
+					label := "         "
+					if i == 0 {
+						label += "action: "
+					}
+					fmt.Fprintf(&b, "%s%s\n", label, oneLine(line))
+				}
+			}
+		}
 	}
 
 	if len(s.Approvals) > 0 {
@@ -81,4 +104,47 @@ func Session(w io.Writer, s *state.Session) error {
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// storedFindings reads the blockers out of a session's stored plan. A session that
+// was refused kept the whole plan, which is the only place the remedies live.
+func storedFindings(raw json.RawMessage) []struct {
+	ID          string
+	Title       string
+	Detail      string
+	Remediation string
+} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var plan struct {
+		Checks []struct {
+			ID          string `json:"id"`
+			Severity    string `json:"severity"`
+			Title       string `json:"title"`
+			Detail      string `json:"detail"`
+			Remediation string `json:"remediation"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		return nil
+	}
+	var out []struct {
+		ID          string
+		Title       string
+		Detail      string
+		Remediation string
+	}
+	for _, c := range plan.Checks {
+		if c.Severity != "BLOCKER" {
+			continue
+		}
+		out = append(out, struct {
+			ID          string
+			Title       string
+			Detail      string
+			Remediation string
+		}{c.ID, c.Title, c.Detail, c.Remediation})
+	}
+	return out
 }

@@ -80,7 +80,7 @@ doctor (section S).
 | D3 | a transaction older than the threshold is open | `WARN` | done | row locks and old row versions slow the copy |
 | D4 | `Threads_running` is elevated | `INFO` or `WARN` | done | throttling will engage |
 | D5 | replication is stopped, or lagging | `BLOCKER` when stopped or above 30s, `WARN` above 5s | done | gh-ost reads from a replica |
-| D6 | disk space: below 10 percent free is refused, below 25 percent warns, and a copy needs twice the table size. An unmeasured disk refuses `apply` and only warns `plan` | `BLOCKER` or `WARN` | done | `1021: Disk full` |
+| D6 | disk space: below 10 percent free is refused, below 25 percent warns, and a copy needs twice the table size. An unmeasured disk refuses `apply` and only warns `plan` - but only for a change that copies or rebuilds the table, or when a copy engine was chosen; `ADD INDEX` and other metadata changes are never blocked for it | `BLOCKER` or `WARN` | done | `1021: Disk full`. A change that copies nothing is never blocked for the missing figure, and when the copy only happens because a copy engine was chosen, the remedy says so and names `saksama engine clear` |
 | D7 | the table already has triggers | `WARN` | done | both engines create their own |
 | D8 | leftover artifacts from a previous migration | `BLOCKER` | done | a new run would collide with them |
 | D9 | a `CHECK` constraint would be violated by the copy | `WARN` | planned | enforced from 8.0.16 |

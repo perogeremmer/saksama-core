@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -53,4 +54,29 @@ func requireBinlog(t *testing.T, db *sql.DB) {
 	if !strings.EqualFold(value, "ON") {
 		t.Skip("log_bin is off on this server, so gh-ost cannot run here")
 	}
+}
+
+// planHasBlocker reports whether a refused session's stored plan carries a BLOCKER
+// with this check id. Without it, a test can pass because a different check fired -
+// which is how "blocked" tests stop meaning what they claim.
+func planHasBlocker(t *testing.T, raw json.RawMessage, id string) bool {
+	t.Helper()
+	if len(raw) == 0 {
+		return false
+	}
+	var p struct {
+		Checks []struct {
+			ID       string `json:"id"`
+			Severity string `json:"severity"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("stored plan: %v", err)
+	}
+	for _, c := range p.Checks {
+		if c.ID == id && c.Severity == "BLOCKER" {
+			return true
+		}
+	}
+	return false
 }

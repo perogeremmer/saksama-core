@@ -310,16 +310,19 @@ func Analyze(in Input) Plan {
 	p.Checks = append(p.Checks, checksIndexes(in, projected)...)
 	p.Checks = append(p.Checks, checksForeignKeys(in, projected)...)
 	p.Checks = append(p.Checks, checksOperational(in, anyRebuild)...)
-	p.Checks = append(p.Checks, diskChecks(in, anyRebuild)...)
 	p.Checks = append(p.Checks, liveChecks(in, projected)...)
 
-	// Engine suitability drives routing, so it must be computed first.
+	// Engine suitability drives routing, so it must be computed before the disk
+	// check: a copy engine copies the whole table whatever the operation needs, so
+	// the space question depends on the engine, not only on the operations.
 	p.Engines = AssessEngines(in, projected)
 	p.Environment = SettingChecks(in.Settings)
 	p.TableFacts = (&AdviceInput{Input: in, Projected: projected}).schemaFacts()
 
 	// Routing.
 	rec := route(in, p.Engines, anyRebuild, anyNative, anyBlocked, projected)
+
+	p.Checks = append(p.Checks, diskChecks(in, anyRebuild, rec.Engine)...)
 	p.Checks = append(p.Checks, engineChecks(in, p.Engines, rec)...)
 	p.Checks = append(p.Checks, engineWarnings(in, p.Engines, rec)...)
 	for _, c := range p.Checks {

@@ -1233,7 +1233,11 @@ func TestApplyRefusesWhenDiskIsUnknown(t *testing.T) {
 
 	runner, _ := newRunner(t)
 	runner.DB = db
-	req := applyRequest(schema, "t", "ADD INDEX ix_a (a)")
+	// A change that copies on every version: int -> bigint is refused by
+	// ALGORITHM=INPLACE everywhere, so it needs a copy engine, and a copy engine
+	// needs the disk figure. ADD INDEX would not: an index build writes index
+	// pages, not a second table, so the disk check deliberately does not apply.
+	req := applyRequest(schema, "t", "MODIFY COLUMN a bigint NOT NULL")
 	req.ForExecution = true
 
 	sess, err := runner.Apply(context.Background(), req)
@@ -1243,11 +1247,15 @@ func TestApplyRefusesWhenDiskIsUnknown(t *testing.T) {
 	if !errors.Is(err, core.ErrBlocked) {
 		t.Fatalf("expected ErrBlocked, got %v", err)
 	}
-	// And nothing may have changed.
-	if n := countRows(t, db,
-		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
-		schema); n != 0 {
-		t.Fatal("the index was created despite the refusal")
+	// The refusal must be about the disk, not about an engine this machine happens
+	// to be missing: otherwise the test would pass for the wrong reason.
+	if !planHasBlocker(t, sess.Plan, "D6") {
+		t.Fatalf("the refusal should come from D6, not from something else: %s", sess.Plan)
+	}
+	// And nothing may have changed. Compared against the server's own spelling:
+	// 5.7 reports int(11) where 8.0 reports int.
+	if typ := columnType(t, db, schema, "t", "a"); !strings.HasPrefix(typ, "int") {
+		t.Fatalf("the column changed despite the refusal: %s", typ)
 	}
 }
 
@@ -1414,10 +1422,8 @@ func TestApplyFromSessionRefusesAStalePlan(t *testing.T) {
 	}
 
 	// Nothing may have run.
-	if n := countRows(t, db,
-		"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 't' AND INDEX_NAME = 'ix_a'",
-		schema); n != 0 {
-		t.Fatal("the index was created despite the refusal")
+	if typ := columnType(t, db, schema, "t", "a"); typ != "int" && typ != "int(11)" {
+		t.Fatalf("the column changed despite the refusal: %s", typ)
 	}
 }
 

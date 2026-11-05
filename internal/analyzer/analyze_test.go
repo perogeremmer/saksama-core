@@ -1203,15 +1203,18 @@ func TestDiskBlocksWhenCopyDoesNotFit(t *testing.T) {
 }
 
 func TestDiskUnmeasuredBlocksExecutionOnly(t *testing.T) {
-	// A plan is useful without a measured disk. An execution is not.
-	planned := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)", diskInput(0, 0, false))
+	// A plan is useful without a measured disk. An execution is not - but only when
+	// the execution would actually write the table. This used to use ADD INDEX,
+	// which copies nothing: the check now follows the change, so the case that must
+	// still be refused is a rebuild.
+	planned := plan(t, baseTable(), "5.6.51", "ADD COLUMN note varchar(64) NULL", diskInput(0, 0, false))
 	for _, c := range planned.Checks {
 		if c.ID == chkDiskHeadroom && c.Severity == SeverityBlocker {
 			t.Fatalf("planning must not be blocked by an unmeasured disk: %s", c.Title)
 		}
 	}
 
-	executing := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)", diskInput(0, 0, false),
+	executing := plan(t, baseTable(), "5.6.51", "ADD COLUMN note varchar(64) NULL", diskInput(0, 0, false),
 		func(in *Input) { in.ForExecution = true })
 	var blocked bool
 	for _, c := range executing.Checks {
@@ -1228,7 +1231,7 @@ func TestDiskUnmeasuredBlocksExecutionOnly(t *testing.T) {
 }
 
 func TestDiskUnmeasuredAllowedByForce(t *testing.T) {
-	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix (created_at)", diskInput(0, 0, false),
+	p := plan(t, baseTable(), "5.6.51", "ADD COLUMN note varchar(64) NULL", diskInput(0, 0, false),
 		func(in *Input) { in.ForExecution = true; in.Force = true })
 
 	for _, c := range p.Checks {
@@ -1640,4 +1643,50 @@ func TestDefaultChangeIsMetadataEverywhere(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The disk gate has to follow the change, not the calendar. An unmeasured volume
+// must not block a change that does not copy anything - that is the same mistake as
+// demanding a package install for something MySQL does itself - and it must still
+// block one that does, including when a copy engine was chosen for an operation that
+// would not have needed a copy.
+func TestUnmeasuredDiskBlocksOnlyChangesThatCopy(t *testing.T) {
+	executing := func(in *Input) { in.ForExecution = true }
+
+	t.Run("ADD INDEX is not blocked", func(t *testing.T) {
+		p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix_status (status)", executing)
+		if hasCheck(p, "D6", SeverityBlocker) {
+			t.Fatalf("an index build does not copy the table and must not be blocked for a missing disk figure: %+v", checksOf(p, "D6"))
+		}
+		if !hasCheck(p, "D6", SeverityWarn) {
+			t.Fatalf("the missing figure should still be mentioned: %+v", checksOf(p, "D6"))
+		}
+	})
+
+	t.Run("a rebuild in place is blocked", func(t *testing.T) {
+		p := plan(t, baseTable(), "5.6.51", "ADD COLUMN note varchar(64) NULL", executing)
+		if !hasCheck(p, "D6", SeverityBlocker) {
+			t.Fatalf("an in-place rebuild writes the whole table and needs the figure: %+v", checksOf(p, "D6"))
+		}
+	})
+
+	t.Run("a copy engine is blocked even for ADD INDEX", func(t *testing.T) {
+		p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix_status (status)", executing, func(in *Input) {
+			in.EngineHint = EngineGhOst
+			in.EngineHintSource = "flag"
+		})
+		if !hasCheck(p, "D6", SeverityBlocker) {
+			t.Fatalf("gh-ost copies the table whatever the operations need: %+v", checksOf(p, "D6"))
+		}
+	})
+}
+
+func checksOf(p Plan, id string) []Check {
+	var out []Check
+	for _, c := range p.Checks {
+		if c.ID == id {
+			out = append(out, c)
+		}
+	}
+	return out
 }

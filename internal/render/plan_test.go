@@ -2,12 +2,14 @@ package render
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
 	"github.com/perogeremmer/saksama-core/internal/model"
+	"github.com/perogeremmer/saksama-core/internal/state"
 )
 
 func samplePlan() analyzer.Plan {
@@ -512,5 +514,40 @@ func TestWrapTextKeepsLongWordsWhole(t *testing.T) {
 	got := wrapText("a "+strings.Repeat("x", 30)+" b", 10)
 	if len(got) != 3 || got[1] != strings.Repeat("x", 30) {
 		t.Fatalf("wrapText = %q", got)
+	}
+}
+
+// A refused session must still explain itself later. `apply` points at `status` for
+// "what to do about each blocker", so the stored plan's remedies have to be printed
+// there - otherwise the pointer is a promise the output does not keep.
+func TestSessionShowsStoredBlockersWithTheirRemedies(t *testing.T) {
+	plan := analyzer.Plan{Checks: []analyzer.Check{
+		{ID: "D6", Severity: analyzer.SeverityBlocker, Title: "free disk space could not be measured",
+			Detail: "no data directory was reported", Remediation: "pass --free-disk and --disk-total"},
+		{ID: "R12", Severity: analyzer.SeverityWarn, Title: "a warning, not a blocker"},
+	}}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &state.Session{
+		ID: "s1", State: state.StateBlocked, Database: "shop", Table: "orders", Host: "db.prod",
+		Alter: "ADD INDEX ix (a)", Engine: "gh-ost", Plan: raw,
+		Error: "blocked by D6 free disk space could not be measured",
+	}
+
+	var buf bytes.Buffer
+	if err := Session(&buf, sess); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "[D6] free disk space could not be measured") {
+		t.Fatalf("the blocker must be shown:\n%s", out)
+	}
+	if !strings.Contains(out, "pass --free-disk") {
+		t.Fatalf("the remedy must be shown:\n%s", out)
+	}
+	if strings.Contains(out, "R12") {
+		t.Fatalf("only blockers belong in that section:\n%s", out)
 	}
 }

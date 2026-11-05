@@ -46,7 +46,13 @@ const (
 // It runs for every plan, not only for rebuilds: an INSTANT change writes almost
 // nothing, but a volume with 2 percent free is a problem regardless, and a
 // migration is exactly the wrong time to discover it.
-func diskChecks(in Input, needsCopy bool) []Check {
+func diskChecks(in Input, copiesByOp bool, engine Engine) []Check {
+	// A copy engine copies the table whatever the operations need, so the space
+	// question depends on the engine too - and the reason matters to the reader: a
+	// change that needs a copy is a different situation from a change that only
+	// copies because an engine was chosen for it.
+	copiesByEngine := engine == EngineGhOst || engine == EnginePtOSC
+	needsCopy := copiesByOp || copiesByEngine
 	d := in.Disk
 	if !d.Measured {
 		if in.FreeDisk > 0 {
@@ -68,6 +74,26 @@ func diskChecks(in Input, needsCopy bool) []Check {
 				humanBytes(need))
 		}
 		remediation := "pass --free-disk and --disk-total, or run Saksama on the database host so the filesystem can be read"
+		if !copiesByOp && copiesByEngine {
+			// The change itself copies nothing; the chosen engine does. That is
+			// avoidable, and saying so is the difference between "buy more disk"
+			// and "you do not need this engine here".
+			detail += fmt.Sprintf(". This change does not copy the table, but %s does, because it was chosen for this target", engine)
+			remediation = "clear the recorded engine choice with `saksama engine clear` (or pass --engine native) to do this without a copy, or " + remediation
+		}
+		if !needsCopy {
+			// This change does not copy the table, so the space a copy needs is not
+			// required for it. Blocking an ADD INDEX because a figure we never
+			// needed is missing is the same mistake as demanding a package install
+			// for something MySQL does itself: the fact does not apply, so its
+			// absence must not stop the run.
+			return []Check{{
+				ID: chkDiskHeadroom, Severity: SeverityWarn,
+				Title:       "free disk space could not be measured",
+				Detail:      detail + ". This change does not copy the table, so the space a copy needs is not required for it",
+				Remediation: "none needed for this change; pass --free-disk and --disk-total before a change that rebuilds or copies the table",
+			}}
+		}
 		if !in.ForExecution {
 			// Planning is useful without a measured disk; executing is not.
 			return []Check{{

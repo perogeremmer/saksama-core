@@ -336,7 +336,10 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 				reasons = append(reasons, fmt.Sprintf("%s %s", c.ID, c.Title))
 			}
 		}
-		sess.Error = "blocked by " + strings.Join(reasons, "; ")
+		// Point at the detail: the one line here names the checks, and the fix for
+		// each one (a flag, a command, a query) is in the plan that `status` prints.
+		sess.Error = fmt.Sprintf("blocked by %s (the plan detail and what to do about each is in 'saksama status %s')",
+			strings.Join(reasons, "; "), sess.ID)
 		r.emit(prep, events.TypePlanRejected, map[string]any{
 			"blockers": plan.Recommendation.Blockers,
 			"engine":   plan.Recommendation.Engine,
@@ -344,7 +347,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		})
 		sess.LastSeq = prep.emitter.Seq()
 		_ = r.Store.Save(sess)
-		return sess, fmt.Errorf("%w: %d blocker(s); run 'saksama status %s' for details",
+		return sess, fmt.Errorf("%w: %d blocker(s); the plan detail, including what to do about each one, is in 'saksama status %s'",
 			ErrBlocked, plan.Recommendation.Blockers, sess.ID)
 	}
 
