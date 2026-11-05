@@ -74,6 +74,213 @@ trade-offs, and then runs the engine you chose.
 - **Disk before anything.** Below 10 percent free is refused, a copy needs twice
   the table size, and an unmeasurable volume refuses `apply` rather than guessing.
 
+## Requirements
+
+What the tool needs is deliberately small, because it is meant to run on the same
+one or two boxes you already have.
+
+### The machine Saksama runs on
+
+| | |
+|---|---|
+| OS | Linux or macOS, amd64 or arm64. The binary is **statically linked** (`ldd` says *not a dynamic executable*), so there is no libc version to match and nothing to install first |
+| Disk | A writable home directory: the state directory defaults to `~/.local/state/saksama` (`SAKSAMA_STATE_DIR` or `--state-dir`), and installed engines go to `~/.local/share/saksama/bin` |
+| Network | Outbound HTTPS **only** for `saksama engine install`. Every other command talks to your MySQL and nothing else |
+| Privileges on that machine | None beyond the user you already are. Installing goes to `~/.local/share/saksama/bin`, no sudo, no `/usr/local/bin` unless you pass `--system` |
+| Not required | A MySQL client, Perl, Go, a daemon, a container runtime |
+
+### The database
+
+| | |
+|---|---|
+| Server | MySQL **5.6 – 8.4**, including 5.6. The verified combinations and what was run against each are in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md); `saksama compat --markdown` prints the same table from the binary, and `saksama compat` alone reports what is installed on this machine |
+| Storage engine | InnoDB. MyISAM and anything else is refused, not "handled" |
+| Not supported | MariaDB is refused by check `E1`: its capability matrix is not verified here, and guessing is not a feature. RDS and Aurora are analysed but their privilege behaviour is **claimed, not verified** |
+| Replica | Not needed. Copy engines can run on the primary; gh-ost is told `--allow-on-master` when there is no replica |
+
+### Privileges for the account Saksama connects with
+
+Grant these to a dedicated user, not to `root`:
+
+```sql
+CREATE USER 'saksama'@'10.%' IDENTIFIED BY '...';
+
+-- reading the schema, the load, and the metadata lock queue
+GRANT SELECT, PROCESS ON *.* TO 'saksama'@'10.%';
+GRANT SELECT ON performance_schema.* TO 'saksama'@'10.%';
+
+-- the DDL itself, on the databases you migrate
+GRANT ALTER, CREATE, DROP, INDEX, TRIGGER, REFERENCES
+  ON `shop`.* TO 'saksama'@'10.%';
+
+-- a copy engine reads and writes rows while it copies
+GRANT SELECT, INSERT, UPDATE, DELETE ON `shop`.* TO 'saksama'@'10.%';
+
+-- for gh-ost only: it reads the binary log
+GRANT REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO 'saksama'@'10.%';
+
+-- so DDL fails fast instead of queueing behind a lock
+GRANT SESSION_VARIABLES_ADMIN ON *.* TO 'saksama'@'10.%';
+```
+
+Those grants were run against a real server while this section was written: a user
+with exactly this set gets `RESULT ready` on a live plan with no privilege warnings.
+Three of them are checked on every live plan, and a missing one is reported by name
+rather than discovered at execution time:
+
+| Missing | Check | What it means |
+|---|---|---|
+| `PROCESS` | `D1c` WARN | other sessions are invisible, so the metadata-lock hazard cannot be seen |
+| `SESSION_VARIABLES_ADMIN` (or `SUPER`) | `D15` WARN | the session cannot shorten `lock_wait_timeout`, so a DDL may queue instead of failing fast |
+| `SELECT` on `performance_schema` | `D1b` WARN | the lock queue cannot be read on a server that has the table |
+
+`REPLICATION CLIENT` and `REPLICATION SLAVE` are gh-ost's requirements, not something
+Saksama can check for you: without them gh-ost exits at startup and the event log
+says so.
+
+### Disk
+
+Two independent thresholds, both measured on the database host when it is reachable:
+
+- **below 10 % free** is refused outright; **below 25 %** warns;
+- a copy needs roughly **twice the table size** (the copy table plus the retained
+  original), and an in-place index build needs a quarter of the index size.
+
+If the volume cannot be measured (a managed service, or a remote host), `apply`
+refuses until you pass `--free-disk` and `--disk-total`. That is on purpose: an
+unmeasurable disk is not an empty one.
+
+### Copy engines, only if a change has to rebuild
+
+An index-only change needs no copy engine at all on MySQL 5.6+. A rebuild picks one:
+
+| Engine | Requirement | How it gets there |
+|---|---|---|
+| gh-ost | one static binary, no dependencies | `saksama engine install gh-ost` |
+| pt-osc | Perl with `DBI` and `DBD::mysql` | `saksama engine install pt-osc`, then the Perl modules for **your** distribution; `engine doctor` prints which package that is |
+
+`saksama engine doctor` is the answer to "is this box ready": it checks the platform,
+the binary, the version against the verified table, the Perl modules, and the server
+settings, and puts the fix next to each failure.
+
+---
+
+## Install for production (beta)
+
+Beta means one thing here: **the procedures are the ones that were tested, and the
+limits are written down instead of discovered later.** What is verified and what is
+merely claimed is published in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) and
+printed by `saksama compat`. What the tool will not do is in
+[What it will not do](#what-it-will-not-do) below.
+
+### 1. Take a binary you can verify
+
+```bash
+VERSION=v0.3.0
+curl -fsSLO https://github.com/perogeremmer/saksama-core/releases/download/$VERSION/saksama_${VERSION#v}_linux_amd64.tar.gz
+curl -fsSLO https://github.com/perogeremmer/saksama-core/releases/download/$VERSION/checksums.txt
+sha256sum -c checksums.txt --ignore-missing --quiet && echo verified
+tar xzf saksama_${VERSION#v}_linux_amd64.tar.gz
+install -m 0755 saksama ~/.local/bin/saksama   # no sudo, no system directories
+saksama version
+```
+
+Use `darwin_arm64`, `linux_arm64`, or `darwin_amd64` as appropriate. Each archive
+carries `README.md`, `ARCHITECTURE.md`, `COMMANDS.md`, `LICENSE`, and `docs/`, so the
+documentation you have matches the binary you have.
+
+Prefer `go install github.com/perogeremmer/saksama-core/cmd/saksama@${VERSION}` if
+you have a Go toolchain and would rather build it locally.
+
+### 2. Create a dedicated database user
+
+Use the grants above. Do not run as `root`: the tool never needs it, and `D15`/`D1c`
+exist precisely because the account's limits matter.
+
+### 3. Say where state lives
+
+The state directory holds sessions, the event log, the table lock, and recorded
+engine choices. It must survive a reboot and be shared by every terminal that will
+run `status`, `attach`, `cancel`, or `cutover`:
+
+```bash
+export SAKSAMA_STATE_DIR=/var/lib/saksama   # default: ~/.local/state/saksama
+mkdir -p "$SAKSAMA_STATE_DIR" && chmod 700 "$SAKSAMA_STATE_DIR"
+```
+
+`--state-dir` does the same thing per command. The directory is created `0700`,
+sessions are `0600`, and nothing in it contains a password. Two cheap habits that
+save an incident: keep it on local disk rather than a network mount, and let exactly
+one user own it, because every terminal that will run `status`, `attach`, `cancel`,
+or `cutover` has to read the same directory.
+
+### 4. Check the box and the server before the first migration
+
+```bash
+saksama compat                     # what this build has verified
+saksama engine doctor              # platform, binaries, Perl modules
+saksama engine doctor gh-ost -h db.prod -u saksama    # + the server's settings
+saksama engine install gh-ost      # verified build, checksum checked, version asserted
+```
+
+### 5. Read before you write
+
+`advise` and `plan` only read. Run them on production first:
+
+```bash
+saksama advise --live -h db.prod -u saksama -d shop
+saksama plan   --live -h db.prod -u saksama -d shop -t orders   -a "ADD INDEX ix_created (created_at)"
+```
+
+`plan` exits `1` when the change is refused, which makes it usable as a CI gate
+without `apply` anywhere near it.
+
+### 6. Execute, detached, with the swap gated
+
+```bash
+saksama apply --live -h db.prod -u saksama -d shop -t orders   -a "MODIFY COLUMN status varchar(64) NOT NULL"   --production --confirm db.prod   --detach --hold-cutover   --free-disk 100000000000 --disk-total 200000000000
+```
+
+`--detach` puts the engine in its own process group, so closing the terminal does not
+stop it. `--hold-cutover` (gh-ost only) builds the new table and waits before
+swapping: check the result, then release it in a separate, auditable step:
+
+```bash
+saksama status s3
+saksama cutover s3                  # this is the point of no return
+saksama cancel s3                   # before cutover only; add --force-kill if needed
+saksama reconcile                   # after a crash, an OOM, or a lost terminal
+saksama cleanup s3 --dry-run        # then drop only what the session owns
+```
+
+`--production` also requires `--confirm <host>`; on MySQL 5.6 it additionally blocks
+until you accept the unobservable lock queue with `--accept-unknown-mdl`. There is no
+silent production path.
+
+### 7. What to watch after the first run
+
+| Signal | Where | What it means |
+|---|---|---|
+| session state | `saksama status` | `done`, `failed`, and the engine's own output |
+| progress | `saksama attach <id>` | rows copied, percent, `Threads_running`, throttling, polled from the database |
+| leftovers | `saksama reconcile`, `advise --live` | tables and triggers an interrupted run left behind |
+| audit | `saksama export <id>` | the event log as a file you can keep |
+
+### Beta, honestly
+
+| | |
+|---|---|
+| No daemon, no TUI | state is files on disk and commands; nothing supervises a migration for you |
+| MariaDB refused | by design; the capability matrix is not verified there |
+| RDS/Aurora | analysed, but the privilege behaviour is claimed, not verified |
+| No rollback claim after a cutover | once the swap happens, writes live in the new table; the tool says "forward migration" |
+| Native `ALTER` cannot be cancelled | the server owns it; the tool says so instead of pretending |
+
+If a concrete failure is not written down here, that is a documentation bug: open an
+issue with the `SHOW CREATE TABLE`, the `ALTER`, and the version.
+
+---
+
 ## Quick start
 
 ```bash
@@ -262,13 +469,13 @@ claim something this repository does not do.
 ## Development
 
 ```bash
-make test               # 205 unit tests
+make test               # unit tests, no database needed
 make lint               # go vet plus a gofmt check
 make cover              # per-package coverage
 make demo               # two plan cards, no database needed
 
 make integration-up     # disposable MySQL 8.0 in docker on :33306
-make test-integration   # 39 tests against a real server, 4 more when pt-osc or gh-ost is installed
+make test-integration   # the whole suite against a real server (copy-engine cases need gh-ost or pt-osc)
 make integration-down
 
 make compat-doc         # regenerate docs/COMPATIBILITY.md
