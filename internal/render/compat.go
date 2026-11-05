@@ -46,6 +46,16 @@ func Compatibility(w io.Writer) error {
 			row.Engine, row.Version, row.Status.Mark(), row.Detail)
 	}
 
+	b.WriteString("\n## Hosts\n\n")
+	b.WriteString("The binary is statically linked, so it runs on any Linux distribution. The *advice*\n")
+	b.WriteString("is not portable: the Perl modules pt-osc needs are `libdbd-mysql-perl` on Debian and\n")
+	b.WriteString("`perl-DBD-MySQL` on Fedora, and a wrong package name is a fix nobody can follow.\n\n")
+	b.WriteString("| Host | Verified | Detail |\n")
+	b.WriteString("|---|---|---|\n")
+	for _, row := range support.Hosts {
+		fmt.Fprintf(&b, "| %s | %s | %s |\n", row.OS, row.Status.Mark(), row.Detail)
+	}
+
 	b.WriteString("\n## Server settings `advise` reads\n\n")
 	b.WriteString("A suitabile engine on a server that cannot start it is still a failed migration,\n")
 	b.WriteString("so these are checked and shown with the value the server reports right now.\n\n")

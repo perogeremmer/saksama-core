@@ -128,6 +128,47 @@ var Engines = []EngineRow{
 // ServerSettings are the variables `saksama advise` reads before recommending a
 // copy engine. They are listed here because "which engine suits my table" and
 // "can my server start that engine" are different questions with different fixes.
+// HostRow is one operating system the binary and its advice were exercised on.
+//
+// Hosts belong in this table for the same reason servers do: the tool prints a
+// package command for the distribution it finds, and a command that has never been
+// run on that distribution is a guess wearing a prompt.
+type HostRow struct {
+	OS     string `json:"os"`
+	Status Status `json:"status"`
+	Detail string `json:"detail"`
+}
+
+// Hosts are the machines the shipped binary was run on. Every "verified" row was run
+// by the distro-smoke CI job, which also asserts the package manager named in the
+// advice matches the one installed there.
+var Hosts = []HostRow{
+	{
+		OS: "Debian, Ubuntu", Status: Verified,
+		Detail: "the test suite runs on Debian-based CI runners; engine doctor prints apt-get and the apt package names",
+	},
+	{
+		OS: "Fedora", Status: Verified,
+		Detail: "binary run in fedora:latest: engine doctor prints dnf install and perl-DBD-MySQL, and the smoke job fails if apt-get appears",
+	},
+	{
+		OS: "Arch", Status: Verified,
+		Detail: "binary run in archlinux:latest: engine doctor prints pacman -S --needed and perl-dbi perl-dbd-mysql",
+	},
+	{
+		OS: "Alpine (musl)", Status: Verified,
+		Detail: "binary run in alpine:latest: static linking is what makes this work, and the binary asserts it; advice is apk add",
+	},
+	{
+		OS: "macOS", Status: Claimed,
+		Detail: "the release builds and the static link is asserted, but no CI runner has executed the binary or checked the advice there",
+	},
+	{
+		OS: "openSUSE, RHEL clones, anything else", Status: Unverified,
+		Detail: "mapped to zypper/dnf from /etc/os-release, printed as such, never run; an unrecognised distribution is told so instead of being given apt-get",
+	},
+}
+
 var ServerSettings = []string{
 	"log_bin: ON. gh-ost follows writes through the binary log; without it there is nothing to follow.",
 	"binlog_format: ROW. Statement-based logging cannot reproduce row images.",

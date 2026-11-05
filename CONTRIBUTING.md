@@ -5,7 +5,7 @@ Thanks for taking a look. This project has an unusually strict bar because a bug
 ## Ground rules
 
 1. **Every check needs a positive test and a negative test.** A rule that fires on a healthy schema is worse than no rule at all.
-2. **No capability claim without a versioned integration fixture.** If you say "`DROP COLUMN` is INSTANT on 8.0.29+", a test against a real server must prove it.
+2. **No capability claim without a versioned integration fixture.** If you say "`DROP COLUMN` is INSTANT on 8.0.29+", a test against a real server must prove it. The same holds for host advice: if the tool prints a package command, a CI job runs it on that distribution.
 3. **The analyzer stays pure.** `internal/analyzer` takes a model and returns a plan. Database access belongs in `internal/introspect`.
 4. **Fail closed.** Unknown operations are blocked, never guessed.
 5. **Never widen what the tool will do** without also extending `docs/CHECKS.md` and the decision log.
@@ -94,6 +94,23 @@ Replacing a tag is allowed and supported: `release.mode: replace` in
 upload with `422 already_exists`. That is for the case this repository has already
 hit twice - an annotation that came out wrong, or a release that published nothing -
 not for quietly changing what a version contains.
+
+## What CI runs
+
+| Job | What it proves |
+|---|---|
+| Unit tests | the analyzer, parsers, and graders, with the binary asserted **statically linked** (`file` and `ldd`), because "one file, any distribution" rests on it |
+| Integration (MySQL 8.0, 8.4) | the whole suite against real servers |
+| INSTANT boundary (8.0.28, 8.0.29) | the capability matrix against both sides of the boundary that matters |
+| Claim checks | 5.6 plans with its caveat and blocks in production; MariaDB refused; 5.7 runs the full suite |
+| pt-osc against a real binary | the Perl engine end to end, not a stub |
+| Distro smoke (Fedora, Arch, Alpine) | the shipped binary runs there, and `engine doctor` names the package manager that distribution actually has |
+| Engine flag matrix | every flag the wrappers emit exists in the real binaries |
+| Release config | a snapshot builds, archives, checksums, and SBOMs, and the snapshot binary is static |
+| Offline plan demo | three plans that must route, refuse, and explain without a database |
+
+Nightly, not per pull request: `TestCopyWithConcurrentWritesLosesNothing` copies 131k
+rows under continuous writes and asserts no committed write is lost.
 
 ## Pull requests
 

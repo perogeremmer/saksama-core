@@ -38,6 +38,21 @@ statement can queue the whole server.
 | pt-osc | 3.0.13 | yes | same suite; behavioural difference worth knowing: some builds keep an underscore prefix on foreign key constraint names, so Saksama verifies constraints by columns and referenced table rather than by name |
 | pt-osc | 2.x | no | no --resume, narrower ALTER grammar; percona-toolkit 3.x is required |
 
+## Hosts
+
+The binary is statically linked, so it runs on any Linux distribution. The *advice*
+is not portable: the Perl modules pt-osc needs are `libdbd-mysql-perl` on Debian and
+`perl-DBD-MySQL` on Fedora, and a wrong package name is a fix nobody can follow.
+
+| Host | Verified | Detail |
+|---|---|---|
+| Debian, Ubuntu | yes | the test suite runs on Debian-based CI runners; engine doctor prints apt-get and the apt package names |
+| Fedora | yes | binary run in fedora:latest: engine doctor prints dnf install and perl-DBD-MySQL, and the smoke job fails if apt-get appears |
+| Arch | yes | binary run in archlinux:latest: engine doctor prints pacman -S --needed and perl-dbi perl-dbd-mysql |
+| Alpine (musl) | yes | binary run in alpine:latest: static linking is what makes this work, and the binary asserts it; advice is apk add |
+| macOS | claimed | the release builds and the static link is asserted, but no CI runner has executed the binary or checked the advice there |
+| openSUSE, RHEL clones, anything else | not yet | mapped to zypper/dnf from /etc/os-release, printed as such, never run; an unrecognised distribution is told so instead of being given apt-get |
+
 ## Server settings `advise` reads
 
 A suitabile engine on a server that cannot start it is still a failed migration,

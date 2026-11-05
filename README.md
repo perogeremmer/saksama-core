@@ -439,6 +439,7 @@ The MySQL Clone Plugin is deliberately absent: it clones an instance, not a tabl
 | `engine doctor` and verified `engine install` | done |
 | MySQL 5.6, with its unobservable lock queue stated in every plan | done |
 | Deferred claims published, not assumed: boundary pairs, killed-engine recovery, nightly volume | done |
+| Hosts verified, not assumed: the binary runs on Fedora, Arch, and Alpine, and the package advice matches each | done |
 | Daemon with a socket, full-screen TUI | not built |
 
 Commands that are not implemented exit `2` with an explicit message. They are

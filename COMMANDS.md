@@ -343,10 +343,9 @@ no test in this repository has run would make `docs/COMPATIBILITY.md` a lie.
 A pt-osc file with no `DBI`/`DBD::mysql` is installed but reported as `cannot
 start`, with the fix for the distribution it detected (`libdbi-perl libdbd-mysql-perl`
 on Debian, `perl-DBD-MySQL` on Fedora, `perl-dbi perl-dbd-mysql` on Arch and Alpine).
-When it cannot tell, it says so instead of printing a package manager that is not
-there. That is
-the difference between "installed" and "runnable", and both `doctor` and
-`advise` report it.
+When it cannot tell, it says so rather than printing a package manager that is not
+there. That is the difference between "installed" and "runnable", and both `doctor`
+and `advise` report it.
 
 Exit codes for `install`: `0` installed and runnable, `1` refused (digest or
 version mismatch, or a file already there) or installed but not runnable, `2`

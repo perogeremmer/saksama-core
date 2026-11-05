@@ -180,7 +180,7 @@ flowchart TD
 | `internal/analyzer` | pure decision layer: `(schema, ops, server, liveState) -> Plan` | touches a database |
 | `internal/introspect` | information_schema, performance_schema, settings, artifact discovery | decides |
 | `internal/engine` | native, gh-ost, pt-osc adapters; progress polled from the database | parses engine logs for state |
-| `internal/enginesetup` | the one place that downloads and writes an executable: verified version, checksum, pinned digest | runs from plan, advise, or apply |
+| `internal/enginesetup` | the one place that downloads and writes an executable (verified version, checksum, pinned digest), and the one place that knows which package manager the host has | runs from plan, advise, or apply; invents no package name it cannot map |
 | `internal/stream` | tails an event log from a sequence number, for `attach` and the wizard | buffers unbounded |
 | `internal/state`, `internal/events`, `internal/render`, `internal/support` | session records, the event contract, presentation, the verified-claims table | — |
 
