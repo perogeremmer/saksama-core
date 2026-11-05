@@ -8,24 +8,121 @@ package render
 import (
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
 )
 
+// Card formatting. Output stays ASCII-only (see the package comment), so alignment
+// and word wrapping are the only tools available - and they are the two that matter:
+// a value running past the terminal folds at an arbitrary place, which is exactly
+// what makes a plan hard to read at 2am.
+const (
+	defaultCardWidth = 96
+	minCardWidth     = 64
+	maxCardWidth     = 140
+)
+
+// cardWidth is the line width to format for.
+//
+// COLUMNS is a shell variable that is usually not exported, so it is honoured when it
+// happens to be there and SAKSAMA_WIDTH is the explicit knob. The default is a width
+// most terminals have; the clamp keeps a silly value from making the card either a
+// ribbon or an unreadable slab.
+func cardWidth() int {
+	for _, key := range []string{"SAKSAMA_WIDTH", "COLUMNS"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				return clampWidth(n)
+			}
+		}
+	}
+	return defaultCardWidth
+}
+
+func clampWidth(n int) int {
+	if n < minCardWidth {
+		return minCardWidth
+	}
+	if n > maxCardWidth {
+		return maxCardWidth
+	}
+	return n
+}
+
+// wrapText breaks one-line text into lines no longer than limit, on word
+// boundaries. A word longer than the limit is left whole: breaking a fingerprint or
+// a path mid-token produces something that cannot be copied or searched for.
+func wrapText(s string, limit int) []string {
+	s = oneLine(s)
+	if s == "" {
+		return nil
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	var out []string
+	line := ""
+	for _, word := range strings.Fields(s) {
+		switch {
+		case line == "":
+			line = word
+		case len(line)+1+len(word) <= limit:
+			line += " " + word
+		default:
+			out = append(out, line)
+			line = word
+		}
+	}
+	if line != "" {
+		out = append(out, line)
+	}
+	return out
+}
+
+// writeWrapped writes text at the given indent, wrapped to the card width. The
+// first line gets `first`, later lines get `rest`; both are printed after the indent.
+func writeWrapped(b *strings.Builder, indent int, first, rest, text string, width int) {
+	lines := wrapText(text, width-indent-len(first))
+	if len(lines) == 0 {
+		return
+	}
+	pad := strings.Repeat(" ", indent)
+	fmt.Fprintf(b, "%s%s%s\n", pad, first, lines[0])
+	for _, line := range lines[1:] {
+		fmt.Fprintf(b, "%s%s%s\n", pad, strings.Repeat(" ", len(first)), line)
+	}
+	_ = rest
+}
+
 // PlanCard writes the human-readable plan.
 func PlanCard(w io.Writer, p analyzer.Plan) error {
 	var b strings.Builder
+	width := cardWidth()
+
+	// One label column for the whole card, so ALTER and RESULT line up with each
+	// other instead of each block inventing its own gutter.
+	labelWidth := 11
 
 	label := func(k, v string) {
-		fmt.Fprintf(&b, "%-10s %s\n", k, v)
+		v = oneLine(v)
+		lines := wrapText(v, width-labelWidth-1)
+		if len(lines) == 0 {
+			fmt.Fprintf(&b, "%-*s\n", labelWidth, k)
+			return
+		}
+		fmt.Fprintf(&b, "%-*s %s\n", labelWidth, k, lines[0])
+		for _, line := range lines[1:] {
+			fmt.Fprintf(&b, "%s %s\n", strings.Repeat(" ", labelWidth), line)
+		}
 	}
 
-	label("ALTER", oneLine(p.Alter))
+	label("ALTER", p.Alter)
 	label("TARGET", targetLine(p))
 	label("ENGINE", engineLine(p))
 	label("DURATION", durationLine(p.Duration))
-
 	if p.Schema.EstimatedRows > 0 || p.Schema.DataBytes > 0 {
 		label("TABLE", tableLine(p))
 	}
@@ -39,100 +136,169 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 		b.WriteString("  (no recommendation)\n")
 	}
 	for _, r := range p.Recommendation.Reasons {
-		fmt.Fprintf(&b, "  - %s\n", r)
+		writeWrapped(&b, 2, "- ", "- ", r, width)
 	}
 
 	if len(p.Operations) > 0 {
 		b.WriteString("\nOPERATIONS\n")
+		// Widths come from the data: fixed gutters leave a hole when the method is
+		// short, and a rule id is not always the same length.
+		methodW, ruleW := 0, 0
 		for _, op := range p.Operations {
-			method := string(op.Method)
-			if op.Lock != "" {
-				method += ", LOCK=" + op.Lock
+			if n := len(operationMethod(op)); n > methodW {
+				methodW = n
 			}
-			if op.Rebuild {
-				// INPLACE is not the same as free: say so next to the label,
-				// because "INPLACE" is the word people read as "cheap".
-				method += " +rebuild"
+			if n := len(op.RuleID); n > ruleW {
+				ruleW = n
 			}
-			fmt.Fprintf(&b, "  %-20s %-30s %s\n", method, op.RuleID, oneLine(op.Raw))
+		}
+		for _, op := range p.Operations {
+			prefix := fmt.Sprintf("  %-*s  %-*s  ", methodW, operationMethod(op), ruleW, op.RuleID)
+			lines := wrapText(op.Raw, width-len(prefix))
+			if len(lines) == 0 {
+				fmt.Fprintf(&b, "%s\n", strings.TrimRight(prefix, " "))
+				continue
+			}
+			fmt.Fprintf(&b, "%s%s\n", prefix, lines[0])
+			for _, line := range lines[1:] {
+				fmt.Fprintf(&b, "%s%s\n", strings.Repeat(" ", len(prefix)), line)
+			}
 		}
 	}
 
 	if len(p.Checks) > 0 {
 		b.WriteString("\nFINDINGS\n")
+		// Severity and id get their own columns so a list of findings reads down
+		// one edge instead of zig-zagging with the length of each id.
+		sevW, idW := len("BLOCKER"), 3
 		for _, c := range p.Checks {
-			fmt.Fprintf(&b, "  %-7s [%s] %s\n", string(c.Severity), c.ID, c.Title)
+			if n := len(string(c.Severity)); n > sevW {
+				sevW = n
+			}
+			if n := len(c.ID); n > idW {
+				idW = n
+			}
+		}
+		bodyIndent := 2 + sevW + 1 + idW + 1
+		for _, c := range p.Checks {
+			head := fmt.Sprintf("  %-*s %-*s ", sevW, string(c.Severity), idW, c.ID)
+			lines := wrapText(c.Title, width-len(head))
+			if len(lines) == 0 {
+				fmt.Fprintf(&b, "%s\n", strings.TrimRight(head, " "))
+			} else {
+				fmt.Fprintf(&b, "%s%s\n", head, lines[0])
+				for _, line := range lines[1:] {
+					fmt.Fprintf(&b, "%s%s\n", strings.Repeat(" ", len(head)), line)
+				}
+			}
 			if c.Detail != "" {
-				fmt.Fprintf(&b, "          %s\n", oneLine(c.Detail))
+				writeWrapped(&b, bodyIndent, "", "", c.Detail, width)
 			}
 			if c.Remediation != "" {
 				// A remedy that needs a query to act on cannot be one sentence:
-				// print the continuation lines aligned under "action:", so the SQL
-				// can be copied without picking it out of running prose.
+				// the lines it already has are kept, and each is wrapped, so the
+				// SQL stays copyable instead of dissolving into prose.
 				for i, line := range strings.Split(strings.TrimSpace(c.Remediation), "\n") {
-					label := "          "
 					if i == 0 {
-						label += "action: "
+						writeWrapped(&b, bodyIndent, "action: ", "", line, width)
+						continue
 					}
-					fmt.Fprintf(&b, "%s%s\n", label, oneLine(line))
+					writeWrapped(&b, bodyIndent, "", "", line, width)
 				}
 			}
 			if c.MySQLError > 0 {
-				fmt.Fprintf(&b, "          mysql: ERROR %d\n", c.MySQLError)
+				fmt.Fprintf(&b, "%smysql: ERROR %d\n", strings.Repeat(" ", bodyIndent), c.MySQLError)
 			}
 		}
 	}
 
 	b.WriteString("\nRECOVERY\n")
-	fmt.Fprintf(&b, "  Before execution: %s\n", p.Recovery.BeforeExecution)
-	if p.Recovery.DuringExecution != "" {
-		fmt.Fprintf(&b, "  During execution: %s\n", p.Recovery.DuringExecution)
+	recovery := []struct{ k, v string }{
+		{"Before execution:", p.Recovery.BeforeExecution},
+		{"During execution:", p.Recovery.DuringExecution},
+		{"After success:", p.Recovery.AfterSuccess},
 	}
-	if p.Recovery.AfterSuccess != "" {
-		fmt.Fprintf(&b, "  After success:    %s\n", p.Recovery.AfterSuccess)
+	for _, r := range recovery {
+		if r.v == "" {
+			continue
+		}
+		writeWrapped(&b, 2, fmt.Sprintf("%-18s ", r.k), "", r.v, width)
 	}
 	if p.Recovery.HoldCutover {
-		b.WriteString("  Hold cutover:     supported; the production table is not swapped until you run 'saksama cutover'\n")
+		writeWrapped(&b, 2, "Hold cutover:     ", "", "supported; the production table is not swapped until you run 'saksama cutover'", width)
 	}
 
 	if len(p.Verification) > 0 {
 		b.WriteString("\nVERIFY AFTER\n")
+		kindW := 0
 		for _, v := range p.Verification {
-			fmt.Fprintf(&b, "  %-20s %s\n", v.Kind, v.Name)
+			if len(v.Kind) > kindW {
+				kindW = len(v.Kind)
+			}
+		}
+		for _, v := range p.Verification {
+			fmt.Fprintf(&b, "  %-*s  %s\n", kindW, v.Kind, v.Name)
 		}
 	}
 
 	if len(p.Notes) > 0 {
 		b.WriteString("\nNOTES\n")
 		for _, n := range p.Notes {
-			fmt.Fprintf(&b, "  - %s\n", oneLine(n))
+			writeWrapped(&b, 2, "- ", "- ", n, width)
 		}
 	}
 
+	// The verdict is the last thing on screen and the first thing anyone reads, so
+	// it uses the same label column as the header instead of its own.
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "RECOMMEND  %s\n", p.Recommendation.Engine)
+	summary := func(k, v string) {
+		lines := wrapText(v, width-labelWidth-1)
+		if len(lines) == 0 {
+			fmt.Fprintf(&b, "%-*s\n", labelWidth, k)
+			return
+		}
+		fmt.Fprintf(&b, "%-*s %s\n", labelWidth, k, lines[0])
+		for _, line := range lines[1:] {
+			fmt.Fprintf(&b, "%s %s\n", strings.Repeat(" ", labelWidth), line)
+		}
+	}
+
+	summary("RECOMMEND", string(p.Recommendation.Engine))
 	if len(p.Recommendation.Fallbacks) > 0 {
 		var fb []string
 		for _, f := range p.Recommendation.Fallbacks {
 			fb = append(fb, string(f))
 		}
-		fmt.Fprintf(&b, "FALLBACKS  %s (manual override only)\n", strings.Join(fb, ", "))
+		summary("FALLBACKS", strings.Join(fb, ", ")+" (manual override only)")
 	}
-	fmt.Fprintf(&b, "BLOCKERS   %d\n", p.Recommendation.Blockers)
+	summary("BLOCKERS", fmt.Sprintf("%d", p.Recommendation.Blockers))
 	switch {
 	case p.Recommendation.Blockers > 0:
-		fmt.Fprintf(&b, "RESULT     refused\n")
+		summary("RESULT", "refused")
 	case !p.Recommendation.Executable:
-		fmt.Fprintf(&b, "RESULT     engine fits, but cannot run here yet\n")
-		fmt.Fprintf(&b, "REASON     %s\n", p.Recommendation.ExecutableReason)
+		summary("RESULT", "engine fits, but cannot run here yet")
+		summary("REASON", p.Recommendation.ExecutableReason)
 	case p.Recommendation.Engine == analyzer.EngineNone:
-		fmt.Fprintf(&b, "RESULT     no execution path selected\n")
+		summary("RESULT", "no execution path selected")
 	default:
-		fmt.Fprintf(&b, "RESULT     ready (nothing has been changed)\n")
+		summary("RESULT", "ready (nothing has been changed)")
 	}
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// operationMethod is the OPERATIONS column: the algorithm, its lock, and whether the
+// statement rewrites every row.
+func operationMethod(op analyzer.OpPlan) string {
+	m := string(op.Method)
+	if op.Lock != "" {
+		m += ", LOCK=" + op.Lock
+	}
+	if op.Rebuild {
+		m += " +rebuild"
+	}
+	return m
 }
 
 func engineLine(p analyzer.Plan) string {

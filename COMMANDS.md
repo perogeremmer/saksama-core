@@ -108,6 +108,13 @@ The rules it follows:
 
 ---
 
+## Output width
+
+The plan card wraps to 96 columns by default so no line folds at random in a terminal.
+`SAKSAMA_WIDTH` (or `COLUMNS`, when a shell exports it) sets the width; it is clamped
+to 64-140. Everything else - identifiers, SQL, fingerprints - is left whole rather than
+split.
+
 ## Global options
 
 | Flag | Meaning |

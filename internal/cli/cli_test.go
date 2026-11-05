@@ -59,7 +59,7 @@ func TestPlanSimpleAddIndexSucceeds(t *testing.T) {
 	if !strings.Contains(out, "native") {
 		t.Fatalf("expected native recommendation:\n%s", out)
 	}
-	if !strings.Contains(out, "RESULT     ready") {
+	if !strings.Contains(out, "RESULT      ready") {
 		t.Fatalf("expected ready result:\n%s", out)
 	}
 }
@@ -79,7 +79,7 @@ func TestPlanBlockedReturnsNonZeroExit(t *testing.T) {
 	if code != ExitBlocked {
 		t.Fatalf("got exit %d, want %d", code, ExitBlocked)
 	}
-	if !strings.Contains(out, "RESULT     refused") {
+	if !strings.Contains(out, "RESULT      refused") {
 		t.Fatalf("expected refused result:\n%s", out)
 	}
 }
@@ -96,7 +96,7 @@ func TestPlanWithForeignKeysSelectsPtOSC(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("got exit %d, want 0:\n%s", code, out)
 	}
-	if !strings.Contains(out, "RECOMMEND  pt-osc") {
+	if !strings.Contains(out, "RECOMMEND   pt-osc") {
 		t.Fatalf("expected pt-osc:\n%s", out)
 	}
 }
@@ -317,7 +317,7 @@ func TestUnparseableAlterIsNeverReady(t *testing.T) {
 	if code != ExitBlocked {
 		t.Fatalf("got exit %d, want %d; a CI gate must fail here\n%s", code, ExitBlocked, out)
 	}
-	if !strings.Contains(out, "RESULT     refused") {
+	if !strings.Contains(out, "RESULT      refused") {
 		t.Fatalf("expected refused:\n%s", out)
 	}
 }

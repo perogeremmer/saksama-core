@@ -2,6 +2,7 @@ package render
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -52,7 +53,7 @@ func TestPlanCardContainsRequiredSections(t *testing.T) {
 	for _, want := range []string{
 		"ALTER", "TARGET", "ENGINE", "DURATION", "WHY",
 		"OPERATIONS", "FINDINGS", "RECOVERY", "VERIFY AFTER",
-		"RECOMMEND  native", "BLOCKERS   0",
+		"RECOMMEND   native", "BLOCKERS    0",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing section %q in:\n%s", want, out)
@@ -61,7 +62,7 @@ func TestPlanCardContainsRequiredSections(t *testing.T) {
 	if !strings.Contains(out, "shop.orders @ db.prod") {
 		t.Errorf("expected qualified target:\n%s", out)
 	}
-	if !strings.Contains(out, "RESULT     ready") {
+	if !strings.Contains(out, "RESULT      ready") {
 		t.Errorf("expected ready result:\n%s", out)
 	}
 }
@@ -89,7 +90,7 @@ func TestBlockedPlanCardSaysRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "RESULT     refused") {
+	if !strings.Contains(out, "RESULT      refused") {
 		t.Fatalf("expected refused:\n%s", out)
 	}
 	if !strings.Contains(out, "none (blocked)") {
@@ -118,8 +119,19 @@ func TestMultiLineInputIsFlattened(t *testing.T) {
 	if err := PlanCard(&buf, p); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(buf.String(), "ALTER      ADD INDEX ix (\n") {
-		t.Fatal("multi-line ALTER leaked into the header")
+	// The ALTER must stay on one line while it fits: breaking a statement across
+	// lines makes it easy to copy half of it. Read the value, not the gutter, so
+	// this assertion cannot go quiet when the label column changes.
+	alterValue := ""
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.HasPrefix(line, "ALTER") {
+			alterValue = strings.TrimSpace(strings.TrimPrefix(line, "ALTER"))
+		}
+	}
+	// Flattened onto one line, not broken across two: the point is that the
+	// statement stays copyable as a whole.
+	if want := "ADD INDEX ix ( created_at )"; alterValue != want {
+		t.Fatalf("ALTER value = %q, want %q", alterValue, want)
 	}
 }
 
@@ -218,7 +230,7 @@ func TestPlanCardSaysNotExecutableInsteadOfReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if strings.Contains(out, "RESULT     ready") {
+	if strings.Contains(out, "RESULT      ready") {
 		t.Fatalf("a non-executable plan must never read as ready:\n%s", out)
 	}
 	if !strings.Contains(out, "cannot run here yet") {
@@ -448,5 +460,57 @@ func TestCompatibilityDocMentionsEveryRow(t *testing.T) {
 	}
 	if !strings.Contains(out, "PostgreSQL has no online schema change") {
 		t.Errorf("expected an honest PostgreSQL note")
+	}
+}
+
+// A card that runs past the terminal folds at an arbitrary place, which is what
+// makes a plan hard to read. Nothing may exceed the width, and a token like a
+// fingerprint must never be split, because a broken token cannot be searched for.
+func TestCardStaysWithinTheWidth(t *testing.T) {
+	p := samplePlan()
+	p.Recommendation.Reasons = []string{strings.Repeat("a long reason about metadata locks ", 6)}
+	p.Checks = []analyzer.Check{{
+		ID: "D6", Severity: analyzer.SeverityWarn,
+		Title:       "free disk space could not be measured",
+		Detail:      strings.Repeat("the server reports a hostname that is not this one, ", 5),
+		Remediation: "pass --free-disk and --disk-total, or run Saksama on the database host so the filesystem can be read",
+	}}
+
+	for _, width := range []int{64, 80, 96, 140} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			t.Setenv("SAKSAMA_WIDTH", fmt.Sprint(width))
+			var buf bytes.Buffer
+			if err := PlanCard(&buf, p); err != nil {
+				t.Fatal(err)
+			}
+			for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+				if len(line) > width {
+					t.Fatalf("line of %d chars exceeds width %d: %q", len(line), width, line)
+				}
+			}
+			// The fingerprint is one token and must survive intact.
+			if !strings.Contains(buf.String(), p.SchemaFingerprint) {
+				t.Fatalf("the fingerprint was split at width %d", width)
+			}
+		})
+	}
+}
+
+func TestCardWidthHasAFloorAndACeiling(t *testing.T) {
+	for _, c := range []struct{ given, want int }{
+		{0, minCardWidth}, {40, minCardWidth}, {100, 100}, {500, maxCardWidth},
+	} {
+		if got := clampWidth(c.given); got != c.want {
+			t.Errorf("clampWidth(%d) = %d, want %d", c.given, got, c.want)
+		}
+	}
+}
+
+// Long words are left whole: breaking a path or a hostname mid-token produces
+// something that cannot be copied.
+func TestWrapTextKeepsLongWordsWhole(t *testing.T) {
+	got := wrapText("a "+strings.Repeat("x", 30)+" b", 10)
+	if len(got) != 3 || got[1] != strings.Repeat("x", 30) {
+		t.Fatalf("wrapText = %q", got)
 	}
 }
