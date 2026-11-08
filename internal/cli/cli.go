@@ -42,6 +42,7 @@ var stateDir string
 // Run dispatches a command line and returns the process exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
 	args, stateDir = extractStateDir(args)
+	render.UseColor(colorFor(args, stdout))
 
 	if len(args) == 0 {
 		// A bare `saksama` on a terminal is someone asking for help, not someone
@@ -254,6 +255,14 @@ type planOpts struct {
 	dataBytes          int64
 	indexBytes         int64
 	jsonOut            bool
+}
+
+// colorFor decides whether this invocation writes colour. Presentation only: the JSON
+// output and every exit code are unaffected, and a pipe (a CI log, a test) gets exactly
+// the plain text it got before.
+func colorFor(args []string, stdout io.Writer) bool {
+	ok, _ := render.ShouldColor(stdout, hasFlag(args, "--no-color"))
+	return ok
 }
 
 func cmdPlan(args []string, stdout, stderr io.Writer) int {

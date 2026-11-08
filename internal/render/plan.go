@@ -181,7 +181,15 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 		}
 		bodyIndent := 2 + sevW + 1 + idW + 1
 		for _, c := range p.Checks {
-			head := fmt.Sprintf("  %-*s %-*s ", sevW, string(c.Severity), idW, c.ID)
+			sev := Severity(string(c.Severity))
+			if colour.Enabled {
+				// pad, then paint: the width must never count escape bytes.
+				sev = Severity(string(c.Severity)) + strings.Repeat(" ", sevW-len(string(c.Severity)))
+			} else {
+				sev = fmt.Sprintf("%-*s", sevW, string(c.Severity))
+			}
+			id := Dim(fmt.Sprintf("%-*s", idW, c.ID))
+			head := fmt.Sprintf("  %s %s ", sev, id)
 			lines := wrapText(c.Title, width-len(head))
 			if len(lines) == 0 {
 				fmt.Fprintf(&b, "%s\n", strings.TrimRight(head, " "))
@@ -274,14 +282,14 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 	summary("BLOCKERS", fmt.Sprintf("%d", p.Recommendation.Blockers))
 	switch {
 	case p.Recommendation.Blockers > 0:
-		summary("RESULT", "refused")
+		summary("RESULT", Bad("refused"))
 	case !p.Recommendation.Executable:
 		summary("RESULT", "engine fits, but cannot run here yet")
 		summary("REASON", p.Recommendation.ExecutableReason)
 	case p.Recommendation.Engine == analyzer.EngineNone:
 		summary("RESULT", "no execution path selected")
 	default:
-		summary("RESULT", "ready (nothing has been changed)")
+		summary("RESULT", Good("ready")+" (nothing has been changed)")
 	}
 
 	_, err := io.WriteString(w, b.String())

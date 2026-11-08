@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 
@@ -69,6 +70,7 @@ func Run(args []string, stateDir string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.NoProbe, "no-probe", false, "skip detecting installed engine binaries")
 	fs.Int64Var(&o.FreeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
 	fs.Int64Var(&o.DiskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
+	noColor := fs.Bool("no-color", false, "plain text even on a terminal")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -84,6 +86,9 @@ func Run(args []string, stateDir string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "  saksama attach <session>")
 		return ExitUsage
 	}
+
+	// Presentation only: colour and the spinner are for the person at the keyboard.
+	render.UseColor(shouldColor(stdout, *noColor))
 
 	store, err := app.Store(o.StateDir)
 	if err != nil {
@@ -111,6 +116,9 @@ func Run(args []string, stateDir string, stdout, stderr io.Writer) int {
 		database:  o.Database,
 		freeDisk:  o.FreeDisk,
 		diskTotal: o.DiskTotal,
+		// The menu already refuses to start without a terminal; the spinner and the
+		// colour follow the same rule, so a captured session stays readable.
+		animate: true,
 	}
 
 	// A host on the command line is an invitation to go straight there, not a
@@ -130,6 +138,9 @@ type Wizard struct {
 	store *state.Store
 	actor string
 
+	// animate is true only on a real terminal: the spinner writes carriage returns,
+	// which in a captured log turn into a single unreadable line.
+	animate   bool
 	conn      cred.Conn
 	connected bool
 	database  string
@@ -138,18 +149,32 @@ type Wizard struct {
 	diskTotal int64
 }
 
+// shouldColor decides whether this process writes colour: only on a terminal, and only
+// when nothing says otherwise.
+func shouldColor(out io.Writer, noColorFlag bool) bool {
+	ok, _ := render.ShouldColor(out, noColorFlag)
+	return ok
+}
+
 func (w *Wizard) loop() int {
 	for {
-		w.p.Printf("\n----------------------------------------\n")
-		w.p.Printf("Saksama - examine before you alter.\n")
+		w.p.Printf("\n%s\n", render.Dim(strings.Repeat("-", 44)))
+		w.p.Printf("%s  %s\n", render.Bold("Saksama"), render.Dim("examine before you alter"))
+		// The first line of every screen answers "where am I", which is the thing a
+		// menu with a persistent connection most needs to say.
 		if w.connected {
-			w.p.Printf("connected: %s as %s, database %s\n", w.conn.Describe(), w.conn.User, orDash(w.database))
+			w.p.Printf("%s %s as %s, database %s\n",
+				render.Good("connected:"), w.conn.Describe(), w.conn.User, orDash(w.database))
 		} else {
-			w.p.Printf("not connected\n")
+			w.p.Printf("%s %s\n", render.Warn("not connected"), render.Dim("- choose 1 to begin"))
 		}
 
+		connectNote := ""
+		if w.connected {
+			connectNote = w.conn.Describe()
+		}
 		choice, err := w.p.Choose("What do you want to do?", []Item{
-			{"1", "Connect to a server", orDash(w.conn.Describe())},
+			{"1", "Connect to a server", connectNote},
 			{"2", "Inspect the server", "settings, engine binaries, disk"},
 			{"3", "Inspect tables and engines", "what a rebuild would cost, per table"},
 			{"4", "Plan a change", "build an ALTER, read the plan"},
@@ -237,15 +262,16 @@ func (w *Wizard) allowNativeRebuild(plan analyzer.Plan) bool {
 // reanalyse re-plans with an acknowledgement applied and shows the result, so the
 // screen never keeps a blocker it has just been told to drop.
 func (w *Wizard) reanalyse(req core.Request, flag string) (*core.Prepared, error) {
+	stop := w.busy("planning again")
 	prep, err := w.b.Analyze(context.Background(), req)
+	stop()
 	if err != nil {
 		return nil, err
 	}
-	w.p.Printf("\nre-read with %s:\n", flag)
+	w.p.Printf("\n%s\n", render.Accent("re-read with "+flag+":"))
 	if err := render.PlanCard(w.out, prep.Plan); err != nil {
 		return nil, err
 	}
-	w.printChecks(prep.Plan)
 	return prep, nil
 }
 
@@ -265,7 +291,11 @@ func (w *Wizard) ensureTables() bool {
 	if w.tables != nil {
 		return true
 	}
+	started := time.Now()
+	stop := w.busy("reading the schema of " + orDash(w.database))
 	adv, err := w.b.Schema(context.Background(), w.database, "")
+	stop()
+	_ = started
 	if err != nil {
 		w.fail(err)
 		return false
@@ -287,7 +317,7 @@ func (w *Wizard) engineChoice() {
 		return
 	}
 
-	w.p.Printf("\nENGINE CHOICE\n")
+	w.p.Printf("\n%s\n", render.Bold("ENGINE CHOICE"))
 	if len(choices) == 0 {
 		w.p.Printf("  nothing recorded yet: plan and apply follow the analyzer's recommendation\n")
 	} else {
@@ -392,7 +422,7 @@ func (w *Wizard) requireConnection() bool {
 // --- connect ----------------------------------------------------------------
 
 func (w *Wizard) connect() {
-	w.p.Printf("\nCONNECT\n")
+	w.p.Printf("\n%s\n", render.Bold("CONNECT"))
 
 	host, err := w.p.Ask("host", defaultOf(w.conn.Host, "127.0.0.1"))
 	if err != nil {
@@ -439,7 +469,11 @@ func (w *Wizard) connectWith(c cred.Conn) {
 		c.Password = secret
 	}
 
-	if err := w.b.Connect(c); err != nil {
+	started := time.Now()
+	stop := w.busy("connecting to " + c.Describe())
+	err = w.b.Connect(c)
+	stop()
+	if err != nil {
 		w.p.Printf("\ncould not connect: %v\n", err)
 		// The CLI has --tls; the menu had no way to say the same thing, so a server
 		// whose TLS this client cannot negotiate was a dead end here. Ask, and only
@@ -454,8 +488,11 @@ func (w *Wizard) connectWith(c cred.Conn) {
 			return
 		}
 		c.TLS = "false"
-		if err := w.b.Connect(c); err != nil {
-			w.p.Printf("\ncould not connect without TLS either: %v\n", err)
+		stop := w.busy("connecting without TLS")
+		retryErr := w.b.Connect(c)
+		stop()
+		if retryErr != nil {
+			w.p.Printf("\ncould not connect without TLS either: %v\n", retryErr)
 			return
 		}
 		w.p.Printf("\nnote: this session runs without TLS; the connection is not encrypted\n")
@@ -466,6 +503,7 @@ func (w *Wizard) connectWith(c cred.Conn) {
 	w.connected = true
 	w.tables = nil
 
+	w.note("connected", started)
 	w.p.Printf("\nconnected to %s as %s\n", c.Describe(), c.User)
 	w.p.Printf("equivalent: saksama advise --live -h %s -P %s -u %s -d %s",
 		c.Host, c.Port, c.User, orDash(c.Database))
@@ -495,7 +533,11 @@ func (w *Wizard) tablesScreen() {
 	if !w.requireConnection() {
 		return
 	}
+	started := time.Now()
+	stop := w.busy("reading the schema of " + orDash(w.database))
 	adv, err := w.b.Schema(context.Background(), w.database, "")
+	stop()
+	_ = started
 	if err != nil {
 		w.fail(err)
 		return
@@ -552,7 +594,9 @@ func (w *Wizard) plan() {
 
 	// Analyze first: it writes nothing at all, so reading a plan never leaves a
 	// session behind.
+	stop := w.busy("planning against " + req.Conn.Describe())
 	prep, err := w.b.Analyze(context.Background(), req)
+	stop()
 	if err != nil {
 		w.fail(err)
 		return
@@ -561,7 +605,6 @@ func (w *Wizard) plan() {
 		w.fail(err)
 		return
 	}
-	w.printChecks(prep.Plan)
 
 	// One blocker can be accepted rather than fixed, and only the operator may
 	// decide that. The analyzer names it; the wizard does not go looking for a
@@ -729,35 +772,6 @@ func (w *Wizard) buildAlter(table string) string {
 	return ""
 }
 
-func (w *Wizard) printChecks(plan analyzer.Plan) {
-	var blockers, warns []analyzer.Check
-	for _, c := range plan.Checks {
-		switch c.Severity {
-		case analyzer.SeverityBlocker:
-			blockers = append(blockers, c)
-		case analyzer.SeverityWarn:
-			warns = append(warns, c)
-		}
-	}
-	print := func(title string, checks []analyzer.Check) {
-		if len(checks) == 0 {
-			return
-		}
-		w.p.Printf("\n%s\n", title)
-		for _, c := range checks {
-			w.p.Printf("  %s  %s\n", c.ID, c.Title)
-			if c.Detail != "" {
-				w.p.Printf("        %s\n", c.Detail)
-			}
-			if c.Remediation != "" {
-				w.p.Printf("        fix: %s\n", c.Remediation)
-			}
-		}
-	}
-	print("BLOCKERS", blockers)
-	print("WARNINGS", warns)
-}
-
 // --- apply ------------------------------------------------------------------
 
 func (w *Wizard) apply() {
@@ -862,7 +876,7 @@ func (w *Wizard) apply() {
 // only thing worth approving: the plan card is a summary, and a summary is not
 // what executes.
 func (w *Wizard) approve(ar core.ApprovalRequest) (state.Approval, error) {
-	w.p.Printf("\nSTATEMENTS\n")
+	w.p.Printf("\n%s\n", render.Bold("STATEMENTS"))
 	for i, st := range ar.Statements {
 		w.p.Printf("  %d. %s\n", i+1, st.SQL)
 	}

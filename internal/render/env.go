@@ -51,11 +51,15 @@ func Environment(w io.Writer, checks []analyzer.SettingCheck, border bool) error
 		return err
 	}
 
+	// The table itself stays plain on purpose: its column widths are measured from
+	// cell text, and an escape sequence counted as characters would misalign every
+	// row or truncate mid-sequence. Colour goes where the layout cannot be hurt.
 	fails, warns, unknown := analyzer.EnvironmentSummary(checks)
-	fmt.Fprintf(&b, "\n  %d blocking, %d advisory, %d unknown\n", fails, warns, unknown)
+	fmt.Fprintf(&b, "\n  %s, %s, %s\n",
+		tally(fails, "blocking", Bad), tally(warns, "advisory", Warn), tally(unknown, "unknown", Dim))
 
 	if hints := analyzer.FixHints(checks); len(hints) > 0 {
-		b.WriteString("\nFIX FIRST\n")
+		b.WriteString("\n" + Bad("FIX FIRST") + "\n")
 		for _, h := range hints {
 			fmt.Fprintf(&b, "  - %s\n", h)
 		}
@@ -65,6 +69,16 @@ func Environment(w io.Writer, checks []analyzer.SettingCheck, border bool) error
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// tally writes "3 blocking", coloured by what the number means. Zero stays plain: a
+// count of nothing is not a warning.
+func tally(n int, noun string, paint func(string) string) string {
+	text := fmt.Sprintf("%d %s", n, noun)
+	if n == 0 {
+		return text
+	}
+	return paint(text)
 }
 
 // statusMark is a short ASCII marker so the column scans vertically.

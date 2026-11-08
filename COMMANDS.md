@@ -108,6 +108,21 @@ The rules it follows:
 
 ---
 
+## Colour and the busy indicator
+
+Colour is presentation only: nothing in the plan, the JSON, or an exit code depends on
+it, and "BLOCKER" is still the word when the colour is gone.
+
+| Situation | Colour |
+|---|---|
+| stdout is a terminal, `NO_COLOR` unset, `TERM` not `dumb` | on |
+| piped, redirected, captured by `script`/CI | **off**, byte-for-byte the plain text |
+| `--no-color`, or `NO_COLOR=1` | off |
+
+The wizard animates a one-line spinner while it waits - connecting, reading a schema,
+planning - with elapsed time, so a slow server does not look like a hung one. It writes
+carriage returns, so it only runs on a terminal; a captured session gets nothing.
+
 ## Output width
 
 The plan card wraps to 96 columns by default so no line folds at random in a terminal.

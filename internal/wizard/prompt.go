@@ -96,12 +96,29 @@ func (t *Terminal) Secret(label string) (string, error) {
 // Choose shows a numbered menu and re-asks until the answer is one of the items.
 func (t *Terminal) Choose(label string, items []Item, def string) (string, error) {
 	t.Printf("\n%s\n", label)
+
+	// Columns come from the items, not from a fixed width: a fixed one leaves a
+	// ragged gutter as soon as a label is longer, and pads short menus with space
+	// nobody asked for. Notes are aligned only when some item has one.
+	keyW, labelW := 0, 0
+	notes := false
 	for _, it := range items {
-		if it.Note != "" {
-			t.Printf("  %-3s %-30s %s\n", it.Key, it.Label, it.Note)
-		} else {
-			t.Printf("  %-3s %s\n", it.Key, it.Label)
+		if len(it.Key) > keyW {
+			keyW = len(it.Key)
 		}
+		if len(it.Label) > labelW {
+			labelW = len(it.Label)
+		}
+		if it.Note != "" {
+			notes = true
+		}
+	}
+	for _, it := range items {
+		line := fmt.Sprintf("  %-*s  %-*s", keyW, it.Key, labelW, it.Label)
+		if notes && it.Note != "" {
+			line += "  " + it.Note
+		}
+		t.Printf("%s\n", strings.TrimRight(line, " "))
 	}
 	prompt := "choose"
 	if def != "" {

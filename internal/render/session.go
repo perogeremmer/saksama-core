@@ -36,7 +36,7 @@ func Session(w io.Writer, s *state.Session) error {
 	if blocked := storedFindings(s.Plan); len(blocked) > 0 {
 		b.WriteString("\nBLOCKERS\n")
 		for _, f := range blocked {
-			fmt.Fprintf(&b, "  [%s] %s\n", f.ID, f.Title)
+			fmt.Fprintf(&b, "  %s %s\n", Severity("BLOCKER"), Dim("["+f.ID+"]")+" "+f.Title)
 			if f.Detail != "" {
 				fmt.Fprintf(&b, "         %s\n", oneLine(f.Detail))
 			}
@@ -75,9 +75,9 @@ func Session(w io.Writer, s *state.Session) error {
 	if len(s.Verification) > 0 {
 		b.WriteString("\nVERIFICATION\n")
 		for _, v := range s.Verification {
-			mark := "ok  "
+			mark := Good("ok  ")
 			if !v.OK {
-				mark = "FAIL"
+				mark = Bad("FAIL")
 			}
 			fmt.Fprintf(&b, "  [%s] %-20s %s  %s\n", mark, v.Kind, v.Name, v.Detail)
 		}
