@@ -533,6 +533,9 @@ That is the failure mode this project exists to prevent, so each has a test.
 3. **Never widen an engine capability** without a versioned integration fixture.
 4. **The analyzer stays pure.** Database access belongs in `internal/introspect`.
 
+Where the deliberate gaps are - what was left out and why - lives in
+[NEXT.md](NEXT.md).
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
