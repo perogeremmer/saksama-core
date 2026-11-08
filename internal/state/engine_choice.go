@@ -140,7 +140,12 @@ func (s *Store) SetEngineChoice(c EngineChoice) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// The rename that publishes the choice is only durable once the directory
+	// entry itself is flushed.
+	return syncDir(s.dir)
 }
 
 func (s *Store) loadChoicePath(path string) (*EngineChoice, error) {

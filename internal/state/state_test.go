@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -219,5 +220,153 @@ func TestStateTerminal(t *testing.T) {
 		if st.Terminal() {
 			t.Errorf("%s should not be terminal", st)
 		}
+	}
+}
+
+// Two prepares arriving together cannot both believe they own the same name:
+// the claim is the file's creation, not an observation about it.
+func TestClaimIDIsAtomic(t *testing.T) {
+	s := newStore(t)
+	const n = 8
+	ids := make(chan string, n)
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			id, err := s.ClaimID()
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- id
+		}()
+	}
+	seen := map[string]bool{}
+	for i := 0; i < n; i++ {
+		select {
+		case id := <-ids:
+			if seen[id] {
+				t.Fatalf("id %s was handed out twice", id)
+			}
+			seen[id] = true
+		case err := <-errs:
+			t.Fatal(err)
+		}
+	}
+}
+
+// A lock past its stale window is still not stealable while the owning
+// session's engine process is alive: thirteen hours into a copy must not read
+// as "abandoned".
+func TestStaleLockRefusedWhileEngineLives(t *testing.T) {
+	s := newStore(t)
+	owner := &Session{ID: "s1", CreatedAt: time.Now().UTC().Format(time.RFC3339), EnginePID: os.Getpid()}
+	if err := s.Save(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Lock("shop", "orders", "s1", time.Nanosecond); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	err := s.Lock("shop", "orders", "s2", time.Nanosecond)
+	if err == nil {
+		t.Fatal("a lock with a live engine must not be stolen however old it is")
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// A corrupt session file vanishing from List is how a damaged record of a
+// half-finished migration disappears from reconcile. It must be findable.
+func TestUnreadableSurfacesCorruptSessions(t *testing.T) {
+	s := newStore(t)
+	sess := &Session{ID: "s1", CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if err := s.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.sessionPath("s2"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A zero-byte file is a claim that never became a session, not corruption.
+	if err := os.WriteFile(s.sessionPath("s3"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != "s1" {
+		t.Fatalf("list = %v", listed)
+	}
+	bad, err := s.Unreadable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) != 1 || bad[0] != "s2" {
+		t.Fatalf("unreadable = %v, want [s2]", bad)
+	}
+}
+
+// Appending after a writer crashed mid-line must not glue the next event onto
+// the fragment: both lines would be lost.
+func TestAppendEventsSeparatesPartialLine(t *testing.T) {
+	s := newStore(t)
+	if err := s.AppendEvents("s1", []byte(`{"seq":1,"type":"phase.started"`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvents("s1", []byte(`{"seq":2,"type":"phase.completed"}`+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := s.ReadEvents("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("the fragment and the event must stay their own lines, got %d: %q", len(lines), string(raw))
+	}
+}
+
+// Concurrent read-modify-write cycles through Update all land: the flock makes
+// a cancel from another terminal unable to erase what the running apply saved.
+func TestUpdateSerialisesReadModifyWrite(t *testing.T) {
+	s := newStore(t)
+	if err := s.Save(&Session{ID: "s1", CreatedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	const n = 12
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = s.Update("s1", func(sess *Session) error {
+				sess.Statements = append(sess.Statements, StatementRecord{Description: "x"})
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+	sess, err := s.Load("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Statements) != n {
+		t.Fatalf("%d of %d updates survived", len(sess.Statements), n)
+	}
+}
+
+func TestSaveWritesFormatVersion(t *testing.T) {
+	s := newStore(t)
+	if err := s.Save(&Session{ID: "s1", CreatedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.Load("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.FormatVersion != FormatVersion {
+		t.Fatalf("format_version = %d, want %d", sess.FormatVersion, FormatVersion)
 	}
 }
