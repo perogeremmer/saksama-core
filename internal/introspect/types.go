@@ -88,12 +88,19 @@ type Runtime struct {
 
 // FKCheck is the verifiable part of check A1: the character set of both sides of
 // a foreign key relationship.
+//
+// Verified separates "compared and compatible" from "never compared": a check
+// that read no columns has nothing to affirm, and an INFO line built on nothing
+// is a false promise.
 type FKCheck struct {
 	Constraint string         `json:"constraint"`
 	Direction  string         `json:"direction"` // outgoing | incoming
 	PeerTable  string         `json:"peer_table"`
 	Pairs      []FKColumnPair `json:"pairs"`
 	Compatible bool           `json:"compatible"`
+	// Verified is true only when at least one column pair was actually compared.
+	Verified bool   `json:"verified"`
+	Note     string `json:"note,omitempty"` // why verification did not happen
 }
 
 // FKColumnPair compares one column on each side of a constraint.

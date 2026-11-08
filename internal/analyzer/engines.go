@@ -558,6 +558,22 @@ func (a *AdviceInput) assessPtOSC() EngineAssessment {
 		x.require("MySQL 5.1 or newer", v.AtLeast(5, 1, 0), "server is "+v.String())
 	}
 
+	// pt-osc builds its own triggers to chunk the copy, so it refuses to run on
+	// a table that already has any - unless --preserve-triggers is passed, which
+	// Percona Toolkit has supported since 3.0.4. A plan that says "suitable" and
+	// fails at execution time would break the promise the plan makes.
+	if t.TriggersAny() {
+		supported := false
+		if bin := x.binary(in, "pt-online-schema-change", "install: "+PtOSCInstall); bin != nil && bin.Available {
+			if v, err := model.ParseVersion(bin.Version); err == nil {
+				supported = v.AtLeast(3, 0, 4)
+			}
+		}
+		x.require("existing triggers preservable", supported,
+			fmt.Sprintf("the table has %d trigger(s) of its own; pt-osc refuses that without --preserve-triggers (Percona Toolkit 3.0.4+)",
+				len(t.Triggers)))
+	}
+
 	// pt-osc 3.x copies foreign keys on the altered table; incoming constraints
 	// need an explicit method.
 	if len(t.ReferencedBy) > 0 {

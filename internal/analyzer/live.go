@@ -68,6 +68,10 @@ type FKCompat struct {
 	PeerTable   string
 	Compatible  bool
 	Description string
+	// Verified is false when nothing was compared - an unreadable peer table, or
+	// no text column pair to compare. A check that was never run is a warning,
+	// not an affirmation.
+	Verified bool
 }
 
 // The queries a remedy needs to be followable. Each was run against a real server
@@ -223,6 +227,19 @@ func liveChecks(in Input, projected model.Table) []Check {
 
 	// L7: verified foreign key charset compatibility (replaces offline A1).
 	for _, fk := range L.FKCompatibility {
+		// Order matters: an unverified check is a warning whatever its flag says,
+		// a verified pass is info, and only a verified mismatch is a blocker.
+		if !fk.Verified {
+			out = append(out, Check{
+				ID: "A1", Severity: SeverityWarn,
+				Title:  "foreign key charset could not be verified",
+				Detail: fmt.Sprintf("constraint %q (%s %s): %s", fk.Constraint, fk.Direction, fk.PeerTable, fk.Description),
+				Remediation: "verify it yourself: " +
+					"SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLUMNS" +
+					" WHERE TABLE_NAME IN ('<fk_table>', '<parent_table>')",
+			})
+			continue
+		}
 		if fk.Compatible {
 			out = append(out, Check{
 				ID: "A1", Severity: SeverityInfo,
