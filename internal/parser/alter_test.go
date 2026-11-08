@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/perogeremmer/saksama-core/internal/model"
+	"strings"
 )
 
 func TestParseAlterAddIndex(t *testing.T) {
@@ -227,5 +228,37 @@ func TestParseAlterCharsetForms(t *testing.T) {
 	}
 	if a.Ops[0].Collation != "utf8mb4_0900_ai_ci" {
 		t.Fatalf("bad collation: %q", a.Ops[0].Collation)
+	}
+}
+
+// Whatever the tokenizer decodes must survive the round trip back to SQL: the
+// regenerated op.Raw is the text the native engine embeds and the copy engines
+// receive as --alter. Re-quoting the decoded value would break both.
+func TestRenderedSQLSurvivesEscapes(t *testing.T) {
+	cases := []struct{ name, alter, mustContain string }{
+		{"doubled quote in default", "ALTER TABLE t MODIFY COLUMN name varchar(64) NOT NULL DEFAULT 'O''Brien'", `'O''Brien'`},
+		{"backslash escape in default", "ALTER TABLE t MODIFY COLUMN name varchar(64) NOT NULL DEFAULT 'a\\nb'", `'a\nb'`},
+		{"doubled backtick in identifier", "ALTER TABLE t ADD INDEX `a``b` (`id`)", "`a``b`"},
+		{"plain default unchanged", "ALTER TABLE t ADD COLUMN note varchar(64) DEFAULT 'hello'", `'hello'`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, err := ParseAlter(c.alter)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(a.Ops) != 1 {
+				t.Fatalf("got %d ops", len(a.Ops))
+			}
+			if !strings.Contains(a.Ops[0].Raw, c.mustContain) {
+				t.Fatalf("regenerated SQL lost the source text:\nwant substring %q in:\n%s", c.mustContain, a.Ops[0].Raw)
+			}
+			// The broken re-renderings must not appear.
+			for _, bad := range []string{"'O'Brien'", "`a`b`"} {
+				if strings.Contains(a.Ops[0].Raw, bad) {
+					t.Fatalf("regenerated SQL contains broken quoting %q:\n%s", bad, a.Ops[0].Raw)
+				}
+			}
+		})
 	}
 }
