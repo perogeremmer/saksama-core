@@ -72,9 +72,9 @@ func engineBlock(a analyzer.EngineAssessment) string {
 
 	if len(a.Requirements) > 0 {
 		for _, r := range a.Requirements {
-			mark := "  ok"
+			mark := Good("  ok")
 			if !r.Met {
-				mark = "FAIL"
+				mark = Bad("FAIL")
 			}
 			fmt.Fprintf(&b, "  [%s] %-33s %s\n", mark, r.Name, r.Detail)
 		}
@@ -82,9 +82,9 @@ func engineBlock(a analyzer.EngineAssessment) string {
 	if len(a.Environment) > 0 {
 		b.WriteString("  server prerequisites:\n")
 		for _, r := range a.Environment {
-			mark := "  ok"
+			mark := Good("  ok")
 			if !r.Met {
-				mark = "FAIL"
+				mark = Bad("FAIL")
 			}
 			fmt.Fprintf(&b, "  [%s] %-33s %s\n", mark, r.Name, r.Detail)
 		}

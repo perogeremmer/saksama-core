@@ -251,24 +251,26 @@ func dbfFlags(database, table string) string {
 	return s
 }
 
+// verdictCell says whether the engine suits this table, coloured now that the
+// table measures visible width instead of bytes.
 func verdictCell(v analyzer.Verdict) string {
 	switch v {
 	case analyzer.VerdictSuitable:
-		return "yes"
+		return Good("yes")
 	case analyzer.VerdictUnsuitable:
-		return "no"
+		return Bad("no")
 	}
 	return "?"
 }
 
 func rebuildCell(r analyzer.TableAssessment) string {
 	if r.RebuildEngine == analyzer.EngineNone {
-		return "none"
+		return Dim("none")
 	}
 	if !r.RebuildReady {
 		// A cell that reads "gh-ost" while the binary is missing is the tool
 		// recommending something it cannot run.
-		return string(r.RebuildEngine) + " (unavailable)"
+		return string(r.RebuildEngine) + Warn(" (unavailable)")
 	}
 	return string(r.RebuildEngine)
 }
