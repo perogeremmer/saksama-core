@@ -99,22 +99,24 @@ func (t *Terminal) Choose(label string, items []Item, def string) (string, error
 
 	// Columns come from the items, not from a fixed width: a fixed one leaves a
 	// ragged gutter as soon as a label is longer, and pads short menus with space
-	// nobody asked for. Notes are aligned only when some item has one.
+	// nobody asked for. Widths are measured in runes - table names can be
+	// multi-byte, and fmt's %-Ns pads by bytes. Notes are aligned only when some
+	// item has one.
 	keyW, labelW := 0, 0
 	notes := false
 	for _, it := range items {
-		if len(it.Key) > keyW {
-			keyW = len(it.Key)
+		if r := len([]rune(it.Key)); r > keyW {
+			keyW = r
 		}
-		if len(it.Label) > labelW {
-			labelW = len(it.Label)
+		if r := len([]rune(it.Label)); r > labelW {
+			labelW = r
 		}
 		if it.Note != "" {
 			notes = true
 		}
 	}
 	for _, it := range items {
-		line := fmt.Sprintf("  %-*s  %-*s", keyW, it.Key, labelW, it.Label)
+		line := "  " + runePad(it.Key, keyW) + "  " + runePad(it.Label, labelW)
 		if notes && it.Note != "" {
 			line += "  " + it.Note
 		}
@@ -141,6 +143,16 @@ func (t *Terminal) Choose(label string, items []Item, def string) (string, error
 		}
 		t.Printf("  %q is not one of the choices\n", line)
 	}
+}
+
+// runePad pads s with spaces to n visible runes, which is what fmt's %-Ns
+// would do if it counted characters instead of bytes.
+func runePad(s string, n int) string {
+	pad := n - len([]rune(s))
+	if pad <= 0 {
+		return s
+	}
+	return s + strings.Repeat(" ", pad)
 }
 
 // Confirm asks a yes/no question. The default is shown in the prompt, so an

@@ -374,6 +374,10 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 			return ExitBlocked
 		}
 		fmt.Fprintf(stderr, "saksama apply: %v\n", err)
+		// A mistyped --session id is fixable by the operator; anything else is not.
+		if errors.Is(err, state.ErrSessionNotFound) {
+			return ExitUsage
+		}
 		return ExitInternal
 	}
 	return ExitOK
@@ -416,6 +420,9 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 			_ = enc.Encode(sessions)
 			return ExitOK
 		}
+		if len(sessions) == 0 && unreadableNote(store, stdout) {
+			return ExitOK
+		}
 		if len(sessions) == 0 {
 			fmt.Fprintln(stdout, "no sessions recorded")
 			return ExitOK
@@ -432,13 +439,16 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 			table.Add(s.ID, describeState(s), s.Database+"."+s.Table, s.Engine, s.Alter, s.CreatedAt)
 		}
 		_ = table.Render(stdout)
+		// A session that exists but cannot be read is the record of a migration
+		// that may have left things behind. Hiding it would make this list lie.
+		unreadableNote(store, stdout)
 		return ExitOK
 	}
 
 	sess, err := store.Load(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama status: %v\n", err)
-		return ExitUsage
+		return classifyStoreError(err)
 	}
 	if *jsonOut {
 		enc := json.NewEncoder(stdout)
@@ -451,6 +461,18 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return ExitBlocked
 	}
 	return ExitOK
+}
+
+// unreadableNote prints one line for each session file that cannot be parsed,
+// and reports whether anything was printed.
+func unreadableNote(store *state.Store, stdout io.Writer) bool {
+	bad, err := store.Unreadable()
+	if err != nil || len(bad) == 0 {
+		return false
+	}
+	fmt.Fprintf(stdout, "%d session file(s) cannot be read: %s\n", len(bad), strings.Join(bad, ", "))
+	fmt.Fprintf(stdout, "their migrations may have left things behind; inspect %s directly\n", store.Dir())
+	return true
 }
 
 func describeState(s *state.Session) string {
@@ -481,7 +503,7 @@ func cmdEvents(args []string, stdout, stderr io.Writer) int {
 	data, err := store.ReadEvents(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama events: %v\n", err)
-		return ExitUsage
+		return classifyStoreError(err)
 	}
 	if _, err := stdout.Write(data); err != nil {
 		return ExitInternal
@@ -519,12 +541,12 @@ func cmdExport(args []string, stdout, stderr io.Writer) int {
 	sess, err := store.Load(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama export: %v\n", err)
-		return ExitUsage
+		return classifyStoreError(err)
 	}
 	raw, err := store.ReadEvents(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama export: %v\n", err)
-		return ExitUsage
+		return classifyStoreError(err)
 	}
 
 	doc := exportDoc{

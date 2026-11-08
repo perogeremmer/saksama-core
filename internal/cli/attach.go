@@ -67,7 +67,7 @@ func cmdAttach(args []string, stdout, stderr io.Writer) int {
 		stored, err := stream.Read(path)
 		if err != nil {
 			fmt.Fprintf(stderr, "saksama attach: %v\n", err)
-			return ExitInternal
+			return classifyStoreError(err)
 		}
 		for _, ev := range stored {
 			show(ev)
@@ -81,21 +81,46 @@ func cmdAttach(args []string, stdout, stderr io.Writer) int {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	stopped := make(chan struct{})
 	defer close(stopped)
+	defer signal.Stop(sig)
 	go func() {
 		select {
 		case <-sig:
 			cancel()
+			// The first interrupt detaches; a second one means the operator wants
+			// out even if the read loop is momentarily stuck. With Notify still
+			// registered and the handler goroutine gone, the signal would land in
+			// a channel nobody reads and there would be no escape but kill -9.
+			signal.Stop(sig)
+			<-sig
+			os.Exit(ExitInternal)
 		case <-stopped:
 		}
 	}()
 
 	s := stream.Follow(ctx, path, *since)
+	ended := false
 	for ev := range s.Events {
 		show(ev)
+		switch ev.Type {
+		case events.TypeSessionCompleted, events.TypeSessionFailed, events.TypeSessionCancelled:
+			// The migration has told its whole story. Ending here is what a
+			// consumer of --json needs - a CI step piping this command must not
+			// wait forever after the session is over - and a plain-text reader
+			// loses nothing by returning instead of waiting for ctrl-c.
+			ended = true
+		}
+		if ended {
+			cancel()
+			break
+		}
 	}
 	if err, ok := <-s.Err; ok && err != nil {
+		// A typo in the session id is the operator's to fix; anything else is ours.
 		fmt.Fprintf(stderr, "saksama attach: %v\n", err)
-		return ExitInternal
+		return classifyStoreError(err)
+	}
+	if ended {
+		return ExitOK
 	}
 
 	// Ctrl-C detaches; it does not stop anything on the server.
@@ -132,24 +157,33 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 	res, err := runner.Cancel(context.Background(), positional[0], *force)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama cancel: %v\n", err)
-		return ExitUsage
+		return classifyStoreError(err)
+	}
+
+	// The exit code is decided by the outcome, before the output mode chooses how
+	// the outcome is described: --json and plain text must be one contract.
+	code := ExitOK
+	switch res.Outcome {
+	case core.CancelNoEngine, core.CancelNotRunning:
+		code = ExitUsage
 	}
 
 	if *jsonOut {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(res)
-		return ExitOK
+		return code
 	}
 
 	fmt.Fprintln(stdout, res.Note)
+	if code != ExitOK {
+		return code
+	}
 	switch res.Outcome {
 	case core.CancelStopped:
 		fmt.Fprintln(stdout, "the production table was not swapped if the engine had not cut over yet.")
 		fmt.Fprintf(stdout, "check for leftovers: saksama status %s\n", res.ID)
 		fmt.Fprintf(stdout, "remove them once you have checked: saksama cleanup %s\n", res.ID)
-	case core.CancelNoEngine, core.CancelNotRunning:
-		return ExitUsage
 	}
 	return ExitOK
 }

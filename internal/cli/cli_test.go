@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/perogeremmer/saksama-core/internal/state"
 )
@@ -861,5 +862,79 @@ func TestOfflineAdviseDoesNotMentionLive(t *testing.T) {
 	Run([]string{"advise", "--mysql-version", "8.0.36", "-a", "ADD INDEX ix (a)"}, &out, &errOut)
 	if strings.Contains(errOut.String(), "connects to a server") {
 		t.Fatalf("offline advice should not talk about live mode:\n%s", errOut.String())
+	}
+}
+
+// attach --json is a machine contract: a consumer piping it must not wait
+// forever after the session has ended. The terminal event ends the stream.
+func TestAttachJSONEndsWithTheSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SAKSAMA_STATE_DIR", dir)
+
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(&state.Session{ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateDone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvents("s1", []byte(
+		`{"contract_version":1,"seq":1,"type":"phase.started","session":"s1"}`+"\n"+
+			`{"contract_version":1,"seq":2,"type":"session.completed","session":"s1"}`+"\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	var code int
+	var out, errOut string
+	go func() {
+		code, out, errOut = run(t, "attach", "s1", "--json")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("attach --json did not end with the session; a piped consumer would hang")
+	}
+	if code != ExitOK {
+		t.Fatalf("exit %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, `"session.completed"`) {
+		t.Fatalf("expected the terminal event in the output: %s", out)
+	}
+}
+
+// A session id that does not exist is the operator's typo, and every command
+// answers it with the same exit code.
+func TestMissingSessionIsAUsageErrorEverywhere(t *testing.T) {
+	t.Setenv("SAKSAMA_STATE_DIR", t.TempDir())
+	for _, cmd := range [][]string{
+		{"status", "s9"},
+		{"attach", "s9", "--follow=false"},
+		{"export", "s9"},
+		{"cancel", "s9"},
+		{"cutover", "s9"},
+	} {
+		code, _, errOut := run(t, cmd...)
+		if code != ExitUsage {
+			t.Errorf("%v: exit %d, want %d (usage); stderr: %s", cmd, code, ExitUsage, errOut)
+		}
+	}
+}
+
+// A corrupt session file must not vanish from the list: it is the record of a
+// migration that may have left things behind.
+func TestStatusSurfacesUnreadableSessions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SAKSAMA_STATE_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "s2.session.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := run(t, "status")
+	if code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "s2") || !strings.Contains(out, "cannot be read") {
+		t.Fatalf("the unreadable session must be named:\n%s", out)
 	}
 }

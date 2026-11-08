@@ -875,7 +875,11 @@ func (w *Wizard) apply() {
 			req.AcceptUnknownMDL = true
 			preview, err = w.b.Analyze(context.Background(), req)
 			if err != nil || preview == nil {
-				preview = &core.Prepared{Plan: analyzer.Plan{Recommendation: analyzer.Recommendation{Blockers: 1}}}
+				// Fabricating a blocker count here would refuse the run with a
+				// message nobody can act on. The re-read is the thing that proves
+				// the acceptance took effect; if it cannot be read, say that.
+				w.fail(fmt.Errorf("could not re-read the plan after accepting the risk: %v", err))
+				return
 			}
 		}
 		if preview.Plan.Recommendation.Blockers > 0 && w.allowNativeRebuild(preview.Plan) {
@@ -884,7 +888,20 @@ func (w *Wizard) apply() {
 	}
 	w.p.Printf("\nequivalent: %s\n", req.CommandLineFor("apply"))
 
-	res, err := w.b.ApplyFromSession(context.Background(), id, req)
+	// Ctrl-C takes the same path menu option 2 does: the engine is asked to stop
+	// (SIGTERM, its own cleanup), the session is marked cancelled, and the shadow
+	// objects stay owned and named. Without this, the signal killed both this
+	// process and the engine, skipped every deferred cleanup, and left the
+	// session saying "running" while nothing was.
+	ctx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignal()
+	go func() {
+		<-ctx.Done()
+		_, _ = w.b.Cancel(context.Background(), id, false)
+	}()
+
+	res, err := w.b.ApplyFromSession(ctx, id, req)
+	stopSignal()
 	if stopBusy != nil {
 		stopBusy()
 	}
@@ -1041,6 +1058,11 @@ func (w *Wizard) follow(id string) {
 	for ev := range s.Events {
 		w.printEvent(ev)
 	}
+	if err, ok := <-s.Err; ok && err != nil {
+		// A missing log is not "the migration stopped": it is a typo or a deleted
+		// file, and silence would have said the former.
+		w.p.Printf("\ncould not follow: %v\n", err)
+	}
 	w.p.Printf("\n(stopped following; the migration itself is unaffected)\n")
 }
 
@@ -1117,12 +1139,14 @@ func defaultOf(v, def string) string {
 	return v
 }
 
+// shorten truncates in runes: SQL text and notes can carry non-ASCII, and
+// cutting a multi-byte rune in half turns the menu into mojibake.
 func shorten(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= n {
+	if len([]rune(s)) <= n {
 		return s
 	}
-	return s[:n-1] + "~"
+	return string([]rune(s)[:n-1]) + "~"
 }
 
 func humanCount(n int64) string {

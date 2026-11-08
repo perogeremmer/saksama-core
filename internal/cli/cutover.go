@@ -40,7 +40,9 @@ func cmdCutover(args []string, stdout, stderr io.Writer) int {
 	sess, err := runner.ReleaseCutover(context.Background(), id)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama cutover: %v\n", err)
-		return ExitUsage
+		// A refused release is usually the state doing its job, not a typo; only
+		// a missing session is the operator's to fix.
+		return classifyStoreError(err)
 	}
 
 	fmt.Fprintf(stdout, "cutover released for session %s\n", id)
