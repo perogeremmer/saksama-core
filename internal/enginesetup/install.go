@@ -65,7 +65,10 @@ func Install(ctx context.Context, m Manifest, opts InstallOptions) (InstallResul
 			return InstallResult{}, err
 		}
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700, not 0755: a world-writable install directory would let another local
+	// user swap the payload between the hash check and the rename, and everything
+	// this directory holds will be executed.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return InstallResult{}, fmt.Errorf("cannot create %s: %w", dir, err)
 	}
 
@@ -92,6 +95,17 @@ func Install(ctx context.Context, m Manifest, opts InstallOptions) (InstallResul
 	}
 	if digest != want {
 		return InstallResult{}, fmt.Errorf("%s hashes to %s, but %s says %s; nothing was installed", m.URL, digest, source, want)
+	}
+
+	// The digest above was taken over the wire, from the stream as it was read.
+	// Re-reading the file from disk right before anything is extracted from it
+	// closes the window in between: what gets extracted is what got verified.
+	onDisk, err := fileDigest(download)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if onDisk != digest {
+		return InstallResult{}, fmt.Errorf("the downloaded bytes changed between verification and use; nothing was installed")
 	}
 
 	payload := download
@@ -261,4 +275,18 @@ func reportedVersion(ctx context.Context, path string, m Manifest) (string, erro
 		return "", fmt.Errorf("%s --version printed no version: %s", path, firstLine(strings.TrimSpace(string(raw))))
 	}
 	return v, nil
+}
+
+// fileDigest returns the sha256 of whatever is on disk at path.
+func fileDigest(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot reopen %s for verification: %w", path, err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("cannot hash %s: %w", path, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

@@ -494,3 +494,43 @@ func TestUnknownDistributionGuessesNothing(t *testing.T) {
 		}
 	}
 }
+
+// The install directory holds executables, and the install creates it. A
+// directory anyone can write to would let another local user swap the payload
+// between the hash check and the rename.
+func TestInstallDirectoryIsPrivateToTheUser(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake engine is a shell script")
+	}
+	payload := fakeEngine(t, "gh-ost", "9.9.9")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gh-ost-linux-amd64.tar.gz":
+			w.Write(payload)
+		case "/SHA256SUMS":
+			fmt.Fprintf(w, "%s  gh-ost-linux-amd64.tar.gz\n", digestOf(payload))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	base := t.TempDir()
+	dir := filepath.Join(base, "bin") // Install creates it
+	m := Manifest{
+		Engine: GhOst, Binary: GhOstBinary, Version: "9.9.9",
+		URL:     srv.URL + "/gh-ost-linux-amd64.tar.gz",
+		SumsURL: srv.URL + "/SHA256SUMS",
+		Archive: GhOstBinary,
+	}
+	if _, err := Install(context.Background(), m, InstallOptions{Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o700 {
+		t.Fatalf("bin dir mode = %#o, want 0700", mode)
+	}
+}
