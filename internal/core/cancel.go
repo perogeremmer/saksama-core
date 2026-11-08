@@ -69,6 +69,15 @@ func (r *Runner) Cancel(ctx context.Context, sessionID string, force bool) (Canc
 			sess.ID)
 		return res, nil
 	}
+	if !process.IsEngine(sess.EnginePID, sess.EngineIdentity) {
+		// The number was reused for someone else's process. Signalling it would
+		// be worse than admitting the engine cannot be found.
+		res.Outcome = CancelNotRunning
+		res.Note = fmt.Sprintf(
+			"pid %d no longer answers to the recorded engine command; refusing to signal an unknown process. "+
+				"Run `saksama reconcile` to see what is left.", sess.EnginePID)
+		return res, nil
+	}
 	if !process.Alive(sess.EnginePID) {
 		// Not a success and not a failure: the session is in exactly the state
 		// `reconcile` exists for. Guessing here would hide that.
@@ -94,21 +103,27 @@ func (r *Runner) Cancel(ctx context.Context, sessionID string, force bool) (Canc
 		return res, err
 	}
 
-	sess.State = state.StateCancelled
-	sess.Phase = "cancelled"
-	sess.Error = fmt.Sprintf("cancelled by %s at %s", actorOrUnknown(sess), time.Now().UTC().Format(time.RFC3339))
-	sess.MarkArtifactsSafe("leftover from a cancelled migration; the production table was not swapped")
-	r.recordEvent(sess, events.TypeSessionCancelled, map[string]any{
-		"pid":    sess.EnginePID,
-		"actor":  actorOrUnknown(sess),
-		"reason": "stopped by operator",
+	// The running apply saves at every phase boundary. Going through Update
+	// means this cancel cannot erase a save that landed between our Load and
+	// our write - it re-reads what is actually on disk, under the lock.
+	err = r.Store.Update(sessionID, func(sess *state.Session) error {
+		sess.State = state.StateCancelled
+		sess.Phase = "cancelled"
+		sess.Error = fmt.Sprintf("cancelled by %s at %s", actorOrUnknown(sess), time.Now().UTC().Format(time.RFC3339))
+		sess.MarkArtifactsSafe("leftover from a cancelled migration; the production table was not swapped")
+		r.recordEvent(sess, events.TypeSessionCancelled, map[string]any{
+			"pid":    sess.EnginePID,
+			"actor":  actorOrUnknown(sess),
+			"reason": "stopped by operator",
+		})
+		return nil
 	})
-	if err := r.Store.Save(sess); err != nil {
+	if err != nil {
 		return res, err
 	}
 
 	res.Outcome = CancelStopped
-	res.State = sess.State
+	res.State = state.StateCancelled
 	res.ForceKilled = forceKilled
 	if forceKilled {
 		res.Note = fmt.Sprintf(

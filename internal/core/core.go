@@ -245,7 +245,9 @@ func (r *Runner) Prepare(ctx context.Context, req Request) (*Prepared, error) {
 	}
 	snap, plan := p.Snapshot, p.Plan
 
-	id, err := r.Store.NextID()
+	// The id is claimed by creating its file, so two concurrent prepares cannot
+	// both be told s1 is free and then interleave their audit trails.
+	id, err := r.Store.ClaimID()
 	if err != nil {
 		return nil, err
 	}
@@ -365,6 +367,10 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		sess.CutoverFlagFile = cutoverGate
 		sess.RecordArtifact("gate", cutoverGate, string(plan.Recommendation.Engine),
 			"cutover gate file; removing it releases the swap")
+		// The gate must outlive the engine - it is what the engine waits on - but
+		// not the run. This catches every early return below; the paths that save
+		// a session also clean the gate before saving, so the record matches /tmp.
+		defer cleanupGate(sess)
 	}
 
 	opts := engine.Options{
@@ -393,6 +399,9 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 		_ = r.Store.Save(sess)
 		return sess, err
 	}
+	// Whatever happens from here - approval declined, dry run, a failed start -
+	// nothing the engine staged for this run may outlive it.
+	defer cleanupStaged(eng)
 	statements, err := eng.Statements()
 	if err != nil {
 		sess.State = state.StateFailed
@@ -423,6 +432,9 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 			Host:            req.Conn.Describe(),
 		})
 		if err != nil {
+			// No engine was started, so the gate it never waited on must go now,
+			// before the session is saved without it.
+			cleanupGate(sess)
 			sess.State = state.StateCancelled
 			sess.Error = "approval declined"
 			_ = r.Store.Save(sess)
@@ -437,6 +449,9 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	}
 
 	if req.DryRun {
+		// Nothing will wait on the gate, so a dry run must not leave one behind:
+		// the next `cutover` would look meaningful and mean nothing.
+		cleanupGate(sess)
 		sess.State = state.StatePlanned
 		sess.LastSeq = prep.emitter.Seq()
 		_ = r.Store.Save(sess)
@@ -444,6 +459,7 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	}
 
 	if err := r.Store.Lock(req.Database, req.Table, sess.ID, 12*time.Hour); err != nil {
+		cleanupGate(sess)
 		sess.State = state.StateFailed
 		sess.Error = err.Error()
 		sess.LastSeq = prep.emitter.Seq()
@@ -489,8 +505,9 @@ func (r *Runner) Apply(ctx context.Context, req Request) (*state.Session, error)
 	// it, and `cancel` from another terminal should find it. Detaching only changes
 	// who owns the process group, not whether the process has an identity.
 	if d, ok := eng.(engine.Detachable); ok {
-		d.SetDetach(req.Detach, func(pid int) {
+		d.SetDetach(req.Detach, func(pid int, identity string) {
 			sess.EnginePID = pid
+			sess.EngineIdentity = identity
 			sess.LastSeq = prep.emitter.Seq()
 			_ = r.Store.Save(sess)
 			note := "closing this terminal stops the engine"
@@ -643,7 +660,12 @@ func liveStateFrom(snap introspect.Snapshot, duplicates map[string]int64) *analy
 	for _, fk := range snap.FKChecks {
 		compat := analyzer.FKCompat{
 			Constraint: fk.Constraint, Direction: fk.Direction,
-			PeerTable: fk.PeerTable, Compatible: fk.Compatible,
+			PeerTable: fk.PeerTable, Compatible: fk.Compatible, Verified: fk.Verified,
+		}
+		if compat.Description == "" && fk.Note != "" {
+			// The warn branch needs a reason; the unreadable peer or the skipped
+			// pairs are the reason.
+			compat.Description = fk.Note
 		}
 		if !fk.Compatible {
 			var diffs []string
@@ -850,6 +872,14 @@ func recordExpectedArtifacts(sess *state.Session, eng analyzer.Engine, req Reque
 		for _, suffix := range []string{"_ins", "_upd", "_del"} {
 			sess.RecordArtifact("trigger", "pt_osc_"+req.Database+"_"+t+suffix, "pt-osc", "copy trigger")
 		}
+	}
+}
+
+// cleanupStaged removes what the engine staged for this run, on every exit
+// path. Engines that stage nothing simply do not implement the interface.
+func cleanupStaged(eng engine.Engine) {
+	if c, ok := eng.(engine.Cleaner); ok {
+		c.Cleanup()
 	}
 }
 

@@ -68,10 +68,12 @@ func (r *Runner) reconcileSessions(ctx context.Context, sessions []*state.Sessio
 		terminal := sess.State.Terminal()
 
 		f := Finding{
-			Session:     sess.ID,
-			Table:       sess.Database + "." + sess.Table,
-			State:       sess.State,
-			EngineAlive: process.Alive(sess.EnginePID),
+			Session: sess.ID,
+			Table:   sess.Database + "." + sess.Table,
+			State:   sess.State,
+			// Alive means the number is in use; ours means it still answers to the
+			// command line that was recorded. A reused pid is not the engine.
+			EngineAlive: process.Alive(sess.EnginePID) && process.IsEngine(sess.EnginePID, sess.EngineIdentity),
 		}
 
 		// What does the database actually show for the objects this session owns?

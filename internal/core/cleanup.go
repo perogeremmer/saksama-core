@@ -85,15 +85,26 @@ func (r *Runner) Cleanup(ctx context.Context, sessionID string, dryRun bool) (Cl
 		}
 		res.Items[i].Dropped = true
 		dropped++
-		sess.ForgetsArtifact(a.Kind, a.Name)
+		// Ownership is forgotten under the lock below, together with the event.
 	}
 
-	r.recordEvent(sess, events.TypeSessionState, map[string]any{
-		"state": sess.State,
-		"note":  fmt.Sprintf("cleanup dropped %d of %d artifact(s)", dropped, len(res.Items)),
-		"actor": actorOrUnknown(sess),
+	// The record mutation goes through Update: the drop loop ran outside the
+	// session's file lock, and a save from another command may have landed in
+	// the meantime. Re-reading under the lock keeps the artifact list honest.
+	err = r.Store.Update(sessionID, func(sess *state.Session) error {
+		for i := range res.Items {
+			if res.Items[i].Dropped && res.Items[i].Err == "" {
+				sess.ForgetsArtifact(res.Items[i].Kind, res.Items[i].Name)
+			}
+		}
+		r.recordEvent(sess, events.TypeSessionState, map[string]any{
+			"state": sess.State,
+			"note":  fmt.Sprintf("cleanup dropped %d of %d artifact(s)", dropped, len(res.Items)),
+			"actor": actorOrUnknown(sess),
+		})
+		return nil
 	})
-	if err := r.Store.Save(sess); err != nil {
+	if err != nil {
 		return res, err
 	}
 	return res, nil
