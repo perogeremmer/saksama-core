@@ -304,6 +304,12 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		return ExitInternal
 	}
 
+	// The run can go quiet for minutes: before the copy starts, while a cutover
+	// lock is held, while the session is polled. The indicator covers those
+	// silences with the one-line marker the wizard uses on connect and plan, and
+	// the progress lines keep their own lines through it. Only a terminal gets the
+	// moving frame; a captured run gets the lines it always got.
+	busy := render.NewBusy(stderr, !o.jsonOut && render.IsTerminal(stderr))
 	runner := core.New(db, store)
 	req := core.Request{
 		Conn:                   conn,
@@ -327,7 +333,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		Binaries:               binariesOrNil(*noProbe),
 		Progress: func(p engine.Progress) {
 			if !o.jsonOut && p.Note != "" {
-				fmt.Fprintf(stderr, "  [%5.1f%%] %s\n", p.Percent, p.Note)
+				busy.Line("  [%5.1f%%] %s", p.Percent, p.Note)
 			}
 		},
 	}
@@ -341,6 +347,11 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 		}, nil
 	}
 
+	label := "applying " + o.database + "." + o.table
+	if o.session != "" {
+		label = "running session " + o.session
+	}
+	stopBusy := busy.Start(label)
 	var sess *state.Session
 	if o.session != "" {
 		// A stored plan already names its engine; --engine still wins.
@@ -348,6 +359,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	} else {
 		sess, err = runner.Apply(context.Background(), req)
 	}
+	stopBusy()
 	if sess != nil {
 		if o.jsonOut {
 			enc := json.NewEncoder(stdout)

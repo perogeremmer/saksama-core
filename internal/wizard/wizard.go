@@ -821,6 +821,19 @@ func (w *Wizard) apply() {
 		}
 	}
 
+	// The indicator covers the quiet stretches of the run - before the copy
+	// starts, while a cutover lock is held - and the progress lines keep their
+	// own lines through it. It starts only after the approval prompt, because a
+	// question and a moving frame cannot share a line.
+	busy := render.NewBusy(w.out, w.animate)
+	var stopBusy func()
+	startBusy := func() {
+		if stopBusy != nil {
+			stopBusy()
+		}
+		stopBusy = busy.Start("running " + sess.Database + "." + sess.Table)
+	}
+
 	req := core.Request{
 		Conn:                   w.conn,
 		Database:               sess.Database,
@@ -834,9 +847,17 @@ func (w *Wizard) apply() {
 		ResumedFrom:            id,
 		FreeDisk:               w.freeDisk,
 		DiskTotal:              w.diskTotal,
-		Approve:                w.approve,
+		Approve: func(ar core.ApprovalRequest) (state.Approval, error) {
+			ap, err := w.approve(ar)
+			if err == nil {
+				startBusy()
+			}
+			return ap, err
+		},
 		Progress: func(p engine.Progress) {
-			w.p.Printf("  [%5.1f%%] %s\n", p.Percent, p.Note)
+			if p.Note != "" {
+				busy.Line("  [%5.1f%%] %s", p.Percent, p.Note)
+			}
 		},
 	}
 
@@ -864,6 +885,9 @@ func (w *Wizard) apply() {
 	w.p.Printf("\nequivalent: %s\n", req.CommandLineFor("apply"))
 
 	res, err := w.b.ApplyFromSession(context.Background(), id, req)
+	if stopBusy != nil {
+		stopBusy()
+	}
 	if res != nil {
 		_ = render.Session(w.out, res)
 	}
