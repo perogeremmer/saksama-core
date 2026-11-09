@@ -508,32 +508,41 @@ echo "DROP statements : $DROP_COUNT"
 # --- RECREATE FK ---
 > /tmp/fk_recreate.sql
 
-CHILD_TABLES=$($MYSQL --batch --skip-column-names -e "
-SELECT DISTINCT TABLE_NAME
-FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
-WHERE CONSTRAINT_SCHEMA = '$DB'
-  AND (TABLE_NAME = '$TABLE' OR REFERENCED_TABLE_NAME = '$TABLE');
-")
-
-if [ -n "$CHILD_TABLES" ]; then
-    echo "$CHILD_TABLES" | while read -r child; do
-        [ -z "$child" ] && continue
-
-        ddl=$($MYSQL --batch --skip-column-names -e "SHOW CREATE TABLE \`$DB\`.\`$child\`\G" 2>/dev/null | tail -n +2)
-
-        if [ "$child" = "$TABLE" ]; then
-            echo "$ddl" | grep -oP "CONSTRAINT \x60[^\x60]+\x60 FOREIGN KEY\s*\([^)]+\)\s*REFERENCES \x60[^\x60]+\x60\s*\([^)]+\)" | \
-                while read -r fk; do
-                    echo "ALTER TABLE \`$DB\`.\`$child\` ADD $fk;" >> /tmp/fk_recreate.sql
-                done
-        else
-            echo "$ddl" | grep -oP "CONSTRAINT \x60[^\x60]+\x60 FOREIGN KEY\s*\([^)]+\)\s*REFERENCES \x60${TABLE}\x60\s*\([^)]+\)" | \
-                while read -r fk; do
-                    echo "ALTER TABLE \`$DB\`.\`$child\` ADD $fk;" >> /tmp/fk_recreate.sql
-                done
-        fi
-    done
-fi
+# The definitions come from information_schema, not from grepping SHOW CREATE
+# TABLE: the old regex stopped at the referenced column list and silently threw
+# away ON DELETE / ON UPDATE, so the recreate script re-added every constraint
+# weaker than it was. UPDATE_RULE and DELETE_RULE come straight out of
+# REFERENTIAL_CONSTRAINTS, one row per constraint, columns in declared order.
+$MYSQL --batch --skip-column-names -e "
+SELECT CONCAT(
+    'ALTER TABLE \`', kcu.CONSTRAINT_SCHEMA, '\`.\`', kcu.TABLE_NAME, '\`',
+    ' ADD CONSTRAINT \`', kcu.CONSTRAINT_NAME, '\` FOREIGN KEY (',
+    (SELECT GROUP_CONCAT(CONCAT('\`', k2.COLUMN_NAME, '\`') ORDER BY k2.ORDINAL_POSITION SEPARATOR ', ')
+       FROM information_schema.KEY_COLUMN_USAGE k2
+      WHERE k2.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+        AND k2.CONSTRAINT_NAME   = kcu.CONSTRAINT_NAME
+        AND k2.TABLE_NAME        = kcu.TABLE_NAME),
+    ') REFERENCES \`', kcu.REFERENCED_TABLE_NAME, '\` (',
+    (SELECT GROUP_CONCAT(CONCAT('\`', k3.REFERENCED_COLUMN_NAME, '\`') ORDER BY k3.ORDINAL_POSITION SEPARATOR ', ')
+       FROM information_schema.KEY_COLUMN_USAGE k3
+      WHERE k3.CONSTRAINT_SCHEMA        = kcu.CONSTRAINT_SCHEMA
+        AND k3.CONSTRAINT_NAME          = kcu.CONSTRAINT_NAME
+        AND k3.TABLE_NAME               = kcu.TABLE_NAME),
+    ') ',
+    CASE WHEN rc.UPDATE_RULE <> 'NO ACTION' THEN CONCAT('ON UPDATE ', rc.UPDATE_RULE, ' ') ELSE '' END,
+    CASE WHEN rc.DELETE_RULE <> 'NO ACTION' THEN CONCAT('ON DELETE ', rc.DELETE_RULE) ELSE '' END,
+    ';'
+) AS recreate
+FROM information_schema.KEY_COLUMN_USAGE kcu
+JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+  ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+ AND rc.CONSTRAINT_NAME   = kcu.CONSTRAINT_NAME
+WHERE kcu.CONSTRAINT_SCHEMA = '$DB'
+  AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+  AND (kcu.TABLE_NAME = '$TABLE' OR kcu.REFERENCED_TABLE_NAME = '$TABLE')
+GROUP BY kcu.CONSTRAINT_SCHEMA, kcu.CONSTRAINT_NAME, kcu.TABLE_NAME,
+         kcu.REFERENCED_TABLE_NAME, rc.UPDATE_RULE, rc.DELETE_RULE;
+" >> /tmp/fk_recreate.sql
 
 RECREATE_COUNT=$(wc -l < /tmp/fk_recreate.sql)
 echo "RECREATE stmts : $RECREATE_COUNT"
