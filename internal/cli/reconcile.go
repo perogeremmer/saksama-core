@@ -9,7 +9,6 @@ import (
 
 	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/render"
-	"github.com/perogeremmer/saksama-core/internal/state"
 )
 
 // cmdReconcile reports sessions that never reached a terminal state, and what the
@@ -120,5 +119,3 @@ func cmdReconcile(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "  nothing left      saksama reconcile --retire <session>, then re-plan")
 	return ExitOK
 }
-
-var _ = state.StateRunning

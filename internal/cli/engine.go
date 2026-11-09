@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/probe"
@@ -376,12 +375,3 @@ func cmdEngineClear(args []string, stdout, stderr io.Writer) int {
 	}
 	return ExitOK
 }
-
-func iffStr(cond bool, yes, no string) string {
-	if cond {
-		return yes
-	}
-	return no
-}
-
-var _ = strings.TrimSpace

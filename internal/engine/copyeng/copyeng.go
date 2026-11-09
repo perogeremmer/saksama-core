@@ -576,5 +576,3 @@ func opRaw(ops []model.Op) []string {
 	}
 	return out
 }
-
-var _ = analyzer.EngineNone

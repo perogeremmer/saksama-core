@@ -82,17 +82,3 @@ func cmdCompat(args []string, stdout, stderr io.Writer) int {
 	}
 	return ExitOK
 }
-
-func flagValue(args []string, names ...string) string {
-	for i, a := range args {
-		for _, n := range names {
-			if a == n && i+1 < len(args) {
-				return args[i+1]
-			}
-			if len(a) > len(n)+1 && a[:len(n)+1] == n+"=" {
-				return a[len(n)+1:]
-			}
-		}
-	}
-	return ""
-}
