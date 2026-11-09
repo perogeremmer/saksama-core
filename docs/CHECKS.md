@@ -19,8 +19,10 @@ contract, so they are never renumbered or reused for something else.
 | `planned` | specified here, not implemented yet |
 | `moved` | superseded by the engine matrix (`saksama advise`), which reports it as a per-engine requirement instead of a check |
 
-Counts today: **50 implemented check IDs**, plus **12 server settings** in the
-doctor (section S).
+Counts today: **41 implemented check IDs** out of **54 catalogued** (41 `done`,
+9 `planned`, 4 `moved`), plus **12 server settings** in the doctor (section S).
+The `done` column is the number to trust: it is the one this file cannot inflate
+without the analyzer contradicting it.
 
 ---
 

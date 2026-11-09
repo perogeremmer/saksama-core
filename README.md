@@ -448,7 +448,7 @@ The MySQL Clone Plugin is deliberately absent: it clones an instance, not a tabl
 | `ALTER` parser, 19 operations, fail closed | done |
 | `SHOW CREATE TABLE` parser including FK actions | done |
 | Version gated capability matrix | done |
-| Checks catalogue, 55 checks plus a 12-setting server doctor | done |
+| Checks catalogue: 41 implemented, 9 planned, 4 moved to the engine matrix, plus a 12-setting server doctor | done |
 | Offline plan, plan card, JSON, exit codes | done |
 | Live introspection and the server-settings doctor | done |
 | Native execution with explicit algorithm and lock | done |

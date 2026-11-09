@@ -119,7 +119,7 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
 	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
 	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
-	fs.Bool("no-color", false, "accepted for compatibility")
+	fs.Bool("no-color", false, "never use colour (already off for a pipe, NO_COLOR, TERM=dumb)")
 
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
@@ -524,11 +524,21 @@ type exportDoc struct {
 func cmdExport(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.String("format", "json", "json")
-	if err := fs.Parse(args); err != nil {
+	format := fs.String("format", "json", "json (the only format this build writes)")
+
+	// The standard library stops parsing at the first positional argument, so
+	// `saksama export s3 --format json` - the spelling this repository documents -
+	// parsed no flags at all. The value was accepted and then ignored, which is
+	// worse than rejected: `--format markdown` printed JSON and said nothing.
+	positional, flagArgs := extractPositionals(args, map[string]bool{"format": true})
+	if err := fs.Parse(flagArgs); err != nil {
 		return ExitUsage
 	}
-	if fs.NArg() == 0 {
+	if *format != "json" {
+		fmt.Fprintf(stderr, "saksama export: unknown format %q; this build writes json\n", *format)
+		return ExitUsage
+	}
+	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama export: session id required")
 		return ExitUsage
 	}
@@ -537,7 +547,7 @@ func cmdExport(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "saksama export: %v\n", err)
 		return ExitInternal
 	}
-	id := fs.Arg(0)
+	id := positional[0]
 	sess, err := store.Load(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama export: %v\n", err)

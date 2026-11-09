@@ -148,6 +148,8 @@ Usage:
   saksama advise --live -h <host> -d <db>                   inspect every table
   saksama advise --live -h <host> -d <db> -t <table> [-a "<ALTER>"]
   saksama engine list|set|show|clear   choose the engine yourself
+  saksama engine doctor [<engine>]     can it run here, and can that server host it
+  saksama engine install <engine>      verified download; the checksum is checked
   saksama compat                       which MySQL and engine versions are verified
   saksama apply  -h <host> -d <db> -t <table> -a "<ALTER>" [options]
   saksama status [<session>] [--json]
@@ -155,9 +157,10 @@ Usage:
   saksama cancel <session>                 stop a running copy engine by pid
   saksama cutover <session>                release a held cutover, allowing the swap
   saksama reconcile                        sessions that never finished, and what is left
+  saksama reconcile --retire <session>     mark a dead attempt failed, release its lock
   saksama events <session>
-  saksama export <session>
-  saksama cleanup <session>
+  saksama export <session> [--format json]
+  saksama cleanup <session> [--dry-run]
   saksama schema
   saksama version
 
@@ -187,6 +190,13 @@ Engine options:
   saksama engine set <name> -d <db> -t <table>   one table
   saksama engine list                            what is installed, what is chosen
   saksama engine show -d <db> -t <table>         what apply would use now
+  --note <text>            why this choice was made; recorded with it (engine set)
+  --plain                  one row per line, no box drawing (engine list)
+
+Compat options:
+  --json                   the verified matrix as JSON
+  --markdown               the verified matrix as a markdown table
+  --no-probe               do not look for gh-ost / pt-osc on PATH
 
 Advise options:
   --live                   read from the server instead of a file
@@ -200,7 +210,6 @@ Apply options:
   --accept-unknown-mdl     allow 5.6 in production: the lock queue cannot be seen
   --allow-native-rebuild   in production, let MySQL rebuild a small table in place
                            instead of installing a copy engine (no throttle, no pause)
-  --force-kill             cancel: SIGKILL an engine that ignores SIGTERM
   --confirm <host>         must equal the target host name when --production
   --dry-run                build statements and stop
   --engine <name>          native|gh-ost|pt-osc; overrides the recorded choice
@@ -230,7 +239,22 @@ Plan options:
   --data-bytes <n>       table data size in bytes
   --index-bytes <n>      table index size in bytes
   --json                 emit the machine-readable plan instead of the card
-  --no-color             accepted for compatibility; output is always plain text
+
+Session options (status, attach, events, export, cleanup, reconcile):
+  --json                   machine-readable output
+  --plain                  one row per line, no box drawing (status)
+  --since <n>              attach: only events after sequence n
+  --follow=false           attach: print what is already logged and exit
+  --format json            export: the audit trail's format (json is the only one)
+  --dry-run                cleanup: list what would be dropped, change nothing
+  --retire <session>       reconcile: mark a dead attempt failed, release its lock
+  --force-kill             cancel: SIGKILL an engine that ignores SIGTERM
+
+Global options:
+  --state-dir <path>       where sessions and event logs live; default
+                           ~/.local/state/saksama, or SAKSAMA_STATE_DIR
+  --no-color               never use colour; it is already off for a pipe,
+                           when NO_COLOR is set, or when TERM=dumb
 
 Exit codes:
   0  plan produced, no blockers
@@ -291,7 +315,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	fs.Int64Var(&o.dataBytes, "data-bytes", 0, "table data size in bytes")
 	fs.Int64Var(&o.indexBytes, "index-bytes", 0, "table index size in bytes")
 	fs.BoolVar(&o.jsonOut, "json", false, "JSON output")
-	fs.Bool("no-color", false, "accepted for compatibility")
+	fs.Bool("no-color", false, "never use colour (already off for a pipe, NO_COLOR, TERM=dumb)")
 
 	if missing := missingLiveFlag(fs, args); explainMissingLive("plan", missing, args, stderr) {
 		return ExitUsage
