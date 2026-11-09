@@ -2,7 +2,6 @@ package analyzer
 
 import (
 	"fmt"
-	"strings"
 )
 
 // DiskFacts is what is known about the volume holding the data directory.
@@ -228,5 +227,3 @@ func fallbackReason(r string) string {
 	}
 	return r
 }
-
-var _ = strings.TrimSpace

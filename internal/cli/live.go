@@ -588,14 +588,6 @@ func cmdExport(args []string, stdout, stderr io.Writer) int {
 
 // --- cleanup ----------------------------------------------------------------
 
-func shorten(s string, n int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "~"
-}
-
 // resolveEngineChoice applies the documented precedence:
 //
 //  1. --engine on the command line

@@ -538,6 +538,13 @@ after themselves, which is why the gentle signal is tried first.
 The limit worth knowing: a native `ALTER` is owned by the MySQL server, so there is
 no process to cancel. The tool says that instead of pretending.
 
+The other limit: before signalling, the command line at `/proc/<pid>/cmdline` is
+compared with the one recorded when the engine started, because Linux reuses pids
+and signalling a stranger is worse than doing nothing. Where there is no `/proc` -
+macOS, or a session recorded before the identity was captured - the comparison
+cannot run, and the pid is trusted as recorded. The guard is real on Linux and
+absent elsewhere, in that order.
+
 ---
 
 ## `saksama cutover`

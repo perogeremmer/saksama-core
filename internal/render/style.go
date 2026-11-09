@@ -33,9 +33,6 @@ var colour = Palette{}
 // UseColor turns colour on or off for this process.
 func UseColor(enabled bool) { colour.Enabled = enabled }
 
-// ColorEnabled reports the current setting.
-func ColorEnabled() bool { return colour.Enabled }
-
 const (
 	ansiReset   = "\x1b[0m"
 	ansiBold    = "\x1b[1m"
@@ -121,17 +118,3 @@ func isTerminal(w io.Writer) bool {
 // gate presentation-only behaviour that needs a cursor: the moving indicator,
 // and colour by way of ShouldColor. A captured run has neither.
 func IsTerminal(w io.Writer) bool { return isTerminal(w) }
-
-// StyleLine colours one line for the doctor and menu output: the leading mark carries
-// the meaning, the rest stays readable.
-func StyleLine(mark, line string) string {
-	switch mark {
-	case "ok", "yes":
-		return paint(ansiGreen, mark) + " " + line
-	case "FAIL", "no":
-		return paint(ansiRed, mark) + " " + line
-	case "??", "WARN":
-		return paint(ansiYellow, mark) + " " + line
-	}
-	return line
-}

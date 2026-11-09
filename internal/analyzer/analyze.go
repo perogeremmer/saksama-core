@@ -395,15 +395,6 @@ func Analyze(in Input) Plan {
 	return p
 }
 
-func hasCheckID(checks []Check, id string) bool {
-	for _, c := range checks {
-		if c.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
 func severityRank(s Severity) int {
 	switch s {
 	case SeverityBlocker:

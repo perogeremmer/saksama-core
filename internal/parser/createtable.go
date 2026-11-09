@@ -2,7 +2,6 @@ package parser
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/perogeremmer/saksama-core/internal/model"
@@ -230,9 +229,4 @@ func parseIndexLine(tokens []Token) (string, []model.IndexPart, error) {
 		name = parts[0].Column // MySQL names the index after the first column
 	}
 	return name, parts, nil
-}
-
-// ParseInt64 parses a decimal integer with validation.
-func ParseInt64(s string) (int64, error) {
-	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 }

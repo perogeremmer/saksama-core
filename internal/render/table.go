@@ -6,7 +6,6 @@
 package render
 
 import (
-	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -236,5 +235,3 @@ func plainTable(cols ...Column) *Table {
 func boxTable(cols ...Column) *Table {
 	return &Table{Columns: cols, Border: true, MaxWidth: 48}
 }
-
-var _ = fmt.Sprintf

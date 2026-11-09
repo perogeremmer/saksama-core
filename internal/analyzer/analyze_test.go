@@ -447,19 +447,6 @@ func TestManagedServerMentionedInReasons(t *testing.T) {
 	}
 }
 
-func contains(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
-
 // --- determinism ------------------------------------------------------------
 
 func TestFingerprintIgnoresVolatileFields(t *testing.T) {
@@ -573,9 +560,6 @@ func assessmentFor(p Plan, e Engine) (EngineAssessment, bool) {
 	}
 	return EngineAssessment{}, false
 }
-
-// unmet returns the requirement names that failed for an engine.
-func unmetList(a EngineAssessment) []string { return unmet(a) }
 
 func unmetContains(a EngineAssessment, name string) bool {
 	for _, n := range unmet(a) {

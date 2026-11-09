@@ -176,7 +176,6 @@ func Stop(pid int, wait time.Duration) error {
 	return fmt.Errorf("process %d did not stop within %s", pid, wait)
 }
 
-// Alive reports whether a process id is still running.
 // StopForce is Stop with an escalation: after the graceful window it sends SIGKILL.
 //
 // SIGKILL is not the default anywhere. A copy engine that is killed outright

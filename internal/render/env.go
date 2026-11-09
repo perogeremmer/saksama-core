@@ -103,27 +103,4 @@ func joinEngines(engines []analyzer.Engine) string {
 	return strings.Join(parts, ", ")
 }
 
-// EngineEnvironmentTable renders the per-engine prerequisite list, for the
-// single-table report where space allows the detail.
-func EngineEnvironmentTable(w io.Writer, e analyzer.EngineAssessment, border bool) error {
-	if len(e.Environment) == 0 {
-		return nil
-	}
-	t := &Table{
-		Border:   border,
-		MaxWidth: 52,
-		Columns: []Column{
-			{Header: "PREREQUISITE"}, {Header: "STATUS"}, {Header: "DETAIL"},
-		},
-	}
-	for _, r := range e.Environment {
-		status := Good("ok")
-		if !r.Met {
-			status = Bad("FAIL")
-		}
-		t.Add(r.Name, status, r.Detail)
-	}
-	return t.Render(w)
-}
-
 var _ = fmt.Sprintf

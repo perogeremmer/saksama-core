@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"golang.org/x/term"
@@ -312,12 +311,4 @@ func MaskSecret(s string) string {
 		return strings.Repeat("*", len(s))
 	}
 	return s[:1] + strings.Repeat("*", len(s)-2) + s[len(s)-1:]
-}
-
-// OptionFileKeys is used by the documentation and by tests to keep the supported
-// key list honest.
-func OptionFileKeys() []string {
-	keys := []string{"host", "port", "user", "password", "passwd", "socket", "database"}
-	sort.Strings(keys)
-	return keys
 }

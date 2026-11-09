@@ -1,7 +1,6 @@
 package analyzer
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -295,5 +294,3 @@ func FixHints(checks []SettingCheck) []string {
 	}
 	return out
 }
-
-var _ = fmt.Sprintf
