@@ -604,6 +604,9 @@ saksama export s3
 saksama export s3 --format json
 ```
 
+`json` is the only format this build writes, and `--format` says so instead of
+falling back silently: any other value is a usage error.
+
 ---
 
 ## `saksama reconcile`

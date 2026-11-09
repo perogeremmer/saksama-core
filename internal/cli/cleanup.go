@@ -2,11 +2,9 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 
 	"github.com/perogeremmer/saksama-core/internal/core"
 )
@@ -46,10 +44,11 @@ func cmdCleanup(args []string, stdout, stderr io.Writer) int {
 	plan, err := core.New(nil, store).Cleanup(context.Background(), fsNew.Arg(0), true)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama cleanup: %v\n", err)
-		if errors.Is(err, fs.ErrNotExist) {
-			return ExitUsage
-		}
-		return ExitInternal
+		// A mistyped session id is the operator's typo here too. This command used
+		// to answer it with the internal-error code while every other command
+		// answered 2, which is exactly the inconsistency classifyStoreError exists
+		// to end - and it was the one caller that did not use it.
+		return classifyStoreError(err)
 	}
 	if plan.Refused != "" {
 		fmt.Fprintln(stdout, plan.Refused)

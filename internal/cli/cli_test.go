@@ -400,6 +400,54 @@ func TestExportIncludesRedactionSafeSummary(t *testing.T) {
 	}
 }
 
+func TestExportRefusesAnUnknownFormat(t *testing.T) {
+	// The documentation spells it `saksama export s3 --format json`, so the flag
+	// has to work after the session id. It did not: the standard library stops
+	// parsing at the first positional, the value was dropped, and every format
+	// printed JSON without a word - an unknown one included.
+	dir := t.TempDir()
+	t.Setenv("SAKSAMA_STATE_DIR", dir)
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(&state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateDone,
+		Database: "shop", Table: "orders", Engine: "native",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvents("s1", []byte(`{"seq":1,"type":"session.created","session":"s1","contract_version":1,"ts":1,"data":{}}`+"\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{
+		{"export", "s1", "--format", "bogus"},
+		{"export", "--format", "bogus", "s1"},
+		{"export", "s1", "--format=markdown"},
+	} {
+		code, out, errOut := run(t, args...)
+		if code != ExitUsage {
+			t.Errorf("%v: exit %d, want %d (usage)", args, code, ExitUsage)
+		}
+		if strings.Contains(out, "contract_version") {
+			t.Errorf("%v: a refused format must not print a document", args)
+		}
+		if !strings.Contains(errOut, "unknown format") {
+			t.Errorf("%v: stderr does not name the problem: %q", args, errOut)
+		}
+	}
+
+	// The spelling the documentation uses must still export, not just be refused.
+	code, out, errOut := run(t, "export", "s1", "--format", "json")
+	if code != ExitOK {
+		t.Fatalf("exit %d, stderr %s", code, errOut)
+	}
+	if !strings.Contains(out, "\"completeness\": \"complete\"") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
 func TestCleanupOnASessionWithNoArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SAKSAMA_STATE_DIR", dir)
@@ -906,6 +954,10 @@ func TestAttachJSONEndsWithTheSession(t *testing.T) {
 
 // A session id that does not exist is the operator's typo, and every command
 // answers it with the same exit code.
+//
+// The list is the point. The first version of this test claimed "everywhere" and
+// covered five commands, which is how `cleanup` kept answering a mistyped id with
+// the internal-error code: the one caller that picked its own code went untested.
 func TestMissingSessionIsAUsageErrorEverywhere(t *testing.T) {
 	t.Setenv("SAKSAMA_STATE_DIR", t.TempDir())
 	for _, cmd := range [][]string{
@@ -914,6 +966,9 @@ func TestMissingSessionIsAUsageErrorEverywhere(t *testing.T) {
 		{"export", "s9"},
 		{"cancel", "s9"},
 		{"cutover", "s9"},
+		{"cleanup", "s9", "--dry-run"},
+		{"cleanup", "s9"},
+		{"reconcile", "--retire", "s9"},
 	} {
 		code, _, errOut := run(t, cmd...)
 		if code != ExitUsage {

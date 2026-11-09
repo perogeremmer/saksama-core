@@ -159,7 +159,7 @@ Usage:
   saksama reconcile                        sessions that never finished, and what is left
   saksama reconcile --retire <session>     mark a dead attempt failed, release its lock
   saksama events <session>
-  saksama export <session> [--format json|markdown]
+  saksama export <session> [--format json]
   saksama cleanup <session> [--dry-run]
   saksama schema
   saksama version
@@ -245,7 +245,7 @@ Session options (status, attach, events, export, cleanup, reconcile):
   --plain                  one row per line, no box drawing (status)
   --since <n>              attach: only events after sequence n
   --follow=false           attach: print what is already logged and exit
-  --format json|markdown   export: the audit trail's format
+  --format json            export: the audit trail's format (json is the only one)
   --dry-run                cleanup: list what would be dropped, change nothing
   --retire <session>       reconcile: mark a dead attempt failed, release its lock
   --force-kill             cancel: SIGKILL an engine that ignores SIGTERM
