@@ -24,6 +24,8 @@ func cmdReconcile(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	addConnFlags(fs, &conn)
 	jsonOut := fs.Bool("json", false, "JSON output")
+	retire := fs.String("retire", "",
+		"mark this session failed and release its table lock; only works once the engine process is confirmed gone")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -32,6 +34,25 @@ func cmdReconcile(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama reconcile: %v\n", err)
 		return ExitInternal
+	}
+
+	// Retiring is the answer to reconcile's own advice, and it needs no database:
+	// the engine is gone by definition, so the observation happened already.
+	if *retire != "" {
+		runner := &core.Runner{Store: store}
+		res, err := runner.Retire(context.Background(), *retire)
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama reconcile --retire: %v\n", err)
+			return classifyStoreError(err)
+		}
+		// The exit code follows the outcome, like cancel: a live engine is
+		// refused (cancel it instead), an ended session is a no-op.
+		code := ExitOK
+		if res.Outcome == core.RetireEngineAlive {
+			code = ExitUsage
+		}
+		fmt.Fprintln(stdout, res.Note)
+		return code
 	}
 
 	c, err := conn.resolve()
@@ -96,7 +117,7 @@ func cmdReconcile(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "  alive engine      saksama attach <session>   or   saksama cancel <session>")
 	fmt.Fprintln(stdout, "  leftovers         saksama cleanup <session> --dry-run, then cleanup")
-	fmt.Fprintln(stdout, "  nothing left      re-plan the change; the previous attempt did not finish")
+	fmt.Fprintln(stdout, "  nothing left      saksama reconcile --retire <session>, then re-plan")
 	return ExitOK
 }
 

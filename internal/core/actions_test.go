@@ -2,9 +2,11 @@ package core
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/perogeremmer/saksama-core/internal/state"
 )
@@ -278,5 +280,77 @@ func TestRecordEventContinuesFromTheLogNotTheSession(t *testing.T) {
 	}
 	if sess.LastSeq != 6 {
 		t.Fatalf("the session must learn the new sequence: %d", sess.LastSeq)
+	}
+}
+
+// Retire is the verb reconcile keeps prescribing. It must refuse while the
+// engine is alive, refuse what already ended, and otherwise mark the attempt
+// failed and hand the table back.
+func TestRetireRefusesAnAliveEngine(t *testing.T) {
+	store := newTestStore(t)
+	saveSession(t, store, &state.Session{
+		ID: "s1", State: state.StateRunning, Database: "shop", Table: "orders",
+		EnginePID: os.Getpid(), // this test process is alive
+	})
+
+	res, err := (&Runner{Store: store}).Retire(context.Background(), "s1")
+	if err != nil || res.Outcome != RetireEngineAlive {
+		t.Fatalf("a live engine must be refused, not errored: outcome=%q err=%v", res.Outcome, err)
+	}
+	sess, err := store.Load("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.State != state.StateRunning {
+		t.Fatalf("a refused retire must not change the state: %s", sess.State)
+	}
+}
+
+func TestRetireMarksFailedAndReleasesTheLock(t *testing.T) {
+	store := newTestStore(t)
+	saveSession(t, store, &state.Session{
+		ID: "s1", State: state.StateRunning, Database: "shop", Table: "orders",
+		EnginePID: 999999999, // nobody owns this number
+	})
+	if err := store.Lock("shop", "orders", "s1", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	sess, _ := store.Load("s1")
+	sess.RecordArtifact("table", "_orders_new", "pt-osc", "shadow")
+	saveSession(t, store, sess)
+
+	res, err := (&Runner{Store: store}).Retire(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != state.StateFailed || !res.LockReleased {
+		t.Fatalf("state=%s lock_released=%v", res.State, res.LockReleased)
+	}
+	sess, err = store.Load("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.State != state.StateFailed || sess.Phase != "retired" {
+		t.Fatalf("the session must be failed/retired: %s/%s", sess.State, sess.Phase)
+	}
+	if len(sess.Artifacts) == 0 || !sess.Artifacts[0].SafeToDelete {
+		t.Fatalf("the leftovers must become cleanable: %+v", sess.Artifacts)
+	}
+	// The lock is gone: the table can be planned again.
+	if err := store.Lock("shop", "orders", "s2", time.Hour); err != nil {
+		t.Fatalf("the table must be lockable again after retire: %v", err)
+	}
+}
+
+func TestRetireRefusesATerminalSession(t *testing.T) {
+	store := newTestStore(t)
+	saveSession(t, store, &state.Session{ID: "s1", State: state.StateDone, Database: "shop", Table: "orders"})
+
+	res, err := (&Runner{Store: store}).Retire(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("an already-ended session is not an error, just a no-op: %v", err)
+	}
+	if res.State != state.StateDone {
+		t.Fatalf("state = %s", res.State)
 	}
 }
