@@ -618,6 +618,7 @@ would let this command say "nothing to do" while the database carried the debris
 ```
 saksama reconcile
 saksama reconcile --json
+saksama reconcile --retire s3   # mark the dead attempt failed, release its lock
 ```
 
 A crashed session is neither obviously failed nor obviously running, so this reports
@@ -627,11 +628,37 @@ the observation rather than a verdict the tool cannot support:
 |---|---|
 | the engine process is still alive | `attach` to watch it, or `cancel` it |
 | the engine is gone but objects remain | check the table, then `cleanup` |
-| nothing remains | re-plan; the previous attempt did not finish |
+| nothing remains | `reconcile --retire`, then re-plan |
 | the session finished, but objects remain | `cleanup` drops what it owns |
 
-Nothing is changed by this command. The point is that nobody touches a half-finished
+`reconcile` itself changes nothing. The point is that nobody touches a half-finished
 migration without looking at it first.
+
+### `--retire`
+
+The advice "mark it failed and re-plan" needs a verb behind it, or it is a dead end.
+A client that crashed mid-copy leaves a session saying `running` forever: `apply`
+refuses a non-terminal session, and the table lock is held until its stale window
+passes. `--retire` is that verb.
+
+```
+saksama reconcile --retire s3
+```
+
+It works only once the recorded engine pid is confirmed gone - the same identity check
+`cancel` uses, so a recycled pid is not mistaken for a live engine. A live engine is
+refused with exit `2` and a pointer to `cancel`; a session that already ended is a
+no-op that says so.
+
+Retiring does not decide whether the migration happened. It records that the operator
+looked, saw the engine gone, and called this attempt over: the session becomes
+`failed` with phase `retired`, the reason and actor go into the event log, the table
+lock is released, and the artifacts the dead engine left stay owned by the session and
+become deletable - `cleanup <session> --dry-run` is how each one is checked. The
+verification on the next plan is what guards the schema itself.
+
+No database connection is needed: the engine is gone by definition, so the observation
+already happened.
 
 ## `saksama cleanup`
 
@@ -736,6 +763,7 @@ saksama daemon start|stop|status
 Everything a daemon would otherwise be needed for is handled by the state
 directory instead: `--detach` gives the engine its own process group, `attach`
 follows the log from any terminal, `cancel` stops it by recorded pid, and
-`reconcile` reports what a crash left behind. A long-lived supervisor that owns a
+`reconcile` reports what a crash left behind, and `--retire` ends the attempt it cannot
+finish. A long-lived supervisor that owns a
 job queue is the next step, and it will call the same core functions these commands
 call.
