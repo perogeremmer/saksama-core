@@ -119,7 +119,7 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	fs.Int64Var(&o.freeDisk, "free-disk", 0, "free bytes on the data volume, when it cannot be measured from here")
 	fs.Int64Var(&o.diskTotal, "disk-total", 0, "total bytes of the data volume, to apply the 10 percent floor")
 	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
-	fs.Bool("no-color", false, "accepted for compatibility")
+	fs.Bool("no-color", false, "never use colour (already off for a pipe, NO_COLOR, TERM=dumb)")
 
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage

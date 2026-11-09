@@ -72,7 +72,7 @@ func cmdAdvise(args []string, stdout, stderr io.Writer) int {
 	fs.Int64Var(&o.rows, "rows", 0, "estimated row count")
 	fs.Int64Var(&o.dataBytes, "data-bytes", 0, "table data bytes")
 	fs.Int64Var(&o.indexBytes, "index-bytes", 0, "table index bytes")
-	fs.Bool("no-color", false, "accepted for compatibility")
+	fs.Bool("no-color", false, "never use colour (already off for a pipe, NO_COLOR, TERM=dumb)")
 
 	if !live {
 		if missing := missingLiveFlag(fs, args); explainMissingLive("advise", missing, args, stderr) {

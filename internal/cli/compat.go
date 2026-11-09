@@ -24,7 +24,7 @@ func cmdCompat(args []string, stdout, stderr io.Writer) int {
 
 	var conn connFlags
 	addConnFlags(fs, &conn)
-	fs.Bool("no-color", false, "accepted for compatibility")
+	fs.Bool("no-color", false, "never use colour (already off for a pipe, NO_COLOR, TERM=dumb)")
 
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage

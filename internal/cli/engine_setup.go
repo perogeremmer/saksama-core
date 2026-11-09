@@ -27,7 +27,7 @@ func cmdEngineDoctor(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&jsonOut, "json", false, "JSON output")
 	fs.BoolVar(&noProbe, "no-probe", false, "do not probe installed engine binaries")
 	fs.BoolVar(&plain, "plain", false, "borderless output, for scripts and logs")
-	fs.Bool("no-color", false, "accepted for compatibility")
+	fs.Bool("no-color", false, "never use colour (already off for a pipe, NO_COLOR, TERM=dumb)")
 
 	// The engine name is positional and people type it first, before the flags, so
 	// it is lifted out before the flag package can stop at it.
