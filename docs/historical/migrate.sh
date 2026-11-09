@@ -1,6 +1,19 @@
 #!/bin/bash
 #
 # ============================================================
+# HISTORICAL. Kept because ARCHITECTURE.md section 14 audits it, not because
+# it should be run.
+#
+# This is the wrapper Saksama was built from. It reads pt-osc's output, keeps
+# foreign keys in shell variables, and it is the program whose ON DELETE
+# CASCADE bug the audit traces. `saksama` replaces it: the plan, the engine
+# choice, the gate, and the cleanup are all commands now.
+#
+# Nothing in this repository runs this file: no Makefile target, no CI job, no
+# test. If you are looking for a migration, you want `saksama plan` (or
+# `saksama apply --dry-run`). If you are reading the audit, section 14 of ARCHITECTURE.md
+# names every finding.
+# ============================================================
 # migrate.sh — Zero-Downtime Schema Migration via pt-osc
 #
 # Usage:
