@@ -85,6 +85,7 @@ type fakeBackend struct {
 	approvals  []state.Approval
 	cleanups   []bool
 	cancelled  []string
+	retired    []string
 	prepareErr error
 	applyErr   error
 	schema     core.SchemaAdvice
@@ -93,6 +94,12 @@ type fakeBackend struct {
 	choices    []state.EngineChoice
 	setEngines []state.EngineChoice
 	cleared    []state.EngineChoice
+}
+
+func (f *fakeBackend) Retire(ctx context.Context, id string) (core.RetireResult, error) {
+	f.retired = append(f.retired, id)
+	return core.RetireResult{ID: id, State: state.StateFailed, LockReleased: true,
+		Note: "retired"}, nil
 }
 
 func (f *fakeBackend) Connect(c cred.Conn) error {
@@ -718,5 +725,74 @@ func TestShortenKeepsRunesWhole(t *testing.T) {
 	}
 	if n := len([]rune(got)); n > 12 {
 		t.Fatalf("shorten produced %d runes, want at most 12: %q", n, got)
+	}
+}
+
+// plan and apply must tell one story about the two acceptable blockers: both
+// questions asked, in order, and one re-read per acceptance - so what the
+// operator agreed to is what the plan then says.
+func TestResolveBlockersAsksAndRereads(t *testing.T) {
+	req := core.Request{Conn: cred.Conn{Host: "db"}, Database: "shop", Table: "orders"}
+	prep := &core.Prepared{Plan: analyzer.Plan{
+		Recommendation: analyzer.Recommendation{Blockers: 1},
+		Checks: []analyzer.Check{
+			{ID: "E5b", Severity: analyzer.SeverityBlocker},
+			{ID: "R13"},
+		},
+	}}
+	// The fake returns the same plan on every read, so the second gate still
+	// sees blockers after the first acceptance, exactly as a stock 5.6 would.
+	b := &fakeBackend{prep: prep}
+	s := newScript("y", "y")
+	w := &Wizard{p: s, b: b, out: s.out, animate: false}
+
+	gotReq, gotPrep, err := w.resolveBlockers(req, prep, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotReq.AcceptUnknownMDL || !gotReq.AllowNativeRebuild {
+		t.Fatalf("both acceptances must be recorded on the request: %+v", gotReq)
+	}
+	if len(b.analyzed) != 2 {
+		t.Fatalf("one re-read per acceptance, got %d", len(b.analyzed))
+	}
+	if gotPrep == nil {
+		t.Fatal("the re-read result must come back")
+	}
+
+	// Declining both changes nothing: the plan keeps its blockers, the request
+	// stays untouched, and no re-read is spent.
+	b2 := &fakeBackend{}
+	w2 := &Wizard{p: newScript("n", "n"), b: b2, out: &bytes.Buffer{}, animate: false}
+	req2, _, err := w2.resolveBlockers(req, prep, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req2.AcceptUnknownMDL || req2.AllowNativeRebuild {
+		t.Fatalf("a decline must not set the flags: %+v", req2)
+	}
+	if len(b2.analyzed) != 0 {
+		t.Fatalf("a decline must not spend a re-read: %d", len(b2.analyzed))
+	}
+}
+
+// A re-read that fails after an acceptance must stop the flow with the reason,
+// not come back as a fabricated verdict.
+func TestResolveBlockersFailsHonestlyOnABrokenReread(t *testing.T) {
+	b := &fakeBackend{prepareErr: errors.New("server went away")}
+	w := &Wizard{p: newScript("y"), b: b, out: &bytes.Buffer{}, animate: false}
+
+	req := core.Request{Database: "shop", Table: "orders"}
+	prep := &core.Prepared{Plan: analyzer.Plan{
+		Recommendation: analyzer.Recommendation{Blockers: 1},
+		Checks:         []analyzer.Check{{ID: "E5b", Severity: analyzer.SeverityBlocker}},
+	}}
+
+	_, got, err := w.resolveBlockers(req, prep, false)
+	if err == nil {
+		t.Fatal("a failed re-read must be an error")
+	}
+	if got != nil {
+		t.Fatal("a failed re-read must not produce a preparation to act on")
 	}
 }

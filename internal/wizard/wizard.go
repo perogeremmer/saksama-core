@@ -275,6 +275,42 @@ func (w *Wizard) reanalyse(req core.Request, flag string) (*core.Prepared, error
 	return prep, nil
 }
 
+// resolveBlockers walks the two acceptances a blocker can be answered with, in
+// the order they arrive on a stock 5.6 server, and re-reads the plan after each
+// acceptance - so what the operator agreed to is what the plan then says, and a
+// fix in one screen cannot drift away from a fix in the other. display decides
+// whether each re-read prints its own plan card: the plan screen shows its work,
+// the apply screen only needs the final verdict. A failed re-read stops the flow
+// with an error; it is never fabricated into a verdict.
+func (w *Wizard) resolveBlockers(req core.Request, prep *core.Prepared, display bool) (core.Request, *core.Prepared, error) {
+	gates := []struct {
+		flag string
+		asks func(analyzer.Plan) bool
+		set  func(*core.Request)
+	}{
+		{"--accept-unknown-mdl", w.acceptUnknownMDL, func(r *core.Request) { r.AcceptUnknownMDL = true }},
+		{"--allow-native-rebuild", w.allowNativeRebuild, func(r *core.Request) { r.AllowNativeRebuild = true }},
+	}
+	for _, g := range gates {
+		if prep == nil || prep.Plan.Recommendation.Blockers == 0 || !g.asks(prep.Plan) {
+			continue
+		}
+		g.set(&req)
+		var err error
+		if display {
+			prep, err = w.reanalyse(req, g.flag)
+		} else {
+			stop := w.busy("planning again")
+			prep, err = w.b.Analyze(context.Background(), req)
+			stop()
+		}
+		if err != nil {
+			return req, nil, err
+		}
+	}
+	return req, prep, nil
+}
+
 // tlsUnusable reports whether a connection error is the TLS negotiation failing,
 // rather than a wrong password or a missing host.
 func tlsUnusable(err error) bool {
@@ -610,30 +646,10 @@ func (w *Wizard) plan() {
 	// decide that. The analyzer names it; the wizard does not go looking for a
 	// server version, so this also covers a 5.7/8.0 user who cannot read the lock
 	// queue for lack of a grant.
-	if prep != nil && prep.Plan.Recommendation.Blockers > 0 && w.acceptUnknownMDL(prep.Plan) {
-		req.AcceptUnknownMDL = true
-		prep, err = w.reanalyse(req, "--accept-unknown-mdl")
-		if err != nil {
-			w.fail(err)
-			return
-		}
-		if prep == nil {
-			return
-		}
-	}
-
-	// Asked on the second plan, not the first: on 5.6 in production both questions
-	// arrive together, and the lock-queue answer changes what the rebuild one says.
-	if prep != nil && prep.Plan.Recommendation.Blockers > 0 && w.allowNativeRebuild(prep.Plan) {
-		req.AllowNativeRebuild = true
-		prep, err = w.reanalyse(req, "--allow-native-rebuild")
-		if err != nil {
-			w.fail(err)
-			return
-		}
-		if prep == nil {
-			return
-		}
+	req, prep, err = w.resolveBlockers(req, prep, true)
+	if err != nil {
+		w.fail(err)
+		return
 	}
 
 	if prep.Plan.Recommendation.Blockers > 0 {
@@ -868,22 +884,18 @@ func (w *Wizard) apply() {
 
 	// Re-reading before executing answers one question the session record cannot:
 	// does this run need the operator to accept a risk that only exists on some
-	// servers? It writes nothing, so asking here costs a handful of queries.
+	// servers? It writes nothing, so asking here costs a handful of queries. The
+	// same helper the plan screen uses keeps the two flows telling one story.
 	if preview, err := w.b.Analyze(context.Background(), req); err == nil && preview != nil &&
 		preview.Plan.Recommendation.Blockers > 0 {
-		if w.acceptUnknownMDL(preview.Plan) {
-			req.AcceptUnknownMDL = true
-			preview, err = w.b.Analyze(context.Background(), req)
-			if err != nil || preview == nil {
-				// Fabricating a blocker count here would refuse the run with a
-				// message nobody can act on. The re-read is the thing that proves
-				// the acceptance took effect; if it cannot be read, say that.
-				w.fail(fmt.Errorf("could not re-read the plan after accepting the risk: %v", err))
-				return
-			}
-		}
-		if preview.Plan.Recommendation.Blockers > 0 && w.allowNativeRebuild(preview.Plan) {
-			req.AllowNativeRebuild = true
+		var rerr error
+		req, preview, rerr = w.resolveBlockers(req, preview, false)
+		if rerr != nil {
+			// Fabricating a verdict here would refuse the run with a message
+			// nobody can act on. The re-read is the thing that proves the
+			// acceptance took effect; if it cannot be read, say that.
+			w.fail(fmt.Errorf("could not re-read the plan after accepting the risk: %v", rerr))
+			return
 		}
 	}
 	w.p.Printf("\nequivalent: %s\n", req.CommandLineFor("apply"))
@@ -1009,6 +1021,21 @@ func (w *Wizard) sessions() {
 			return
 		}
 		w.p.Printf("%s\n", res.Note)
+		if res.Outcome == core.CancelNotRunning {
+			// The engine is already gone; the only thing left of this attempt is
+			// the record. Retiring is what makes the table available again.
+			ok, cerr := w.p.Confirm(
+				"Mark this session failed and release its lock on the table? (retire)", false)
+			if cerr != nil || !ok {
+				return
+			}
+			retired, rerr := w.b.Retire(context.Background(), id)
+			if rerr != nil {
+				w.fail(rerr)
+				return
+			}
+			w.p.Printf("%s\n", retired.Note)
+		}
 	case "3":
 		if _, err := w.b.ReleaseCutover(context.Background(), id); err != nil {
 			w.fail(err)

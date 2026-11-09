@@ -32,6 +32,7 @@ type Backend interface {
 	ApplyFromSession(ctx context.Context, id string, req core.Request) (*state.Session, error)
 
 	Cancel(ctx context.Context, id string, force bool) (core.CancelResult, error)
+	Retire(ctx context.Context, id string) (core.RetireResult, error)
 	Cleanup(ctx context.Context, id string, dryRun bool) (core.CleanupResult, error)
 	ReleaseCutover(ctx context.Context, id string) (*state.Session, error)
 	Reconcile(ctx context.Context) ([]core.Finding, error)
@@ -125,6 +126,10 @@ func (l *live) ApplyFromSession(ctx context.Context, id string, req core.Request
 
 func (l *live) Cancel(ctx context.Context, id string, force bool) (core.CancelResult, error) {
 	return l.runner.Cancel(ctx, id, force)
+}
+
+func (l *live) Retire(ctx context.Context, id string) (core.RetireResult, error) {
+	return l.runner.Retire(ctx, id)
 }
 
 func (l *live) Cleanup(ctx context.Context, id string, dryRun bool) (core.CleanupResult, error) {
