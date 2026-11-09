@@ -51,9 +51,6 @@ func Environment(w io.Writer, checks []analyzer.SettingCheck, border bool) error
 		return err
 	}
 
-	// The table itself stays plain on purpose: its column widths are measured from
-	// cell text, and an escape sequence counted as characters would misalign every
-	// row or truncate mid-sequence. Colour goes where the layout cannot be hurt.
 	fails, warns, unknown := analyzer.EnvironmentSummary(checks)
 	fmt.Fprintf(&b, "\n  %s, %s, %s\n",
 		tally(fails, "blocking", Bad), tally(warns, "advisory", Warn), tally(unknown, "unknown", Dim))
@@ -81,15 +78,16 @@ func tally(n int, noun string, paint func(string) string) string {
 	return paint(text)
 }
 
-// statusMark is a short ASCII marker so the column scans vertically.
+// statusMark is a short ASCII marker so the column scans vertically, coloured
+// now that the table measures visible width instead of bytes.
 func statusMark(s analyzer.EnvStatus) string {
 	switch s {
 	case analyzer.EnvOK:
-		return "ok"
+		return Good("ok")
 	case analyzer.EnvFail:
-		return "FAIL"
+		return Bad("FAIL")
 	case analyzer.EnvWarn:
-		return "warn"
+		return Warn("warn")
 	}
 	return "?"
 }
@@ -119,9 +117,9 @@ func EngineEnvironmentTable(w io.Writer, e analyzer.EngineAssessment, border boo
 		},
 	}
 	for _, r := range e.Environment {
-		status := "ok"
+		status := Good("ok")
 		if !r.Met {
-			status = "FAIL"
+			status = Bad("FAIL")
 		}
 		t.Add(r.Name, status, r.Detail)
 	}

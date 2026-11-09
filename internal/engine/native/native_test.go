@@ -1,7 +1,12 @@
 package native
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
@@ -164,5 +169,100 @@ func TestDryRunProducesStatementsWithoutExecuting(t *testing.T) {
 	}
 	if exec.Err != nil {
 		t.Fatalf("unexpected error: %v", exec.Err)
+	}
+}
+
+// A stub driver that hands out a fresh session for every Open and records what
+// ran on each one, so a test can see which connection served which query.
+type recordingDriver struct {
+	mu    sync.Mutex
+	conns []*recordingConn
+}
+
+type recordingConn struct {
+	mu      sync.Mutex
+	queries []string
+	closed  bool
+}
+
+func (d *recordingDriver) Open(name string) (driver.Conn, error) {
+	c := &recordingConn{}
+	d.mu.Lock()
+	d.conns = append(d.conns, c)
+	d.mu.Unlock()
+	return c, nil
+}
+
+func (c *recordingConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("prepare is not part of this stub")
+}
+
+func (c *recordingConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *recordingConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("transactions are not part of this stub")
+}
+
+func (c *recordingConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.mu.Lock()
+	c.queries = append(c.queries, query)
+	c.mu.Unlock()
+	return driver.RowsAffected(0), nil
+}
+
+func (c *recordingConn) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.queries...)
+}
+
+// The guard and the DDL it protects must share a session. A SET SESSION through
+// a pool lands on whichever connection serves it; the ALTER may draw another,
+// and then the short lock_wait_timeout never protected anything.
+func TestGuardsAndDDLShareOneSession(t *testing.T) {
+	d := &recordingDriver{}
+	const name = "saksama-native-pintest"
+	sql.Register(name, d)
+	db, err := sql.Open(name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The pool discards idle connections, so two Execs through the pool would
+	// land on two different sessions - exactly the bug pinning removes.
+	db.SetMaxIdleConns(0)
+
+	op := model.Op{Kind: model.OpAddIndex, Raw: "ADD INDEX ix_a (a)"}
+	e := New(db, engine.Options{
+		Schema: "shop", Table: "orders", Ops: []model.Op{op},
+		Plan: planWith([]analyzer.OpPlan{{
+			Kind: model.OpAddIndex, Raw: op.Raw, Method: analyzer.MethodInplace, Lock: "NONE",
+		}}),
+		LockWaitTimeoutSeconds: 3,
+	})
+
+	if _, err := e.Execute(context.Background(), nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.conns) != 1 {
+		t.Fatalf("guard and DDL must share one session; the driver opened %d", len(d.conns))
+	}
+	queries := d.conns[0].snapshot()
+	if len(queries) != 2 {
+		t.Fatalf("expected the guard and one ALTER on that session, got %d: %v", len(queries), queries)
+	}
+	if !strings.Contains(queries[0], "SET SESSION lock_wait_timeout = 3") {
+		t.Fatalf("the guard must run before the DDL on the same session: %v", queries)
+	}
+	if !strings.Contains(queries[1], "ALTER TABLE") {
+		t.Fatalf("the DDL must run on the guarded session: %v", queries)
 	}
 }

@@ -289,10 +289,7 @@ func TestGhOstSkipsTheMetadataLockCheckOnlyWhereTheInstrumentIsMissing(t *testin
 		opts := testOptions()
 		opts.Plan.Server.Version = c.version
 		e := &Engine{spec: GhOst(), opts: opts}
-		argv, cleanup, err := e.argv()
-		if cleanup != "" {
-			defer os.Remove(cleanup)
-		}
+		argv, err := e.argv()
 		if err != nil {
 			t.Fatalf("%s: %v", c.version, err)
 		}
@@ -300,5 +297,99 @@ func TestGhOstSkipsTheMetadataLockCheckOnlyWhereTheInstrumentIsMissing(t *testin
 		if got != c.want {
 			t.Errorf("server %q: --skip-metadata-lock-check present=%v, want %v", c.version, got, c.want)
 		}
+	}
+}
+
+// A table that already has triggers must be sent to pt-osc with the flag that
+// keeps them: without it the tool refuses to run, and the plan said it could.
+func TestPtOSCAddsPreserveTriggersForTriggeredTables(t *testing.T) {
+	opts := testOptions()
+	opts.TableModel.Triggers = []string{"orders_audit"}
+
+	e := New(PtOSC(), nil, conn(), opts, nil)
+	if got := joined(argvOf(t, e)); !strings.Contains(got, "--preserve-triggers") {
+		t.Fatalf("missing --preserve-triggers: %s", got)
+	}
+
+	// A triggerless table must not carry the flag: passing it where nothing
+	// needs preserving is a promise about versions we would rather not make.
+	e = New(PtOSC(), nil, conn(), testOptions(), nil)
+	if got := joined(argvOf(t, e)); strings.Contains(got, "--preserve-triggers") {
+		t.Fatalf("a triggerless table must not pass --preserve-triggers: %s", got)
+	}
+}
+
+// The recorded command is written to disk and handed to export. The password
+// has no business surviving the run that used it; the argv must stay exact,
+// because Execute runs the engine from it.
+func TestStatementRecordRedactsPasswordButArgvKeepsIt(t *testing.T) {
+	c := conn()
+	c.Password = "s3cret-hunter2"
+
+	ghOpts := testOptions()
+	ghOpts.AllowArgvPassword = true
+	e := New(GhOst(), nil, c, ghOpts, nil)
+	stmts, err := e.Statements()
+	if err != nil {
+		t.Fatalf("statements: %v", err)
+	}
+	if strings.Contains(stmts[0].SQL, c.Password) {
+		t.Fatal("the recorded command carries the plaintext password")
+	}
+	if !strings.Contains(stmts[0].SQL, "[REDACTED]") {
+		t.Fatalf("the redaction must be visible in the record: %s", stmts[0].SQL)
+	}
+	if !strings.Contains(joined(stmts[0].Argv), c.Password) {
+		t.Fatal("the executable argv must stay exact")
+	}
+
+	// pt-osc keeps the password out of argv entirely, via the option file.
+	e = New(PtOSC(), nil, c, testOptions(), nil)
+	stmts, err = e.Statements()
+	if err != nil {
+		t.Fatalf("statements: %v", err)
+	}
+	if strings.Contains(joined(stmts[0].Argv), c.Password) {
+		t.Fatal("pt-osc argv must not carry the plaintext password")
+	}
+	if strings.Contains(stmts[0].SQL, c.Password) {
+		t.Fatal("the pt-osc record carries the plaintext password")
+	}
+	// And the staged file goes when Cleanup runs, even before Execute did.
+	if e.defaultsFile == "" {
+		t.Fatal("the option file should have been staged")
+	}
+	e.Cleanup()
+	if _, err := os.Stat(e.defaultsFile); !os.IsNotExist(err) {
+		t.Fatal("Cleanup must remove the staged option file")
+	}
+	// Cleanup twice is fine: every caller defers it.
+	e.Cleanup()
+}
+
+// Statements() runs before approval and again inside Execute. The option file
+// must be staged once, not once per call - the first file would otherwise be
+// orphaned in /tmp with the password inside.
+func TestDefaultsFileStagedOnceAcrossStatements(t *testing.T) {
+	c := conn()
+	c.Password = "s3cret-hunter2"
+	e := New(PtOSC(), nil, c, testOptions(), nil)
+
+	if _, err := e.Statements(); err != nil {
+		t.Fatal(err)
+	}
+	first := e.defaultsFile
+	if first == "" {
+		t.Fatal("first Statements() must stage the option file")
+	}
+	if _, err := e.Statements(); err != nil {
+		t.Fatal(err)
+	}
+	if e.defaultsFile != first {
+		t.Fatalf("a second Statements() staged a new file %q and orphaned %q", e.defaultsFile, first)
+	}
+	e.Cleanup()
+	if _, err := os.Stat(first); !os.IsNotExist(err) {
+		t.Fatal("the staged file must be gone after Cleanup")
 	}
 }

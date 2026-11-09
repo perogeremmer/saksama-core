@@ -43,8 +43,23 @@
 # Requirements:
 #   - Percona Toolkit (pt-online-schema-change)
 #   - MySQL 8.0.30+  (FK rename bug sudah di-fix upstream)
+#
+# ============================================================
+# LEGACY, KEPT FOR THE RECORD.
+#
+# This script is the origin Saksama Core grew out of (see ARCHITECTURE.md), and
+# it does things the tool itself refuses to do: it passes the MySQL password in
+# argv, where every local user can read it in `ps`; its FK dump drops the
+# ON DELETE / ON UPDATE clauses when it recreates constraints; it patches the
+# system-wide pt-osc with sudo sed; and it interpolates database and table names
+# into queries unquoted. Use `saksama` instead; use this script only to compare
+# behaviour, and do not run it against a production server.
 # ============================================================
 set -e
+# A failure inside a pipe must stop the script: with `set -e` alone, a grep that
+# finds nothing in the FK dump exits non-zero and the failure is swallowed, so
+# the destructive step can run on counts that were never measured.
+set -o pipefail
 
 # ============================================================
 # TIMING HELPERS

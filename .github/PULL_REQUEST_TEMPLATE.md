@@ -1,42 +1,35 @@
-# Description
+# What and why
 
-Please include a summary of the changes and the related issue. Please also
-include relevant motivation and context. List any dependencies that are
-required for this change.
+Examine before you alter: state the problem this change fixes, and why it is
+fixed this way. A change that could not be explained in one paragraph is
+probably several changes.
 
 Fixes # (issue)
 
 ## Type of change
 
-Please delete options that are not relevant.
+- [ ] Bug fix - behaviour was wrong, or a guarantee was silently absent
+- [ ] New feature
+- [ ] Refactor - no operator-visible change
+- [ ] Docs only
 
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] This change requires a documentation update
+# Evidence
 
-# How Has This Been Tested?
+What proves the fix is real, not just plausible? Name the tests; a fix without
+a test that fails before it and passes after is a claim, not a fix.
 
-Please describe the tests that you ran to verify your changes. Provide
-instructions so we can reproduce. Please also list any relevant details for
-your test configuration
+- [ ] Tests added (name them)
+- [ ] `gofmt -l .` clean, `go vet ./...` clean
+- [ ] `go test ./...` passes
+- [ ] `go test -race ./internal/...` passes when goroutines were touched
+- [ ] `make test-integration` passes when a claim about a live MySQL was touched
 
-- [ ] Test A
-- [ ] Test B
+# Operator-visible change
 
-**Test Configuration**:
-* Firmware version:
-* Hardware:
-* Toolchain:
-* SDK:
+What does a person running `saksama` type, see, or get back differently?
+Include the exit code if one changed. If nothing changes, say "none".
 
-# Checklist:
+# Honest limits
 
-- [ ] My code follows the style guidelines of this project
-- [ ] I have performed a self-review of my code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
-- [ ] Any dependent changes have been merged and published in downstream modules
+What did this deliberately not do, and why? Nothing is ever finished; say what
+was left on the table so the next person does not rediscover it.

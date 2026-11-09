@@ -8,8 +8,77 @@ package render
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 )
+
+// ansiEscape matches the escape sequences the palette writes: CSI, parameters,
+// one final byte. Anything it matches is invisible on screen and therefore zero
+// width to a table.
+var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]")
+
+// stripANSI returns s without its escape sequences.
+func stripANSI(s string) string { return ansiEscape.ReplaceAllString(s, "") }
+
+// visibleLen is the width a cell occupies on screen: escape sequences count for
+// nothing, and the rest counts in runes, so a UTF-8 table name is not measured
+// as three columns wide per character.
+func visibleLen(s string) int { return utf8.RuneCountInString(stripANSI(s)) }
+
+// truncateVisible cuts s to n visible runes, copying escape sequences through
+// untouched and never cutting one in half. A cut inside coloured text closes
+// the colour, so the reset cannot bleed into the padding or the next cell.
+func truncateVisible(s string, n int) string {
+	var b strings.Builder
+	count, cut := 0, false
+	// esc walks the same grammar the palette writes and ansiEscape matches:
+	// ESC, then '[', then parameters, then one final letter.
+	const (
+		escNone = iota
+		escGot
+		escCSI
+	)
+	esc := escNone
+	for _, r := range s {
+		switch esc {
+		case escGot:
+			esc = escNone
+			if r == '[' {
+				esc = escCSI
+			}
+			b.WriteRune(r)
+			continue
+		case escCSI:
+			b.WriteRune(r)
+			switch {
+			case r >= '0' && r <= '9', r == ';':
+				// still in the parameters
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+				esc = escNone
+			default:
+				esc = escNone
+			}
+			continue
+		}
+		if r == '\x1b' {
+			esc = escGot
+			b.WriteRune(r)
+			continue
+		}
+		if count == n {
+			cut = true
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	out := b.String()
+	if cut && strings.Contains(s, "\x1b[") && !strings.HasSuffix(out, ansiReset) {
+		out += ansiReset
+	}
+	return out
+}
 
 // Align is a column alignment.
 type Align int
@@ -28,6 +97,11 @@ type Column struct {
 }
 
 // Table is a small table renderer.
+//
+// A cell may carry colour: widths are measured from the visible text, the
+// padding re-applies what the escapes hide, and truncation never lands inside a
+// sequence. What a piped table and a terminal table must have in common is the
+// geometry, not the bytes.
 type Table struct {
 	Columns []Column
 	Rows    [][]string
@@ -54,7 +128,7 @@ func (t *Table) Render(w io.Writer) error {
 
 	widths := make([]int, len(t.Columns))
 	for i, c := range t.Columns {
-		widths[i] = len(c.Header)
+		widths[i] = utf8.RuneCountInString(c.Header)
 	}
 	for _, row := range t.Rows {
 		for i := range t.Columns {
@@ -62,8 +136,8 @@ func (t *Table) Render(w io.Writer) error {
 				continue
 			}
 			cell := t.prepare(row[i])
-			if len(cell) > widths[i] {
-				widths[i] = len(cell)
+			if v := visibleLen(cell); v > widths[i] {
+				widths[i] = v
 			}
 		}
 	}
@@ -93,7 +167,7 @@ func (t *Table) Render(w io.Writer) error {
 			if header {
 				val = c.Header
 			}
-			pad := strings.Repeat(" ", widths[i]-len(val))
+			pad := strings.Repeat(" ", widths[i]-visibleLen(val))
 			if t.Border {
 				if c.Align == Right && !header {
 					b.WriteString(" " + pad + val + " ")
@@ -147,10 +221,10 @@ func (t *Table) prepare(s string) string {
 	if max <= 3 {
 		max = 60
 	}
-	if len(s) <= max {
+	if visibleLen(s) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	return truncateVisible(s, max-3) + "..."
 }
 
 // plainTable builds a borderless table.

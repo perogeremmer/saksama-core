@@ -26,8 +26,8 @@ func (b *safeBuffer) String() string {
 	return b.buf.String()
 }
 
-// The spinner is the difference between "working" and "hung". It must animate while a
-// wait is real, and it must leave no debris afterwards.
+// The wizard's waits must animate, and must leave no debris afterwards. The
+// frames themselves are tested in render; this is the wiring.
 func TestBusyAnimatesAndClearsItsLine(t *testing.T) {
 	out := &safeBuffer{}
 	w := &Wizard{out: out, animate: true}
@@ -61,20 +61,5 @@ func TestBusyIsSilentWhenNotAnimating(t *testing.T) {
 	stop()
 	if out.String() != "" {
 		t.Fatalf("a non-animated wizard wrote %q", out.String())
-	}
-}
-
-func TestElapsedReadsLikeTime(t *testing.T) {
-	for _, c := range []struct {
-		d    time.Duration
-		want string
-	}{
-		{120 * time.Millisecond, "(120ms)"},
-		{2300 * time.Millisecond, "(2.3s)"},
-		{75 * time.Second, "(1m15s)"},
-	} {
-		if got := elapsed(time.Now().Add(-c.d)); got != c.want {
-			t.Errorf("elapsed(%v) = %q, want %q", c.d, got, c.want)
-		}
 	}
 }

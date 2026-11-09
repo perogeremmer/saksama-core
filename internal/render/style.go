@@ -117,6 +117,11 @@ func isTerminal(w io.Writer) bool {
 	return term.IsTerminal(int(f.Fd()))
 }
 
+// IsTerminal reports whether w is an interactive terminal. Frontends use it to
+// gate presentation-only behaviour that needs a cursor: the moving indicator,
+// and colour by way of ShouldColor. A captured run has neither.
+func IsTerminal(w io.Writer) bool { return isTerminal(w) }
+
 // StyleLine colours one line for the doctor and menu output: the leading mark carries
 // the meaning, the rest stays readable.
 func StyleLine(mark, line string) string {

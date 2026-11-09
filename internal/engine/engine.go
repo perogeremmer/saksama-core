@@ -99,12 +99,21 @@ type HoldsCutover interface {
 	CutoverGate() string
 }
 
+// Cleaner is implemented by engines that stage something on disk for the run -
+// a copy engine's option file, for instance. The supervisor defers Cleanup on
+// every path through a run, including the ones where Execute never starts.
+type Cleaner interface {
+	// Cleanup removes what the engine staged. It must be safe to call twice and
+	// to call before Execute.
+	Cleanup()
+}
+
 // Detachable is implemented by engines that run as a child process and can
 // therefore survive their client.
 type Detachable interface {
-	// SetDetach puts the engine in its own process group and reports the child PID
-	// as soon as it exists.
-	SetDetach(detach bool, onStart func(pid int))
+	// SetDetach puts the engine in its own process group and reports the child
+	// PID, and what the process table says it is, as soon as both exist.
+	SetDetach(detach bool, onStart func(pid int, identity string))
 }
 
 // Options carries what every engine needs.

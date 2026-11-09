@@ -708,3 +708,15 @@ func TestWrongPasswordDoesNotOfferToDropTLS(t *testing.T) {
 		t.Fatalf("a non-TLS failure must not offer to disable TLS:\n%s", p.output())
 	}
 }
+
+// Truncation in runes, not bytes: a note carrying non-ASCII must not come back
+// as mojibake.
+func TestShortenKeepsRunesWhole(t *testing.T) {
+	got := shorten("ubah kolom status jadi éééééééé", 12)
+	if strings.HasSuffix(got, "�") || strings.Contains(got, "�") {
+		t.Fatalf("shorten cut a rune in half: %q", got)
+	}
+	if n := len([]rune(got)); n > 12 {
+		t.Fatalf("shorten produced %d runes, want at most 12: %q", n, got)
+	}
+}

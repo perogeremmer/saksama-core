@@ -47,15 +47,13 @@ func (t Token) IsIdentifier() bool {
 	return t.Kind == KindIdent || t.Kind == KindWord
 }
 
+// String renders the token as SQL again. It is the source text, not a re-quoting
+// of Value: the tokenizer decoded "O”Brien" into O'Brien and "a“b" into a`b,
+// and re-wrapping the decoded value would produce 'O'Brien' and `a`b` - SQL that
+// terminates the literal early or breaks the identifier, executed only after the
+// plan approved it. The source text is the one form that is always valid.
 func (t Token) String() string {
-	switch t.Kind {
-	case KindString:
-		return "'" + t.Value + "'"
-	case KindIdent:
-		return "`" + t.Value + "`"
-	default:
-		return t.Raw
-	}
+	return t.Raw
 }
 
 // Tokenize converts SQL source into tokens. Comments are dropped.

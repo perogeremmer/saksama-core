@@ -49,15 +49,16 @@ func Doctor(w io.Writer, lists []enginesetup.Checklist, border bool) error {
 }
 
 // stateMark keeps the marks the same width so the columns line up: a FAIL next to
-// an ok has to be visible from across the room.
+// an ok has to be visible from across the room. The mark sits inside brackets and
+// is never padded, so colour cannot move the column it opens.
 func stateMark(state string) string {
 	switch state {
 	case enginesetup.StateOK:
-		return "  ok"
+		return Good("  ok")
 	case enginesetup.StateMissing:
-		return "FAIL"
+		return Bad("FAIL")
 	}
-	return "  ??"
+	return Warn("  ??")
 }
 
 func maxInt(a, b int) int {

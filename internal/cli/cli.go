@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/perogeremmer/saksama-core/internal/model"
 	"github.com/perogeremmer/saksama-core/internal/parser"
 	"github.com/perogeremmer/saksama-core/internal/render"
+	"github.com/perogeremmer/saksama-core/internal/state"
 	"github.com/perogeremmer/saksama-core/internal/wizard"
 )
 
@@ -507,4 +509,15 @@ func removeFlag(args []string, name string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// classifyStoreError picks the exit code for an error that came out of the state
+// directory: a session id the operator mistyped is a usage error, and anything
+// else (a corrupt file, a full disk) is ours. The commands used to pick their
+// own, so the same mistake exited 2 in one command and 3 in another.
+func classifyStoreError(err error) int {
+	if errors.Is(err, state.ErrSessionNotFound) || errors.Is(err, os.ErrNotExist) {
+		return ExitUsage
+	}
+	return ExitInternal
 }

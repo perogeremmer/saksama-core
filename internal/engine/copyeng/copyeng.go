@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
@@ -89,11 +90,15 @@ type Engine struct {
 	lines func(process.Line)
 
 	detach         bool
-	onProcessStart func(pid int)
+	onProcessStart func(pid int, identity string)
 
 	// defaultsFile is a temporary 0600 option file used instead of argv
-	// credentials. It is removed when the run finishes.
+	// credentials. Statements() runs before approval and again inside Execute,
+	// so the file is created lazily and exactly once, and Cleanup removes it on
+	// every exit path - including the ones where Execute never runs.
 	defaultsFile string
+	defaultsOnce sync.Once
+	defaultsErr  error
 }
 
 // New creates a copy-engine wrapper.
@@ -134,22 +139,56 @@ func (e *Engine) user() string {
 	return "root"
 }
 
-// Statements builds the exact argv that will be executed. It is pure.
+// Statements builds the exact argv that will be executed. It is pure in the
+// sense that calling it twice yields the same argv; the only thing it stages is
+// the 0600 option file, which is created once and removed by Cleanup.
 func (e *Engine) Statements() ([]engine.Statement, error) {
-	argv, cleanup, err := e.argv()
+	argv, err := e.argv()
 	if err != nil {
 		return nil, err
 	}
-	e.defaultsFile = cleanup
+
+	// The record is written to disk and handed to `export`; the real password
+	// has no business surviving the run that used it. The argv itself stays
+	// exact, because Execute runs the engine from it.
+	sqlText := renderArgv(argv)
+	if e.conn.Password != "" {
+		sqlText = strings.ReplaceAll(sqlText, e.conn.Password, "[REDACTED]")
+	}
 
 	return []engine.Statement{{
 		Description: fmt.Sprintf("%s copy of %s.%s", e.Name(), e.opts.Schema, e.opts.Table),
 		Argv:        argv,
-		SQL:         renderArgv(argv),
+		SQL:         sqlText,
 	}}, nil
 }
 
-func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
+// Cleanup implements engine.Cleaner: it removes the staged option file on every
+// exit path, including the ones where Execute never runs - a dry run or a
+// declined approval must not leave credentials in /tmp.
+func (e *Engine) Cleanup() {
+	if e.defaultsFile != "" {
+		_ = os.Remove(e.defaultsFile)
+	}
+}
+
+// defaultsPath creates the 0600 option file at most once and returns its path.
+func (e *Engine) defaultsPath() (string, error) {
+	e.defaultsOnce.Do(func() {
+		if e.conn.Password == "" {
+			return
+		}
+		path, err := writeDefaultsFile(e.conn)
+		if err != nil {
+			e.defaultsErr = err
+			return
+		}
+		e.defaultsFile = path
+	})
+	return e.defaultsFile, e.defaultsErr
+}
+
+func (e *Engine) argv() (argv []string, err error) {
 	alter := strings.Join(opRaw(e.opts.Ops), ", ")
 	if strings.TrimSpace(alter) == "" {
 		alter = e.opts.Alter
@@ -200,7 +239,7 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 		// which puts it in the process list, so this is opt-in and loud.
 		if e.conn.Password != "" {
 			if !e.opts.AllowArgvPassword {
-				return nil, "", fmt.Errorf(
+				return nil, fmt.Errorf(
 					"gh-ost cannot read an option file, so its password would be visible in the process list; " +
 						"pass --allow-argv-password to accept that, or use pt-osc which supports --defaults-file")
 			}
@@ -209,16 +248,15 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 		// An empty password means "connect without one"; --ask-pass would block
 		// waiting on a terminal, which is the last thing a supervisor wants.
 		argv = append(argv, "--verbose", "--execute")
-		return argv, "", nil
+		return argv, nil
 
 	case KindPtOSC:
 		// pt-osc reads an option file, so the password never reaches argv.
 		if e.conn.Password != "" {
-			path, err := writeDefaultsFile(e.conn)
+			path, err := e.defaultsPath()
 			if err != nil {
-				return nil, "", err
+				return nil, err
 			}
-			cleanupFile = path
 			argv = append(argv, e.binary(), "--defaults-file="+path)
 		} else {
 			argv = append(argv, e.binary())
@@ -237,6 +275,11 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 		if len(e.opts.TableModel.ReferencedBy) > 0 {
 			argv = append(argv, "--alter-foreign-keys-method=auto")
 		}
+		if len(e.opts.TableModel.Triggers) > 0 {
+			// The plan only sent a triggered table here because the installed
+			// toolkit can preserve the triggers; passing the flag is how.
+			argv = append(argv, "--preserve-triggers")
+		}
 		// --print only describes the work; --execute is what performs it.
 		if e.opts.DryRun {
 			argv = append(argv, "--print")
@@ -246,10 +289,10 @@ func (e *Engine) argv() (argv []string, cleanupFile string, err error) {
 		dsn := fmt.Sprintf("D=%s,t=%s,h=%s,P=%s,u=%s",
 			e.opts.Schema, e.opts.Table, e.conn.Host, e.port(), e.user())
 		argv = append(argv, dsn)
-		return argv, cleanupFile, nil
+		return argv, nil
 	}
 
-	return nil, "", fmt.Errorf("unknown copy engine %q", e.spec.Kind)
+	return nil, fmt.Errorf("unknown copy engine %q", e.spec.Kind)
 }
 
 func (e *Engine) installHint() string {
@@ -362,9 +405,9 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 		ex.FinishedAt = e.now()
 		return ex, err
 	}
-	if e.defaultsFile != "" {
-		defer os.Remove(e.defaultsFile)
-	}
+	// The option file has served its purpose once the process has been started:
+	// on every exit path it must not outlive the run.
+	defer e.Cleanup()
 
 	if e.opts.DryRun {
 		for _, s := range stmts {
@@ -396,9 +439,9 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 	res, runErr := process.Run(ctx, process.Spec{
 		Argv:   stmts[0].Argv,
 		Detach: e.detach,
-		OnStart: func(pid int) {
+		OnStart: func(pid int, identity string) {
 			if e.onProcessStart != nil {
-				e.onProcessStart(pid)
+				e.onProcessStart(pid, identity)
 			}
 		},
 	}, collect)
@@ -493,7 +536,7 @@ func (e *Engine) tableRows(ctx context.Context, table string) int64 {
 }
 
 // SetDetach implements engine.Detachable.
-func (e *Engine) SetDetach(detach bool, onStart func(pid int)) {
+func (e *Engine) SetDetach(detach bool, onStart func(pid int, identity string)) {
 	e.detach = detach
 	e.onProcessStart = onStart
 }

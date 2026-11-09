@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,9 +32,10 @@ type Spec struct {
 	// still our child: cmd.Wait still works, and a recorded PID lets another
 	// command stop it later.
 	Detach bool
-	// OnStart receives the child PID as soon as it is known, so it can be recorded
-	// before the long part of the run begins.
-	OnStart func(pid int)
+	// OnStart receives the child PID, and what the process table says the process
+	// is, as soon as both are known, so they can be recorded together before the
+	// long part of the run begins.
+	OnStart func(pid int, identity string)
 }
 
 // Result is the outcome of a run.
@@ -43,6 +45,10 @@ type Result struct {
 	Started  time.Time
 	Finished time.Time
 	Err      error
+	// Identity is what the process table said this process was at start: its
+	// command line. It is recorded next to the PID so a later cancel can check
+	// that the number still points at the same command before signalling it.
+	Identity string
 }
 
 // Line is one line of engine output.
@@ -107,8 +113,11 @@ func Run(ctx context.Context, spec Spec, onLine func(Line)) (Result, error) {
 		res.Finished = time.Now()
 		return res, err
 	}
-	if spec.OnStart != nil && cmd.Process != nil {
-		spec.OnStart(cmd.Process.Pid)
+	if cmd.Process != nil {
+		res.Identity = waitForIdentity(cmd.Process.Pid)
+		if spec.OnStart != nil {
+			spec.OnStart(cmd.Process.Pid, res.Identity)
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -226,4 +235,48 @@ func Alive(pid int) bool {
 		return false
 	}
 	return p.Signal(syscall.Signal(0)) == nil
+}
+
+// IsEngine reports whether the process now holding pid still answers to the
+// command line recorded when it was started. Linux reuses pids, and signalling
+// whoever owns the number now is worse than not signalling at all. An empty
+// identity - no /proc on this platform, or a record from before identity capture
+// - cannot be checked, and the old behaviour applies.
+func IsEngine(pid int, identity string) bool {
+	if identity == "" {
+		return true
+	}
+	got := identityOf(pid)
+	if got == "" {
+		return true
+	}
+	return got == identity
+}
+
+// waitForIdentity reads the child's command line, retrying briefly: the child
+// may not have been scheduled yet when Start returns, and an empty command line
+// would defeat the very check the identity exists for.
+func waitForIdentity(pid int) string {
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		if id := identityOf(pid); id != "" {
+			return id
+		}
+		if time.Now().After(deadline) {
+			return ""
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// identityOf reads the command line of a process. It is empty wherever there is
+// no /proc, which is the signal for every caller that verification is not
+// possible here.
+func identityOf(pid int) string {
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+	return strings.Join(parts, " ")
 }

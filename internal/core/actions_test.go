@@ -243,3 +243,40 @@ func TestReconcileReportsAFinishedSessionThatLeftObjects(t *testing.T) {
 		t.Fatalf("a clean finish must not be reported, got %+v", quiet)
 	}
 }
+
+// An out-of-band writer (a cancel from another terminal) must continue the
+// sequence the log actually carries, not the one the session JSON remembered:
+// the running apply has emitted events since its last save, and a collision
+// would make a follower skip or duplicate an event.
+func TestRecordEventContinuesFromTheLogNotTheSession(t *testing.T) {
+	store := newTestStore(t)
+	// The log carries five events; the session was last saved knowing about two.
+	if err := store.AppendEvents("s1", []byte(
+		`{"contract_version":1,"seq":1,"type":"phase.started"}`+"\n"+
+			`{"contract_version":1,"seq":2,"type":"phase.progress"}`+"\n"+
+			`{"contract_version":1,"seq":3,"type":"phase.progress"}`+"\n"+
+			`{"contract_version":1,"seq":4,"type":"phase.progress"}`+"\n"+
+			`{"contract_version":1,"seq":5,"type":"phase.progress"}`+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	sess := &state.Session{ID: "s1", State: state.StateRunning, Database: "shop", Table: "orders", LastSeq: 2}
+	saveSession(t, store, sess)
+
+	r := &Runner{Store: store}
+	r.recordEvent(sess, "test.event", map[string]any{"note": "from another terminal"})
+
+	raw, err := store.ReadEvents("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"seq":6`) {
+		t.Fatalf("the new event must carry seq 6, log is:\n%s", text)
+	}
+	if strings.Count(text, `"seq":3`) != 1 {
+		t.Fatalf("no existing sequence may be reused:\n%s", text)
+	}
+	if sess.LastSeq != 6 {
+		t.Fatalf("the session must learn the new sequence: %d", sess.LastSeq)
+	}
+}

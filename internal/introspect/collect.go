@@ -554,6 +554,9 @@ func (c *Collector) pendingMDLocks(ctx context.Context) (int, bool) {
 }
 
 func (c *Collector) replica(ctx context.Context) (lag float64, configured, running bool) {
+	// running starts true and is cleared by anything that is not healthy: both
+	// thread columns must read Yes, and the lag must not be NULL.
+	running = true
 	// MySQL 8.0 uses SHOW REPLICA STATUS; fall back to SHOW SLAVE STATUS.
 	for _, q := range []string{"SHOW REPLICA STATUS", "SHOW SLAVE STATUS"} {
 		rows, err := c.Q.QueryContext(ctx, q)
@@ -579,9 +582,21 @@ func (c *Collector) replica(ctx context.Context) (lag float64, configured, runni
 			for i, col := range cols {
 				switch col {
 				case "Seconds_Behind_Source", "Seconds_Behind_Master":
-					fmt.Sscanf(vals[i].String, "%f", &lag)
-				case "Replica_IO_Running", "Slave_IO_Running":
-					running = strings.EqualFold(vals[i].String, "Yes")
+					// NULL means the SQL thread is stopped or the replica is still
+					// initialising. Reading it as zero would bless a broken
+					// replication setup as "no lag".
+					if vals[i].Valid {
+						fmt.Sscanf(vals[i].String, "%f", &lag)
+					} else {
+						running = false
+					}
+				case "Replica_IO_Running", "Slave_IO_Running",
+					"Replica_SQL_Running", "Slave_SQL_Running":
+					// A replica is only healthy when both threads run: an IO thread
+					// alone ships events nobody applies.
+					if !strings.EqualFold(vals[i].String, "Yes") {
+						running = false
+					}
 				}
 			}
 		}
@@ -718,8 +733,12 @@ func (c *Collector) FKCharset(ctx context.Context, tbl model.Table) ([]FKCheck, 
 		}
 		peer, err := c.columnsOf(ctx, fk.RefSchema, fk.RefTable)
 		if err != nil {
-			// Unreadable peer: leave Compatible true and let the caller note the
-			// gap, rather than reporting a false conflict.
+			// Unreadable peer: the constraint cannot be judged, and judging it
+			// compatible would affirm nothing. Verified stays false so the plan
+			// warns instead of affirming or refusing.
+			check.Compatible = false
+			check.Note = fmt.Sprintf("peer table %s.%s could not be read: %v", fk.RefSchema, fk.RefTable, err)
+			out = append(out, check)
 			continue
 		}
 		for i, local := range fk.Columns {
@@ -741,6 +760,14 @@ func (c *Collector) FKCharset(ctx context.Context, tbl model.Table) ([]FKCheck, 
 				check.Compatible = false
 			}
 			check.Pairs = append(check.Pairs, pair)
+		}
+		if len(check.Pairs) == 0 {
+			// A constraint whose every pair was skipped (non-textual columns on
+			// both sides) was never compared either.
+			check.Compatible = false
+			check.Note = "no comparable text column pair; nothing was verified"
+		} else {
+			check.Verified = true
 		}
 		out = append(out, check)
 	}

@@ -175,6 +175,29 @@ func hasMethod(p analyzer.Plan, m analyzer.Method) bool {
 
 // Execute runs each statement in its own transaction-free session, with a short
 // lock_wait_timeout so it fails fast instead of blocking the whole server.
+// pinSource is the optional ability to pin one connection out of the pool. A
+// SET SESSION sent through a pool is a promise about whichever connection
+// happens to serve it, and the ALTER may draw a different one - so without
+// pinning, the short lock_wait_timeout can silently fail to protect the DDL
+// it exists to protect.
+type pinSource interface {
+	Conn(ctx context.Context) (*sql.Conn, error)
+}
+
+// pin holds one connection for the whole run when the executor can provide it,
+// so the guards and the DDL share a server session. Executors that cannot pin
+// (test fakes, a *sql.Tx) run as they are; they never had a pool to lose.
+func (e *Engine) pin(ctx context.Context) (introspect.Querier, func(), error) {
+	if p, ok := e.db.(pinSource); ok {
+		conn, err := p.Conn(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("pinning a session for the DDL: %w", err)
+		}
+		return conn, func() { _ = conn.Close() }, nil
+	}
+	return e.db, func() {}, nil
+}
+
 func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) (engine.Execution, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -196,6 +219,16 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 		return ex, nil
 	}
 
+	// One session for the guards and every statement: the lock_wait_timeout is
+	// only real if it is set where the ALTER actually runs.
+	session, release, err := e.pin(ctx)
+	if err != nil {
+		ex.Err = err
+		ex.FinishedAt = e.now()
+		return ex, err
+	}
+	defer release()
+
 	total := len(stmts)
 	for i, s := range stmts {
 		if onProgress != nil {
@@ -209,7 +242,7 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 		start := e.now()
 		res := engine.StatementResult{Statement: s}
 
-		if err := e.setSessionGuards(ctx); err != nil {
+		if err := e.setSessionGuards(ctx, session); err != nil {
 			res.Err = err
 			res.Duration = e.now().Sub(start)
 			ex.Statements = append(ex.Statements, res)
@@ -219,7 +252,7 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 		}
 
 		var rows int64
-		result, err := e.db.ExecContext(ctx, s.SQL)
+		result, err := session.ExecContext(ctx, s.SQL)
 		if err == nil {
 			rows, _ = result.RowsAffected()
 		}
@@ -243,10 +276,12 @@ func (e *Engine) Execute(ctx context.Context, onProgress func(engine.Progress)) 
 }
 
 // setSessionGuards makes DDL fail fast instead of queueing for a metadata lock.
-// It is best-effort: a server that refuses the variable change is reported by the
-// privilege checks, not fought with here.
-func (e *Engine) setSessionGuards(ctx context.Context) error {
-	_, err := e.db.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", e.opts.LockWaitTimeoutSeconds))
+// It runs on the session that was pinned for the DDL, not on the pool: a guard
+// set on one connection protects nothing. It is best-effort: a server that
+// refuses the variable change is reported by the privilege checks, not fought
+// with here.
+func (e *Engine) setSessionGuards(ctx context.Context, q introspect.Querier) error {
+	_, err := q.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", e.opts.LockWaitTimeoutSeconds))
 	if err != nil {
 		// Non-fatal: the ALTER is still correct, it may just queue longer.
 		return nil

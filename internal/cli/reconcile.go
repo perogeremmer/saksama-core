@@ -62,6 +62,9 @@ func cmdReconcile(args []string, stdout, stderr io.Writer) int {
 
 	if len(findings) == 0 {
 		fmt.Fprintln(stdout, "no session is in an unfinished state")
+		// A corrupt record would otherwise make this the answer while artifacts
+		// sit on the database.
+		unreadableNote(store, stdout)
 		return ExitOK
 	}
 
