@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1050,5 +1051,132 @@ func TestReconcileRetireWithoutADatabase(t *testing.T) {
 	}
 	if !strings.Contains(out, "still running") {
 		t.Fatalf("the refusal must say why:\n%s", out)
+	}
+}
+
+// A flag the command does not know is a usage error, wherever it sits. The old
+// spelling let the standard library parser stop at the positional argument, so
+// anything after the session id was accepted and ignored - including a typo of
+// `--dry-run`, which for cleanup is the difference between a rehearsal and a
+// deletion.
+func TestUnknownFlagsAreRefusedInEveryPosition(t *testing.T) {
+	t.Setenv("SAKSAMA_STATE_DIR", t.TempDir())
+	for _, cmd := range [][]string{
+		{"status", "s9", "--bogus"},
+		{"status", "--bogus", "s9"},
+		{"events", "s9", "--bogus"},
+		{"cleanup", "s9", "--dryrun"},
+		{"cleanup", "s9", "--dry-run", "--bogus"},
+		{"export", "s9", "--bogus"},
+		{"cancel", "s9", "--bogus"},
+		{"attach", "s9", "--follow=false", "--bogus"},
+		{"cutover", "s9", "-h", "db.prod"},
+		{"version", "--bogus"},
+		{"version", "extra"},
+	} {
+		code, out, errOut := run(t, cmd...)
+		if code != ExitUsage {
+			t.Errorf("%v: exit %d, want %d (usage); stdout %q", cmd, code, ExitUsage, out)
+		}
+		// The message has to say what went wrong. `-h` on a command that declares
+		// no flags is the standard library's help request, so its usage text is
+		// the answer there.
+		if !strings.Contains(errOut, "not defined") &&
+			!strings.Contains(errOut, "unexpected argument") &&
+			!strings.Contains(errOut, "Usage of "+cmd[0]) {
+			t.Errorf("%v: stderr does not name the problem: %q", cmd, errOut)
+		}
+	}
+}
+
+// `cleanup <session> --dryrun` used to leave the dry-run path and go on to drop
+// the artifacts. It must now be refused before anything is opened or deleted, and
+// the message must be about the flag, not about a connection.
+func TestCleanupRefusesAMisspelledDryRunBeforeTouchingAnything(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SAKSAMA_STATE_DIR", dir)
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(&state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateFailed,
+		Database: "shop", Table: "orders", Engine: "gh-ost",
+		Artifacts: []state.ArtifactRecord{{Kind: "table", Name: "_orders_gho", Engine: "gh-ost", SafeToDelete: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := run(t, "cleanup", "s1", "--dryrun")
+	if code != ExitUsage {
+		t.Fatalf("exit %d, want %d (usage)", code, ExitUsage)
+	}
+	if !strings.Contains(errOut, "dryrun") {
+		t.Fatalf("stderr must name the flag that was refused: %q", errOut)
+	}
+	if !strings.Contains(errOut, "not defined") {
+		t.Fatalf("stderr must say the flag does not exist: %q", errOut)
+	}
+	// A refusal that still printed the plan would be indistinguishable from the
+	// dry run it was meant to be.
+	if strings.Contains(out, "_orders_gho") {
+		t.Fatalf("a refused invocation must not plan anything: %q", out)
+	}
+}
+
+// The connection flags and the map that tells the parser which of them take a
+// value have to agree. A name missing from the map turns `-d shop` into a
+// positional argument called "shop", which is how the session id goes missing.
+func TestConnValueFlagsMatchTheDeclaredFlags(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	var c connFlags
+	addConnFlags(fs, &c)
+	values := connValueFlags()
+
+	seen := 0
+	fs.VisitAll(func(f *flag.Flag) {
+		seen++
+		_, isBool := f.Value.(interface{ IsBoolFlag() bool })
+		if isBool {
+			if values[f.Name] {
+				t.Errorf("%q is a boolean flag and must not swallow the next argument", f.Name)
+			}
+			return
+		}
+		if !values[f.Name] {
+			t.Errorf("%q takes a value but is missing from connValueFlags", f.Name)
+		}
+	})
+	if seen == 0 {
+		t.Fatal("no connection flags were declared")
+	}
+	for name := range values {
+		if fs.Lookup(name) == nil {
+			t.Errorf("connValueFlags names %q, which addConnFlags no longer declares", name)
+		}
+	}
+}
+
+// `cutover` on a session that never held a gate is a precondition the operator can
+// read and fix, not an internal failure. It used to exit 3.
+func TestCutoverWithoutAHeldGateIsAUsageError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SAKSAMA_STATE_DIR", dir)
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(&state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateRunning,
+		Database: "shop", Table: "orders", Engine: "gh-ost",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := run(t, "cutover", "s1")
+	if code != ExitUsage {
+		t.Fatalf("exit %d, want %d (usage); stderr %q", code, ExitUsage, errOut)
+	}
+	if !strings.Contains(errOut, "no held cutover") {
+		t.Fatalf("stderr must say why: %q", errOut)
 	}
 }

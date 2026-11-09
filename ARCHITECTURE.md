@@ -3,6 +3,7 @@
 > **Design doc.** Status: draft, evolving with the implementation.
 > **Date:** 2026-11-04
 > **Origin:** a hand-written `migrate.sh` wrapper around pt-osc, plus the research in this file.
+> The script is archived at [docs/historical/migrate.sh](docs/historical/migrate.sh); it is evidence, not a tool.
 > **Product name:** **Saksama Core**, binary `saksama`. The naming rationale is in the README.
 
 ---
@@ -320,6 +321,9 @@ Go, for a static binary, `go:embed`, a mature MySQL driver, cheap concurrency fo
 ---
 
 ## 14. Findings from auditing the original `migrate.sh`
+
+Archived at [docs/historical/migrate.sh](docs/historical/migrate.sh) - kept for this
+audit, not for use.
 
 The original script (816 lines) proved the need and also showed what goes wrong.
 

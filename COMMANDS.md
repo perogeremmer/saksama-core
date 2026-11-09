@@ -572,6 +572,14 @@ Limits worth stating plainly:
   backward compatible still needs an application deploy strategy.
 - **No rollback after the swap.** Once released, new writes live only in the new
   table.
+- **It talks to the state directory, not to the server.** No connection flags: the
+  gate is a file, and the engine that is waiting reports the outcome. `cutover` used
+  to accept `-h`/`-d` and silently ignore them, which read like a server selector.
+
+Releasing a gate that does not exist - the session was never started with
+`--hold-cutover`, or the gate is already gone - exits `2` with the session named, the
+same as any other precondition the operator can read and fix. A missing session is
+`2` as well; everything else is `3`.
 
 ---
 
@@ -585,7 +593,12 @@ saksama status --plain         # borderless, for logs
 ```
 
 Flags `--json` and `--plain` are accepted in any position, including after the
-session id.
+session id. A flag this command does not know is a usage error wherever it sits -
+`--jsn` used to be swallowed in silence and print the table anyway.
+
+`status <session>` exits `1` when that session is `blocked`, the same code a blocked
+plan uses, so a CI job can ask "did this change ever become safe" without parsing
+text. Listing every session exits `0`; the table names the blocked ones.
 
 ---
 

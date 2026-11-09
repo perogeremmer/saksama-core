@@ -63,9 +63,9 @@ without the analyzer contradicting it.
 | C1 | a column used by an outgoing foreign key is modified or dropped | `BLOCKER` | done | `1832: Cannot change column, used in a foreign key constraint` |
 | C2 | a column referenced by an incoming foreign key is modified or dropped | `BLOCKER` | done | `1832` |
 | C3 | a foreign key carries an `ON DELETE` or `ON UPDATE` action | `INFO` | done | any recreation must preserve it |
-| C4 | a copy engine is used on a table with foreign keys | | moved | gh-ost's version of this is a hard requirement in the engine matrix; pt-osc handles it |
+| C4 | a copy engine is used on a table with foreign keys | `BLOCKER` | moved | gh-ost's version of this is a hard requirement in the engine matrix; pt-osc handles it |
 | C5 | the table is involved in more than ten foreign keys | `WARN` | done | each is a potential integrity window |
-| C6 | Aurora, where `foreign_key_checks=0` is unavailable | | planned | reported today as a managed-service note, not a distinct ID |
+| C6 | Aurora, where `foreign_key_checks=0` is unavailable | `WARN` | planned | reported today as a managed-service note, not a distinct ID |
 | C7 | a foreign key column is nullable or not | `INFO` | planned | affects `ON DELETE SET NULL` behaviour |
 | C8 | the ALTER itself changes a foreign key | `BLOCKER` | done | foreign key DDL is out of scope in v1 |
 

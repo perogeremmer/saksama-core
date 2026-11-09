@@ -17,17 +17,22 @@ import (
 func cmdCleanup(args []string, stdout, stderr io.Writer) int {
 	var conn connFlags
 
-	dryRunFlag := hasFlag(args, "--dry-run")
-	args = removeFlag(args, "--dry-run")
+	// `--dry-run` is parsed, not sniffed out of the argument list. The old
+	// spelling looked for the exact token and removed it, then handed the rest to
+	// the parser - which stops at the session id, so a misspelling like `--dryrun`
+	// was accepted in silence and the command went on to drop the artifacts for
+	// real. A flag this one turns a rehearsal into a deletion must be exact, and an
+	// unknown one must be refused.
+	positional, flagArgs := extractPositionals(args, connValueFlags())
 
 	fsNew := flag.NewFlagSet("cleanup", flag.ContinueOnError)
 	fsNew.SetOutput(stderr)
 	addConnFlags(fsNew, &conn)
-	fsNew.Bool("dry-run", false, "show what would be dropped, and stop (accepted in any position)")
-	if err := fsNew.Parse(args); err != nil {
+	dryRunFlag := fsNew.Bool("dry-run", false, "show what would be dropped, and stop (accepted in any position)")
+	if err := fsNew.Parse(flagArgs); err != nil {
 		return ExitUsage
 	}
-	if fsNew.NArg() == 0 {
+	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama cleanup: session id required")
 		return ExitUsage
 	}
@@ -41,7 +46,7 @@ func cmdCleanup(args []string, stdout, stderr io.Writer) int {
 	// The read-only pass decides whether a connection is needed at all. A session
 	// with nothing to drop, or one whose objects a recovery still needs, must not
 	// require credentials: refusing is the answer, and it is answerable offline.
-	plan, err := core.New(nil, store).Cleanup(context.Background(), fsNew.Arg(0), true)
+	plan, err := core.New(nil, store).Cleanup(context.Background(), positional[0], true)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama cleanup: %v\n", err)
 		// A mistyped session id is the operator's typo here too. This command used
@@ -54,7 +59,7 @@ func cmdCleanup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, plan.Refused)
 		return ExitOK
 	}
-	if dryRunFlag {
+	if *dryRunFlag {
 		fmt.Fprintf(stdout, "would drop %d artifact(s):\n", len(plan.Items))
 		for _, a := range plan.Items {
 			fmt.Fprintf(stdout, "  %-8s %s\n", a.Kind, a.Name)
@@ -74,7 +79,7 @@ func cmdCleanup(args []string, stdout, stderr io.Writer) int {
 	}
 	defer db.Close()
 
-	res, err := core.New(db, store).Cleanup(context.Background(), fsNew.Arg(0), false)
+	res, err := core.New(db, store).Cleanup(context.Background(), positional[0], false)
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama cleanup: %v\n", err)
 		return ExitInternal

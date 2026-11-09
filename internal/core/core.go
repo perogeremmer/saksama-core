@@ -34,6 +34,11 @@ import (
 // error so callers can map it to exit code 1 without inspecting strings.
 var ErrBlocked = errors.New("migration blocked by safety rules")
 
+// ErrNoHeldCutover is returned when `cutover` is asked to release a gate that does
+// not exist: the session was never started with --hold-cutover, or the gate is
+// already gone. It is the operator's precondition, not an internal failure.
+var ErrNoHeldCutover = errors.New("no held cutover")
+
 // Request is one plan or apply invocation.
 type Request struct {
 	Conn     cred.Conn
@@ -904,7 +909,7 @@ func (r *Runner) ReleaseCutover(ctx context.Context, sessionID string) (*state.S
 		return nil, err
 	}
 	if sess.CutoverFlagFile == "" {
-		return nil, fmt.Errorf("session %s has no held cutover (it was not started with --hold-cutover, or the gate is already released)", sessionID)
+		return nil, fmt.Errorf("session %s has no held cutover (it was not started with --hold-cutover, or the gate is already released): %w", sessionID, ErrNoHeldCutover)
 	}
 	if err := os.Remove(sess.CutoverFlagFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("cannot release the cutover gate: %w", err)
