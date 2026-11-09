@@ -277,7 +277,7 @@ flowchart LR
 | 80x24 | menus are one line per choice with an optional note, and degrade by truncation |
 | no clipboard | every screen prints the command it is equivalent to |
 | many admins | the wizard reads the same state directory as the CLI, so both see the same sessions |
-| crash | `reconcile` reports what an interrupted session left behind |
+| crash | `reconcile` reports what an interrupted session left behind; `--retire` marks a dead attempt failed and releases its lock |
 
 Why not a full-screen TUI: it adds a rendering runtime, needs a pty to test, and
 changes shape every time the approval or state model does. The wizard is a thin
