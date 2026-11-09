@@ -475,7 +475,7 @@ claim something this repository does not do.
 
 | | Verified |
 |---|---|
-| MySQL 8.0.46 and 8.4.13 | 25 integration tests each |
+| MySQL 8.0.46 and 8.4.13 | the whole integration suite on each; a test that a version cannot do skips and says so |
 | gh-ost 1.1.11 | a real migration: copy, cutover, verification |
 | pt-online-schema-change 3.0.13 and 3.7.2 | real migrations, including a table with `ON DELETE CASCADE` and a composite key |
 | MySQL 5.6 and 5.7 | claimed by the rules, not run by the suite |
