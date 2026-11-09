@@ -51,6 +51,21 @@ func addConnFlags(fs *flag.FlagSet, c *connFlags) {
 	fs.BoolVar(&c.noDefaults, "no-defaults", false, "do not read ~/.my.cnf")
 }
 
+// connValueFlags names every connection flag that consumes the next argument, for
+// extractPositionals. It is declared next to addConnFlags and a test compares the
+// two: a name missing here turns `-d shop` into a positional argument called
+// "shop", which is the kind of quiet misreading this package keeps finding.
+func connValueFlags() map[string]bool {
+	return map[string]bool{
+		"h": true, "host": true,
+		"P": true, "port": true,
+		"u": true, "user": true,
+		"d": true, "database": true,
+		"tls":                 true,
+		"defaults-extra-file": true,
+	}
+}
+
 func (c *connFlags) resolve() (cred.Conn, error) {
 	return cred.Resolve(cred.Options{
 		Host: c.host, Port: c.port, User: c.user, TLS: c.tls, Database: c.database,
@@ -386,21 +401,18 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 // --- status -----------------------------------------------------------------
 
 func cmdStatus(args []string, stdout, stderr io.Writer) int {
-	// Users naturally type "status s2 --json"; strip known flags first so the
-	// standard library flag parser does not stop at the positional argument.
-	jsonRequested := hasFlag(args, "--json")
-	plainRequested := hasFlag(args, "--plain")
-	args = removeFlag(args, "--json")
-	args = removeFlag(args, "--plain")
+	// Flags are accepted in any position, and an unknown one is an error. The old
+	// spelling stripped the two flags it knew about and let the parser stop at the
+	// positional argument, so `status s2 --jsn` printed a table and said nothing.
+	positional, flagArgs := extractPositionals(args, nil)
 
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Bool("json", false, "JSON output (accepted in any position)")
-	fs.Bool("plain", false, "borderless output (accepted in any position)")
-	if err := fs.Parse(args); err != nil {
+	jsonOut := fs.Bool("json", false, "JSON output (accepted in any position)")
+	plainRequested := fs.Bool("plain", false, "borderless output (accepted in any position)")
+	if err := fs.Parse(flagArgs); err != nil {
 		return ExitUsage
 	}
-	jsonOut := &jsonRequested
 
 	store, err := newStore()
 	if err != nil {
@@ -408,7 +420,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return ExitInternal
 	}
 
-	if fs.NArg() == 0 {
+	if len(positional) == 0 {
 		sessions, err := store.List()
 		if err != nil {
 			fmt.Fprintf(stderr, "saksama status: %v\n", err)
@@ -428,7 +440,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 			return ExitOK
 		}
 		table := render.Table{
-			Border:   !plainRequested,
+			Border:   !*plainRequested,
 			MaxWidth: 40,
 			Columns: []render.Column{
 				{Header: "ID"}, {Header: "STATE"}, {Header: "TARGET"},
@@ -445,7 +457,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 
-	sess, err := store.Load(fs.Arg(0))
+	sess, err := store.Load(positional[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama status: %v\n", err)
 		return classifyStoreError(err)
@@ -485,13 +497,14 @@ func describeState(s *state.Session) string {
 // --- events -----------------------------------------------------------------
 
 func cmdEvents(args []string, stdout, stderr io.Writer) int {
+	positional, flagArgs := extractPositionals(args, nil)
 	fs := flag.NewFlagSet("events", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Bool("json", true, "JSONL output (always on)")
-	if err := fs.Parse(args); err != nil {
+	fs.Bool("json", true, "JSONL output (always on; accepted for symmetry)")
+	if err := fs.Parse(flagArgs); err != nil {
 		return ExitUsage
 	}
-	if fs.NArg() == 0 {
+	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama events: session id required")
 		return ExitUsage
 	}
@@ -500,7 +513,7 @@ func cmdEvents(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "saksama events: %v\n", err)
 		return ExitInternal
 	}
-	data, err := store.ReadEvents(fs.Arg(0))
+	data, err := store.ReadEvents(positional[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama events: %v\n", err)
 		return classifyStoreError(err)

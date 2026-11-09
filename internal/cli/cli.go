@@ -92,6 +92,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "schema":
 		return cmdSchema(args[1:], stdout, stderr)
 	case "version", "--version", "-V":
+		// Every other command refuses a flag it does not know; this one used to
+		// print the version and ignore the rest of the line, so `version --json`
+		// looked like it had asked for something. There is one output shape.
+		if len(args) > 1 {
+			fmt.Fprintf(stderr, "saksama version: unexpected argument %q; this command takes none\n", args[1])
+			return ExitUsage
+		}
 		fmt.Fprintf(stdout, "saksama %s (Saksama Core, contract v%d)\n", buildVersion(Version), analyzer.ContractVersion)
 		return ExitOK
 	case "help", "--help", "-help":
