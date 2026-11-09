@@ -28,7 +28,7 @@ doctor (section S).
 
 | ID | Check | Severity | Status | MySQL error it prevents |
 |---|---|---|---|---|
-| A1 | the two sides of a foreign key disagree on charset or collation | `BLOCKER` | done | `3780: Referencing column ... are incompatible` |
+| A1 | the two sides of a foreign key disagree on charset or collation | `BLOCKER` when the pair was compared; `WARN` when it could not be verified (an unreadable peer table, or no text column pair to compare) | done | `3780: Referencing column ... are incompatible`. A check that never ran affirms nothing |
 | A2 | `CONVERT TO CHARACTER SET` on a table with foreign keys | `BLOCKER` | done | constraint recreation fails |
 | A3 | a foreign key column's charset differs from the table default | `WARN` | done | `3780` |
 | A4 | a column still uses `utf8mb3`, deprecated since 8.0.28 | `WARN` | done | deprecation, and 3-byte truncation surprises |
@@ -79,7 +79,7 @@ doctor (section S).
 | D2 | `lock_wait_timeout` is unbounded | `INFO` | done | the default is 86400 seconds, so a DDL can hang for a day |
 | D3 | a transaction older than the threshold is open | `WARN` | done | row locks and old row versions slow the copy |
 | D4 | `Threads_running` is elevated | `INFO` or `WARN` | done | throttling will engage |
-| D5 | replication is stopped, or lagging | `BLOCKER` when stopped or above 30s, `WARN` above 5s | done | gh-ost reads from a replica |
+| D5 | replication is stopped, or lagging | `BLOCKER` when stopped or above 30s, `WARN` above 5s | done | gh-ost reads from a replica. Stopped means either thread down - an IO thread alone ships events nobody applies - and a NULL `Seconds_Behind_Master` reads as stopped, never as zero lag |
 | D6 | disk space: below 10 percent free is refused, below 25 percent warns, and a copy needs twice the table size. An unmeasured disk refuses `apply` and only warns `plan` - but only for a change that copies or rebuilds the table, or when a copy engine was chosen; `ADD INDEX` and other metadata changes are never blocked for it | `BLOCKER` or `WARN` | done | `1021: Disk full`. A change that copies nothing is never blocked for the missing figure, and when the copy only happens because a copy engine was chosen, the remedy says so and names `saksama engine clear` |
 | D7 | the table already has triggers | `WARN` | done | both engines create their own |
 | D8 | leftover artifacts from a previous migration | `BLOCKER` | done | a new run would collide with them |

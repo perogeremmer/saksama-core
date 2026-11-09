@@ -938,3 +938,62 @@ func TestStatusSurfacesUnreadableSessions(t *testing.T) {
 		t.Fatalf("the unreadable session must be named:\n%s", out)
 	}
 }
+
+// Retire is the answer to reconcile's own advice, and it must be reachable
+// without a database: the engine is gone by definition.
+func TestReconcileRetireWithoutADatabase(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SAKSAMA_STATE_DIR", dir)
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(&state.Session{
+		ID: "s1", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateRunning,
+		Database: "shop", Table: "orders", EnginePID: 999999999,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Lock("shop", "orders", "s1", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := run(t, "reconcile", "--retire", "s1")
+	if code != ExitOK {
+		t.Fatalf("exit %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, "now failed") || !strings.Contains(out, "released") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	sess, err := store.Load("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.State != state.StateFailed {
+		t.Fatalf("state = %s", sess.State)
+	}
+
+	// Retiring twice is a no-op, not an error, and says so.
+	code, out, _ = run(t, "reconcile", "--retire", "s1")
+	if code != ExitOK {
+		t.Fatalf("second retire exited %d", code)
+	}
+	if !strings.Contains(out, "already ended") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+
+	// A live engine is refused: cancel is the verb for that.
+	if err := store.Save(&state.Session{
+		ID: "s2", CreatedAt: "2026-01-01T00:00:00Z", State: state.StateRunning,
+		Database: "shop", Table: "other", EnginePID: os.Getpid(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ = run(t, "reconcile", "--retire", "s2")
+	if code != ExitUsage {
+		t.Fatalf("retiring a live engine must be refused with the usage code: exit %d", code)
+	}
+	if !strings.Contains(out, "still running") {
+		t.Fatalf("the refusal must say why:\n%s", out)
+	}
+}

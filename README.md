@@ -270,6 +270,7 @@ saksama status s3
 saksama cutover s3                  # this is the point of no return
 saksama cancel s3                   # before cutover only; add --force-kill if needed
 saksama reconcile                   # after a crash, an OOM, or a lost terminal
+saksama reconcile --retire s3       # mark a dead attempt failed and free the table
 saksama cleanup s3 --dry-run        # then drop only what the session owns
 ```
 
@@ -284,6 +285,7 @@ silent production path.
 | session state | `saksama status` | `done`, `failed`, and the engine's own output |
 | progress | `saksama attach <id>` | rows copied, percent, `Threads_running`, throttling, polled from the database |
 | leftovers | `saksama reconcile`, `advise --live` | tables and triggers an interrupted run left behind |
+| a dead attempt | `saksama reconcile --retire <id>` | the session said `running` but the engine is gone; retire marks it failed and releases the table lock, so the change can be planned again |
 | audit | `saksama export <id>` | the event log as a file you can keep |
 
 ### Beta, honestly
