@@ -27,7 +27,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
           cache: true
 
       # A tag is only worth publishing if the tree it points at passes.
