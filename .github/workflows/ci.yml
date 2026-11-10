@@ -127,6 +127,9 @@ jobs:
       fail-fast: false
       matrix:
         mysql: ["8.0", "8.4"]
+    # A service container's host port is bound by the runner before the job starts, on
+    # a fresh machine, so a fixed mapping cannot collide with anything here. The manual
+    # `docker run -p` jobs cannot say that, and they ask docker for a port instead.
     services:
       mysql:
         image: mysql:${{ matrix.mysql }}
@@ -229,13 +232,16 @@ jobs:
           docker run -d --name mysql-57 \
             -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
             -e MYSQL_DATABASE=shop \
-            -p 33308:3306 \
+            -p 127.0.0.1::3306 \
             mysql:5.7 \
             --log-bin=mysql-bin --server-id=1 --binlog-format=ROW \
             --performance-schema-instrument='wait/lock/metadata/sql/mdl=ON'
           for i in $(seq 1 90); do
             if docker exec mysql-57 mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
-              echo ready; exit 0
+              port=$(docker port mysql-57 3306/tcp | head -1 | sed 's/.*://')
+              echo "ready on host port ${port}"
+              echo "PORT_57=${port}" >> "$GITHUB_ENV"
+              exit 0
             fi
             sleep 2
           done
@@ -250,11 +256,14 @@ jobs:
           docker run -d --name mysql-56 \
             -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
             -e MYSQL_DATABASE=shop \
-            -p 33309:3306 mysql:5.6 \
+            -p 127.0.0.1::3306 mysql:5.6 \
             --log-bin=mysql-bin --server-id=1 --binlog-format=ROW --skip-ssl
           for i in $(seq 1 60); do
             if docker exec mysql-56 mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
-              echo ready; exit 0
+              port=$(docker port mysql-56 3306/tcp | head -1 | sed 's/.*://')
+              echo "ready on host port ${port}"
+              echo "PORT_56=${port}" >> "$GITHUB_ENV"
+              exit 0
             fi
             sleep 2
           done
@@ -265,10 +274,13 @@ jobs:
           docker run -d --name mariadb-1011 \
             -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
             -e MYSQL_DATABASE=shop \
-            -p 33310:3306 mariadb:10.11
+            -p 127.0.0.1::3306 mariadb:10.11
           for i in $(seq 1 60); do
             if docker exec mariadb-1011 mariadb-admin ping -h127.0.0.1 -uroot --silent >/dev/null 2>&1; then
-              echo ready; exit 0
+              port=$(docker port mariadb-1011 3306/tcp | head -1 | sed 's/.*://')
+              echo "ready on host port ${port}"
+              echo "PORT_MARIADB=${port}" >> "$GITHUB_ENV"
+              exit 0
             fi
             sleep 2
           done
@@ -303,7 +315,7 @@ jobs:
       - name: MySQL 5.6 plans, with the unobservable lock queue stated
         run: |
           make build
-          ./bin/saksama plan --live -h 127.0.0.1 -P 33309 -u root -d shop -t kept_table \
+          ./bin/saksama plan --live -h 127.0.0.1 -P "$PORT_56" -u root -d shop -t kept_table \
             -a "ADD INDEX ix (a)" --tls false --json > /tmp/56.json
           jq -e '.recommendation.blocked == false' /tmp/56.json
           jq -e '[.checks[] | select(.id == "E5b" and .severity == "WARN")] | length == 1' /tmp/56.json
@@ -312,28 +324,28 @@ jobs:
       - name: MySQL 5.6 production run blocks until the lock queue risk is accepted
         run: |
           set +e
-          ./bin/saksama plan --live -h 127.0.0.1 -P 33309 -u root -d shop -t kept_table \
+          ./bin/saksama plan --live -h 127.0.0.1 -P "$PORT_56" -u root -d shop -t kept_table \
             -a "ADD INDEX ix (a)" --tls false --production --json > /tmp/56p.json
           code=$?
           set -e
           test "$code" -eq 1
           jq -e '[.checks[] | select(.id == "E5b" and .severity == "BLOCKER")] | length == 1' /tmp/56p.json
 
-          ./bin/saksama plan --live -h 127.0.0.1 -P 33309 -u root -d shop -t kept_table \
+          ./bin/saksama plan --live -h 127.0.0.1 -P "$PORT_56" -u root -d shop -t kept_table \
             -a "ADD INDEX ix (a)" --tls false --production --accept-unknown-mdl --json > /tmp/56a.json
           jq -e '[.checks[] | select(.id == "E5b" and .severity == "BLOCKER")] | length == 0' /tmp/56a.json
 
       - name: MySQL 5.6 runs the whole integration suite, with a real gh-ost
         env:
-          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33309)/"
           PATH: /tmp/ghost:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
         run: |
-          go test -tags=integration -count=1 -v ./test/integration/
+          SAKSAMA_TEST_DSN="root:@tcp(127.0.0.1:${PORT_56})/" \
+            go test -tags=integration -count=1 -v ./test/integration/
 
       - name: MariaDB is refused by E1, not by an introspection crash
         run: |
           set +e
-          ./bin/saksama plan --live -h 127.0.0.1 -P 33310 -u root -d shop -t kept_table \
+          ./bin/saksama plan --live -h 127.0.0.1 -P "$PORT_MARIADB" -u root -d shop -t kept_table \
             -a "ADD INDEX ix (a)" --json > /tmp/mdb.json
           code=$?
           set -e
@@ -342,10 +354,10 @@ jobs:
 
       - name: MySQL 5.7 runs the full suite with real copy engines
         env:
-          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33308)/"
           PATH: /tmp/ghost:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
         run: |
-          go test -tags=integration -count=1 -v ./test/integration/
+          SAKSAMA_TEST_DSN="root:@tcp(127.0.0.1:${PORT_57})/" \
+            go test -tags=integration -count=1 -v ./test/integration/
 
   # install.sh is the only install path for people without a Go toolchain, so its
   # failure modes matter more than its success path. Run it against a local mirror
@@ -455,10 +467,13 @@ jobs:
           docker run -d --name mysql-instant \
             -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
             -e MYSQL_DATABASE=shop \
-            -p 33306:3306 mysql:${{ matrix.mysql }} --skip-ssl
+            -p 127.0.0.1::3306 mysql:${{ matrix.mysql }} --skip-ssl
           for i in $(seq 1 90); do
             if docker exec mysql-instant mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
-              echo ready; exit 0
+              port=$(docker port mysql-instant 3306/tcp | head -1 | sed 's/.*://')
+              echo "ready on host port ${port}"
+              echo "PORT_INSTANT=${port}" >> "$GITHUB_ENV"
+              exit 0
             fi
             sleep 2
           done
@@ -476,9 +491,9 @@ jobs:
           esac
 
       - name: The matrix matches what this server actually does
-        env:
-          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
-        run: go test -tags=integration -count=1 -v -run 'TestInstant' ./test/integration/
+        run: |
+          SAKSAMA_TEST_DSN="root:@tcp(127.0.0.1:${PORT_INSTANT})/" \
+            go test -tags=integration -count=1 -v -run 'TestInstant' ./test/integration/
 
   # The flag probe: what the wrappers emit must exist in the engine binaries.
   # A copy engine exits non-zero on one unknown flag, so a wrong spelling is a

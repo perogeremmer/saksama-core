@@ -33,11 +33,14 @@ jobs:
           docker run -d --name mysql-volume \
             -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
             -e MYSQL_DATABASE=shop \
-            -p 33306:3306 mysql:8.0 --skip-ssl \
+            -p 127.0.0.1::3306 mysql:8.0 --skip-ssl \
             --innodb-buffer-pool-size=24M
           for i in $(seq 1 90); do
             if docker exec mysql-volume mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
-              echo ready; exit 0
+              port=$(docker port mysql-volume 3306/tcp | head -1 | sed 's/.*://')
+              echo "ready on host port ${port}"
+              echo "PORT_VOLUME=${port}" >> "$GITHUB_ENV"
+              exit 0
             fi
             sleep 2
           done
@@ -55,12 +58,12 @@ jobs:
 
       - name: A copy under live writes loses nothing and respects the load ceiling
         env:
-          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
           SAKSAMA_VOLUME_TESTS: "1"
           PATH: /tmp/ghost:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
         run: |
-          go test -tags=integration -count=1 -timeout 30m -v \
-            -run 'TestCopyWithConcurrentWrites' ./test/integration/
+          SAKSAMA_TEST_DSN="root:@tcp(127.0.0.1:${PORT_VOLUME})/" \
+            go test -tags=integration -count=1 -timeout 30m -v \
+              -run 'TestCopyWithConcurrentWrites' ./test/integration/
 
       - name: Container logs when it fails
         if: failure()
