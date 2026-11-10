@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
 	"github.com/perogeremmer/saksama-core/internal/engine"
@@ -24,6 +25,10 @@ import (
 // than on every pull request.
 //
 // It is opt-in: SAKSAMA_VOLUME_TESTS=1.
+
+// writerInterval is how often the concurrent writer commits: about 200 rows per
+// second, which is a busy table and still leaves the copy room to finish.
+const writerInterval = 5 * time.Millisecond
 
 func TestCopyWithConcurrentWritesLosesNothing(t *testing.T) {
 	if os.Getenv("SAKSAMA_VOLUME_TESTS") != "1" {
@@ -51,6 +56,14 @@ func TestCopyWithConcurrentWritesLosesNothing(t *testing.T) {
 	// The writer is the point of the test: rows committed while the copy runs must
 	// exist afterwards. It stops only when the migration has finished, so the last
 	// write and the swap race on purpose.
+	//
+	// It commits with a pause between rows. A writer with no pause at all starves
+	// gh-ost's cut-over: the swap needs an exclusive moment on the table, and a loop
+	// that re-acquires the row lock immediately never gives it one - the copy then
+	// sits in cut-over until the test times out, which is what the nightly did twice
+	// while the same test passed in 50 seconds locally. Bounding the rate keeps the
+	// claim intact (thousands of rows still commit during a copy) and stops the test
+	// from measuring its own harness.
 	stop := make(chan struct{})
 	var committed int64
 	var writerErr atomic.Value
@@ -64,12 +77,20 @@ func TestCopyWithConcurrentWritesLosesNothing(t *testing.T) {
 				return
 			default:
 			}
+			// A steady rate, not a busy loop. Each row is committed and then the writer
+			// waits: the pause is what lets gh-ost's cut-over take an exclusive moment
+			// on the table, and without it the copy sat in cut-over until the nightly
+			// timed out - twice - while the same test passed in 50 seconds locally. The
+			// rate is what a busy table looks like; a busy loop is what a benchmark
+			// looks like, and it was measuring this harness rather than the copy.
 			if _, err := db.Exec("INSERT INTO `t` (`status`, `origin`) VALUES ('copying', 'writer')"); err != nil {
 				// A duplicate or a lock timeout at cut-over is not data loss; the write
 				// simply did not commit, and committed is only incremented on success.
+				time.Sleep(writerInterval)
 				continue
 			}
 			atomic.AddInt64(&committed, 1)
+			time.Sleep(writerInterval)
 		}
 	}()
 

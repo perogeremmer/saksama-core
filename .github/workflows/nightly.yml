@@ -164,7 +164,7 @@ jobs:
           chmod +x /tmp/ghost/gh-ost
           /tmp/ghost/gh-ost --version
 
-      - name: A 2 GiB copy, held at the gate, under live writes
+      - name: The copy, held at the gate, under live writes
         env:
           SAKSAMA_SCALE_TESTS: "1"
           # 1 GiB, not the test's own 2 GiB default: the peak on disk is roughly five
