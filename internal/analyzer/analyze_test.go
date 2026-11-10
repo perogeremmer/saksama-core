@@ -2092,3 +2092,65 @@ func TestCheckProbeSkippedSaysWhy(t *testing.T) {
 		t.Fatalf("an unprobed constraint must say so: %q", got[0].Detail)
 	}
 }
+
+// D16: ids handed out and not kept. Informational, and it has to say what the number
+// does to the two things a reader would act on: the id space, and the row estimate the
+// duration is built from.
+func TestAutoIncrementGapIsReported(t *testing.T) {
+	tbl := baseTable()
+	tbl.Rows = 1_000_000
+	tbl.AutoIncrement = 40_000_000
+
+	p := plan(t, tbl, "8.0.36", "ADD INDEX ix_created (created_at)")
+	if !hasCheck(p, "D16", SeverityInfo) {
+		t.Fatalf("a 40x gap must be reported: %+v", checksOf(p, "D16"))
+	}
+	got := checksOf(p, "D16")[0]
+	if !strings.Contains(got.Detail, "39000000") {
+		t.Fatalf("the detail must count the ids that were handed out: %q", got.Detail)
+	}
+	if !strings.Contains(got.Remediation, "2147483647") || !strings.Contains(got.Remediation, "1674") {
+		t.Fatalf("the remediation must name the limit and the error: %q", got.Remediation)
+	}
+
+	// A table whose ids track its rows is the ordinary case and must stay quiet.
+	near := baseTable()
+	near.Rows = 1_000_000
+	near.AutoIncrement = 1_050_000
+	if got := checksOf(plan(t, near, "8.0.36", "ADD INDEX ix_created (created_at)"), "D16"); len(got) != 0 {
+		t.Fatalf("an id space that matches the rows is not a finding: %+v", got)
+	}
+}
+
+// E8: a replica exists. The check exists so "the copy will read from the primary" is a
+// statement about this server rather than an assumption about all of them.
+func TestReplicaIsReported(t *testing.T) {
+	tbl := baseTable()
+	ops := mustOps(t, "MODIFY COLUMN status varchar(64) NOT NULL")
+	in := Input{
+		Server:       model.Server{Version: "8.0.36", Vendor: "mysql"},
+		Table:        tbl,
+		Ops:          ops,
+		RawAlter:     "MODIFY COLUMN status varchar(64) NOT NULL",
+		Host:         "db.prod",
+		SchemaSource: "live",
+		Live:         &LiveState{ReplicaConfigured: true, ReplicaRunning: true, ReplicaLagSeconds: 12},
+	}
+	p := Analyze(in)
+	if !hasCheck(p, "E8", SeverityInfo) {
+		t.Fatalf("a configured replica must be reported: %+v", checksOf(p, "E8"))
+	}
+	got := checksOf(p, "E8")[0]
+	if !strings.Contains(got.Detail, "12") || !strings.Contains(got.Detail, "behind") {
+		t.Fatalf("the detail must include the lag: %q", got.Detail)
+	}
+	if !strings.Contains(got.Remediation, "--host=<replica>") {
+		t.Fatalf("the remediation must name the flag: %q", got.Remediation)
+	}
+
+	// No replica, no finding.
+	in.Live = &LiveState{}
+	if got := checksOf(Analyze(in), "E8"); len(got) != 0 {
+		t.Fatalf("a server without a replica must not claim one: %+v", got)
+	}
+}

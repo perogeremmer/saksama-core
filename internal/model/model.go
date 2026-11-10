@@ -182,22 +182,25 @@ func (fk ForeignKey) HasAction() bool {
 
 // Table is the introspected table model.
 type Table struct {
-	Schema       string       `json:"schema"`
-	Name         string       `json:"name"`
-	Engine       string       `json:"engine"`
-	RowFormat    string       `json:"row_format"`
-	Charset      string       `json:"charset"`
-	Collation    string       `json:"collation"`
-	Rows         int64        `json:"rows"`         // estimated
-	DataLength   int64        `json:"data_length"`  // bytes
-	IndexLength  int64        `json:"index_length"` // bytes
-	Partitioned  bool         `json:"partitioned"`
-	Columns      []Column     `json:"columns"`
-	Indexes      []Index      `json:"indexes"`
-	ForeignKeys  []ForeignKey `json:"foreign_keys"`  // outgoing FKs on this table
-	ReferencedBy []ForeignKey `json:"referenced_by"` // incoming FKs from other tables
-	Triggers     []string     `json:"triggers"`
-	Checks       []Check      `json:"checks,omitempty"`
+	Schema      string `json:"schema"`
+	Name        string `json:"name"`
+	Engine      string `json:"engine"`
+	RowFormat   string `json:"row_format"`
+	Charset     string `json:"charset"`
+	Collation   string `json:"collation"`
+	Rows        int64  `json:"rows"`         // estimated
+	DataLength  int64  `json:"data_length"`  // bytes
+	IndexLength int64  `json:"index_length"` // bytes
+	// AutoIncrement is the next id the server would hand out. Zero means the table
+	// has no AUTO_INCREMENT column, or the server did not say.
+	AutoIncrement int64        `json:"auto_increment,omitempty"`
+	Partitioned   bool         `json:"partitioned"`
+	Columns       []Column     `json:"columns"`
+	Indexes       []Index      `json:"indexes"`
+	ForeignKeys   []ForeignKey `json:"foreign_keys"`  // outgoing FKs on this table
+	ReferencedBy  []ForeignKey `json:"referenced_by"` // incoming FKs from other tables
+	Triggers      []string     `json:"triggers"`
+	Checks        []Check      `json:"checks,omitempty"`
 }
 
 // Check is one CHECK constraint.

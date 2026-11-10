@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/perogeremmer/saksama-core/internal/model"
@@ -240,6 +241,14 @@ func ParseCreateTable(sql string) (model.Table, []string, error) {
 		case tokens[i].IsWord("COLLATE"):
 			if v, ok := optionAfterEquals(tokens, i); ok {
 				tbl.Collation = strings.ToLower(v)
+			}
+		case tokens[i].IsWord("AUTO_INCREMENT"):
+			// SHOW CREATE TABLE carries the next id. Reading it lets an offline plan
+			// reason about the id space; the live path gets it from the catalogue.
+			if v, ok := optionAfterEquals(tokens, i); ok {
+				if n, err := strconv.ParseInt(strings.Trim(v, "`"), 10, 64); err == nil {
+					tbl.AutoIncrement = n
+				}
 			}
 		}
 	}

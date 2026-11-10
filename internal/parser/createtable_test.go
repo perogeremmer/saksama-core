@@ -186,3 +186,28 @@ func TestParseCreateTableUnnamedCheck(t *testing.T) {
 		t.Fatalf("expression = %q", tbl.Checks[0].Expression)
 	}
 }
+
+// D16 reads the next id, and an offline plan has only SHOW CREATE TABLE to read it
+// from: the option sits after the closing paren, next to the engine and charset.
+func TestParseCreateTableAutoIncrement(t *testing.T) {
+	tbl, _, err := ParseCreateTable("CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) " +
+		"ENGINE=InnoDB AUTO_INCREMENT=4096 DEFAULT CHARSET=utf8mb4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.AutoIncrement != 4096 {
+		t.Fatalf("AutoIncrement = %d, want 4096", tbl.AutoIncrement)
+	}
+	if tbl.Engine != "InnoDB" || tbl.Charset != "utf8mb4" {
+		t.Fatalf("the other options must still parse: engine=%q charset=%q", tbl.Engine, tbl.Charset)
+	}
+
+	// No AUTO_INCREMENT in the dump means no auto-increment column, not zero ids.
+	tbl, _, err = ParseCreateTable("CREATE TABLE `t` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tbl.AutoIncrement != 0 {
+		t.Fatalf("AutoIncrement = %d, want 0 when the option is absent", tbl.AutoIncrement)
+	}
+}

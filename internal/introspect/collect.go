@@ -128,14 +128,14 @@ func (c *Collector) Table(ctx context.Context) (model.Table, error) {
 
 	var engine, rowFormat, collation, createOptions sql.NullString
 	var rows sql.NullInt64
-	var dataLen, indexLen sql.NullInt64
+	var dataLen, indexLen, autoInc sql.NullInt64
 
 	err := c.Q.QueryRowContext(ctx, `
 		SELECT ENGINE, ROW_FORMAT, TABLE_COLLATION, TABLE_ROWS,
-		       DATA_LENGTH, INDEX_LENGTH, CREATE_OPTIONS
+		       DATA_LENGTH, INDEX_LENGTH, CREATE_OPTIONS, AUTO_INCREMENT
 		FROM information_schema.TABLES
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-	`, c.Schema, c.TableName).Scan(&engine, &rowFormat, &collation, &rows, &dataLen, &indexLen, &createOptions)
+	`, c.Schema, c.TableName).Scan(&engine, &rowFormat, &collation, &rows, &dataLen, &indexLen, &createOptions, &autoInc)
 	if err == sql.ErrNoRows {
 		return tbl, fmt.Errorf("table %s.%s does not exist or is not visible to this user", c.Schema, c.TableName)
 	}
@@ -149,6 +149,7 @@ func (c *Collector) Table(ctx context.Context) (model.Table, error) {
 	tbl.Rows = rows.Int64
 	tbl.DataLength = dataLen.Int64
 	tbl.IndexLength = indexLen.Int64
+	tbl.AutoIncrement = autoInc.Int64
 	tbl.Charset = c.charsetForCollation(ctx, tbl.Collation)
 	if strings.Contains(strings.ToLower(createOptions.String), "partitioned") {
 		tbl.Partitioned = true

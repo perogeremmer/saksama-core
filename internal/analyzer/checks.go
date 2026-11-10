@@ -46,10 +46,12 @@ const (
 	chkGeneratedColumn  = "D11"
 	chkProductionTarget = "D12"
 	chkOnlineAlterLog   = "D13"
+	chkAutoIncrementGap = "D16"
 	chkHugeTable        = "D17"
 
 	// Capability.
 	chkUnknownOp          = "E0"
+	chkReplicaDonor       = "E8"
 	chkMariaDB            = "E1"
 	chkEngineNotInnoDB    = "E2"
 	chkVersionUnparseable = "E3"
@@ -554,6 +556,29 @@ func checksOperational(in Input, anyRebuild bool) []Check {
 	// the copy with 3819 - after minutes of work, at the swap, on a table that had
 	// been fine until then. Since 8.0.16 the server enforces them, so a table carried
 	// over from an older one can hold exactly those rows without anyone noticing.
+	// E8: a replica exists, which changes what the copy could look at.
+	//
+	// Informational today: gh-ost is told to read from the primary unless an operator
+	// points it at a replica by hand. Saying so is the difference between "the load
+	// lands here" and "the load lands here because nobody looked".
+	if in.Live != nil && in.Live.ReplicaConfigured {
+		detail := "a replica is configured"
+		if in.Live.ReplicaRunning {
+			detail += " and running"
+			if in.Live.ReplicaLagSeconds > 0 {
+				detail += fmt.Sprintf(", %gs behind", in.Live.ReplicaLagSeconds)
+			}
+		} else {
+			detail += " but not running"
+		}
+		out = append(out, Check{
+			ID: chkReplicaDonor, Severity: SeverityInfo,
+			Title:       "the server has a replica",
+			Detail:      detail,
+			Remediation: "the copy reads from the primary unless it is pointed elsewhere; if the replica is healthy and current, run the copy against it with gh-ost --host=<replica> so the read load lands there. A replica that is behind moves the problem rather than solving it, so check the lag first: SHOW REPLICA STATUS",
+		})
+	}
+
 	if len(in.Table.Checks) > 0 {
 		var names, unenforced []string
 		for _, chk := range in.Table.Checks {
@@ -587,6 +612,27 @@ func checksOperational(in Input, anyRebuild bool) []Check {
 				". Rows the constraint cannot accept fail the copy with 3819 part-way through; fix the data, or drop the constraint deliberately first",
 			MySQLError: 3819,
 		})
+	}
+
+	// D16: the next id is a long way from the row count.
+	//
+	// Informational, and the number says something worth knowing before a rebuild:
+	// AUTO_INCREMENT counts every id ever handed out, TABLE_ROWS counts the rows that
+	// survived, so a large gap means deletions, upsert churn, or rolled-back inserts.
+	// Two consequences, both stated rather than implied: the duration estimate is
+	// built on an estimated row count, and an id space that has been eaten this fast
+	// is worth checking against the column's own limit.
+	if in.Table.AutoIncrement > 0 && in.Table.Rows > 0 {
+		gap := in.Table.AutoIncrement - in.Table.Rows
+		if gap > 0 && in.Table.AutoIncrement >= 4*in.Table.Rows && in.Table.AutoIncrement > 10_000 {
+			out = append(out, Check{
+				ID: chkAutoIncrementGap, Severity: SeverityInfo,
+				Title: "AUTO_INCREMENT is well ahead of the row count",
+				Detail: fmt.Sprintf("the next id is %d, the table holds about %d rows: %d ids have been handed out and not kept",
+					in.Table.AutoIncrement, in.Table.Rows, gap),
+				Remediation: "nothing to fix before the change, but check two things: SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '<table>' against the column's limit (a signed int runs out at 2147483647, and the next insert then fails with 1674), and expect the duration estimate to be wrong in either direction because it divides by an estimated row count, not by the ids consumed",
+			})
+		}
 	}
 
 	if size := in.Table.SizeBytes(); size > 100<<30 {
