@@ -26,8 +26,11 @@ func cmdCompat(args []string, stdout, stderr io.Writer) int {
 	addConnFlags(fs, &conn)
 	fs.Bool("no-color", false, "never use colour (already off for a pipe, NO_COLOR, TERM=dumb)")
 
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if code := refuseStrayArguments(fs, "compat", stderr); code != ExitOK {
+		return code
 	}
 
 	if *markdown {

@@ -25,8 +25,8 @@ func cmdCutover(args []string, stdout, stderr io.Writer) int {
 
 	fs := flag.NewFlagSet("cutover", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama cutover: session id required")

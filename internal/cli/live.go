@@ -136,8 +136,11 @@ func cmdPlanLive(args []string, stdout, stderr io.Writer) int {
 	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
 	fs.Bool("no-color", false, "never use colour (already off for a pipe, NO_COLOR, TERM=dumb)")
 
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if code := refuseStrayArguments(fs, "plan --live", stderr); code != ExitOK {
+		return code
 	}
 	if o.table == "" || o.database == "" {
 		fmt.Fprintln(stderr, "saksama plan --live: --database and --table are required")
@@ -284,12 +287,31 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.allowArgvPassword, "allow-argv-password", false, "permit engines with no option file to receive the password in argv (visible in ps)")
 	noProbe := fs.Bool("no-probe", false, "skip detecting installed engines")
 
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if code := refuseStrayArguments(fs, "apply", stderr); code != ExitOK {
+		return code
 	}
 	if o.session == "" && (o.table == "" || o.database == "" || strings.TrimSpace(o.alter) == "") {
 		fmt.Fprintln(stderr, "saksama apply: --database, --table, and --alter are required, or pass --session <id>")
 		return ExitUsage
+	}
+
+	// A session id is answered from the state directory, so a typo is a typo even
+	// when the server is unreachable - and it is answered before this command opens
+	// a connection, because "session not found" is the operator's problem and the
+	// network is not part of it.
+	if o.session != "" {
+		store, err := newStore()
+		if err != nil {
+			fmt.Fprintf(stderr, "saksama apply: %v\n", err)
+			return ExitInternal
+		}
+		if _, err := store.Load(o.session); err != nil {
+			fmt.Fprintf(stderr, "saksama apply: %v\n", err)
+			return classifyStoreError(err)
+		}
 	}
 
 	conn, err := o.resolve()
@@ -410,8 +432,8 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	jsonOut := fs.Bool("json", false, "JSON output (accepted in any position)")
 	plainRequested := fs.Bool("plain", false, "borderless output (accepted in any position)")
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 
 	store, err := newStore()
@@ -501,8 +523,8 @@ func cmdEvents(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("events", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Bool("json", true, "JSONL output (always on; accepted for symmetry)")
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama events: session id required")
@@ -512,6 +534,13 @@ func cmdEvents(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "saksama events: %v\n", err)
 		return ExitInternal
+	}
+	// The session is loaded first so a typo is answered the same way every other
+	// command answers it. Reading the log directly reported a filesystem path,
+	// which is our storage layout leaking into an operator's mistake.
+	if _, err := store.Load(positional[0]); err != nil {
+		fmt.Fprintf(stderr, "saksama events: %v\n", err)
+		return classifyStoreError(err)
 	}
 	data, err := store.ReadEvents(positional[0])
 	if err != nil {
@@ -544,8 +573,8 @@ func cmdExport(args []string, stdout, stderr io.Writer) int {
 	// parsed no flags at all. The value was accepted and then ignored, which is
 	// worse than rejected: `--format markdown` printed JSON and said nothing.
 	positional, flagArgs := extractPositionals(args, map[string]bool{"format": true})
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 	if *format != "json" {
 		fmt.Fprintf(stderr, "saksama export: unknown format %q; this build writes json\n", *format)

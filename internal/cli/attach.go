@@ -32,8 +32,8 @@ func cmdAttach(args []string, stdout, stderr io.Writer) int {
 	// how people type it, and the standard flag package would silently stop at s1
 	// and keep following (with --follow=false ignored, that is a hang).
 	positional, flagArgs := extractPositionals(args, map[string]bool{"since": true})
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama attach: session id required")
@@ -139,8 +139,8 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 	force := fs.Bool("force-kill", false,
 		"send SIGKILL if the engine ignores SIGTERM; the engine then cannot drop its own shadow table")
 	positional, flagArgs := extractPositionals(args, nil)
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama cancel: session id required")

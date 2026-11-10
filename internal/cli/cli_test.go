@@ -1070,7 +1070,7 @@ func TestUnknownFlagsAreRefusedInEveryPosition(t *testing.T) {
 		{"export", "s9", "--bogus"},
 		{"cancel", "s9", "--bogus"},
 		{"attach", "s9", "--follow=false", "--bogus"},
-		{"cutover", "s9", "-h", "db.prod"},
+		{"cutover", "s9", "--bogus"},
 		{"version", "--bogus"},
 		{"version", "extra"},
 	} {

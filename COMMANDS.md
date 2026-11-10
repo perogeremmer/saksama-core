@@ -25,8 +25,18 @@ Exit codes are part of the contract:
 |---|---|
 | `0` | success, no blockers |
 | `1` | a plan was produced **with** blockers, safe to use as a CI gate |
-| `2` | usage error |
-| `3` | execution or internal failure |
+| `2` | the operator can fix it: usage, a missing session, a precondition |
+| `3` | our failure: a connection broke, the state directory is unreadable |
+
+Two rules hold across every command, and both are enforced by a test that walks
+every command rather than by discipline:
+
+- **Nothing typed is ignored.** The standard parser stops at the first positional
+  argument, so a flag after it used to be dropped in silence - `apply s3
+  --production` silently skipped the production confirmation. An argument a command
+  does not expect is now an error that names it.
+- **Asking for help is not a mistake.** `saksama plan --help` prints the flags and
+  exits `0`; it does not print them and then complain that `--alter` is missing.
 
 ---
 

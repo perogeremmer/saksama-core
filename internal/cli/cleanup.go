@@ -29,8 +29,8 @@ func cmdCleanup(args []string, stdout, stderr io.Writer) int {
 	fsNew.SetOutput(stderr)
 	addConnFlags(fsNew, &conn)
 	dryRunFlag := fsNew.Bool("dry-run", false, "show what would be dropped, and stop (accepted in any position)")
-	if err := fsNew.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fsNew, flagArgs); done {
+		return code
 	}
 	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama cleanup: session id required")
