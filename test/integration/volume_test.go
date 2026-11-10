@@ -132,6 +132,14 @@ func TestCopyWithConcurrentWritesLosesNothing(t *testing.T) {
 	if written == 0 {
 		t.Fatal("the writer committed nothing, so the test proved nothing")
 	}
+	// A floor, not just a non-zero check: the copy takes a couple of seconds now that
+	// the writer no longer starves it, and a copy that finishes before the writer has
+	// committed anything worth counting would leave this test passing without ever
+	// overlapping the two. On CI it commits a few hundred; fifty is the line where the
+	// overlap stops being incidental.
+	if written < 50 {
+		t.Fatalf("only %d rows committed during the copy; the copy was too fast for this test to mean anything", written)
+	}
 
 	// 1. No committed write was lost at cut-over.
 	got := int64(countRows(t, db, "SELECT COUNT(*) FROM `t`"))
