@@ -79,8 +79,11 @@ func cmdAdvise(args []string, stdout, stderr io.Writer) int {
 			return ExitUsage
 		}
 	}
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if code := refuseStrayArguments(fs, "advise", stderr); code != ExitOK {
+		return code
 	}
 
 	var binaries map[string]analyzer.EngineBinary

@@ -25,8 +25,11 @@ func cmdReconcile(args []string, stdout, stderr io.Writer) int {
 	jsonOut := fs.Bool("json", false, "JSON output")
 	retire := fs.String("retire", "",
 		"mark this session failed and release its table lock; only works once the engine process is confirmed gone")
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if code := refuseStrayArguments(fs, "reconcile", stderr); code != ExitOK {
+		return code
 	}
 
 	store, err := newStore()

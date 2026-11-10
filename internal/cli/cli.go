@@ -136,6 +136,42 @@ func extractStateDir(args []string) ([]string, string) {
 	return out, dir
 }
 
+// parseFlags parses and maps the standard parser's answer onto the exit-code
+// contract: a usage mistake is 2, and asking for help is not a mistake. `--help` on
+// a subcommand used to exit 2 with the usage text on stderr, which reads as a
+// failure in any script that runs it.
+//
+// The bool is "the command is finished". Help has to stop the command body as well
+// as succeed, or `plan --help` prints the usage and then complains that no --ddl was
+// given - which is the same confusion in a different place.
+func parseFlags(fs *flag.FlagSet, args []string) (code int, done bool) {
+	err := fs.Parse(args)
+	switch {
+	case err == nil:
+		return ExitOK, false
+	case errors.Is(err, flag.ErrHelp):
+		return ExitOK, true
+	default:
+		return ExitUsage, true
+	}
+}
+
+// refuseStrayArguments is the rule every command without a positional argument
+// obeys: a token the command does not expect is an error, not something to drop.
+//
+// The standard parser stops at the first non-flag, so everything after it - which
+// can include a flag that turns a safety guard off - was silently discarded. The
+// parser has already decided which arguments it consumed, so this asks it: anything
+// left is an argument the command cannot honour.
+func refuseStrayArguments(fs *flag.FlagSet, command string, stderr io.Writer) int {
+	if fs.NArg() == 0 {
+		return ExitOK
+	}
+	fmt.Fprintf(stderr, "saksama %s: unexpected argument %q\n", command, fs.Arg(0))
+	fmt.Fprintf(stderr, "\n%s takes no positional arguments; see: saksama help\n", command)
+	return ExitUsage
+}
+
 // isInteractive reports whether stdout is a terminal, which is the only place a
 // prompt is allowed to appear.
 func isInteractive(w io.Writer) bool {
@@ -328,8 +364,11 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if missing := missingLiveFlag(fs, args); explainMissingLive("plan", missing, args, stderr) {
 		return ExitUsage
 	}
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if code := refuseStrayArguments(fs, "plan", stderr); code != ExitOK {
+		return code
 	}
 
 	// --- Load schema -------------------------------------------------------
@@ -517,8 +556,11 @@ type schemaFile struct {
 func cmdSchema(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("schema", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if code := refuseStrayArguments(fs, "schema", stderr); code != ExitOK {
+		return code
 	}
 	if _, err := io.WriteString(stdout, planJSONSchema); err != nil {
 		return ExitInternal

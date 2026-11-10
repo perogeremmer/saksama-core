@@ -87,8 +87,11 @@ func cmdEngineList(args []string, stdout, stderr io.Writer) int {
 	jsonOut := fs.Bool("json", false, "JSON output")
 	noProbe := fs.Bool("no-probe", false, "skip probing installed binaries")
 	plain := fs.Bool("plain", false, "borderless output, for scripts and logs")
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if code := refuseStrayArguments(fs, "engine list", stderr); code != ExitOK {
+		return code
 	}
 
 	store, err := newStore()
@@ -218,8 +221,8 @@ func cmdEngineSet(args []string, stdout, stderr io.Writer) int {
 	positional, flagArgs := extractPositionals(args, map[string]bool{
 		"d": true, "database": true, "t": true, "table": true, "note": true,
 	})
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 	if len(positional) == 0 {
 		fmt.Fprintln(stderr, "saksama engine set: engine name required (native, gh-ost, pt-osc)")
@@ -272,8 +275,8 @@ func cmdEngineShow(args []string, stdout, stderr io.Writer) int {
 	jsonOut := fs.Bool("json", false, "JSON output")
 	global := fs.Bool("global", false, "ask about the global choice")
 	_, flagArgs := extractPositionals(args, map[string]bool{"d": true, "database": true, "t": true, "table": true})
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 	if *global && (*database != "" || *table != "") {
 		fmt.Fprintln(stderr, "saksama engine show: --global cannot be combined with -d or -t")
@@ -341,8 +344,8 @@ func cmdEngineClear(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(table, "table", "", "table")
 	global := fs.Bool("global", false, "clear the global choice")
 	_, flagArgs := extractPositionals(args, map[string]bool{"d": true, "database": true, "t": true, "table": true})
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 
 	choice, err := state.NewChoice("native", *global, *database, *table)

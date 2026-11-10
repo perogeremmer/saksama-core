@@ -35,8 +35,8 @@ func cmdEngineDoctor(args []string, stdout, stderr io.Writer) int {
 		"h": true, "host": true, "P": true, "port": true, "u": true, "user": true,
 		"d": true, "database": true, "tls": true, "defaults-extra-file": true,
 	})
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 
 	requested := positional
@@ -129,8 +129,8 @@ func cmdEngineInstall(args []string, stdout, stderr io.Writer) int {
 
 	// Flags may follow the engine name, which is how people type it.
 	positional, flagArgs := extractPositionals(args, map[string]bool{"dir": true})
-	if err := fs.Parse(flagArgs); err != nil {
-		return ExitUsage
+	if code, done := parseFlags(fs, flagArgs); done {
+		return code
 	}
 	if latest {
 		fmt.Fprintf(stderr, "saksama engine install: --latest is not implemented in this build\n")
