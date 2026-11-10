@@ -1779,8 +1779,10 @@ func TestOneObservationIsNotARange(t *testing.T) {
 	}
 	est := estimateDuration(in, tbl, EngineGhOst)
 
-	if est.Observations != 0 {
-		t.Fatalf("observations = %d, want 0: one run is not a range", est.Observations)
+	// The count reports what exists; the confidence reports how far it is trusted.
+	// One run exists, and it is not enough for a range.
+	if est.Observations != 1 {
+		t.Fatalf("observations = %d, want 1: one run exists even though it is not a range", est.Observations)
 	}
 	if est.Confidence == "high" {
 		t.Fatalf("confidence = %q; a single run cannot be trusted that far", est.Confidence)
@@ -1866,8 +1868,11 @@ func TestUnusableObservationsAreSkipped(t *testing.T) {
 	if est.FromSeconds <= 0 || est.ToSeconds <= 0 {
 		t.Fatalf("unusable observations produced a broken range: %+v", est)
 	}
-	if est.Observations != 0 {
-		t.Fatalf("only one observation was usable, so nothing should be claimed: %+v", est)
+	if est.Observations != 1 {
+		t.Fatalf("exactly one observation was usable, and the plan must say so: %+v", est)
+	}
+	if est.Confidence != "low" {
+		t.Fatalf("one usable run must not raise the confidence: %+v", est)
 	}
 }
 

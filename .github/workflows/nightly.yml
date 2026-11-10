@@ -100,3 +100,74 @@ jobs:
           name: fuzz-corpus
           path: internal/parser/testdata/fuzz/**
           retention-days: 7
+
+  # The only test that runs a migration at a size the product is written for. The
+  # rest of the suite is fixture-sized: the volume job copies about 13 MiB, which
+  # proves the engine loses nothing but proves nothing about minutes of work.
+  #
+  # What it adds: the held cutover really waits; the swap preserves every committed
+  # write; cleanup returns the disk (_t_del, measured before and after); the next
+  # plan quotes the throughput this run measured; the event log stays in kilobytes;
+  # reconcile comes back empty.
+  #
+  # 2 GiB with 1 KiB rows is a multi-minute copy for gh-ost, and the disk budget is
+  # roughly three times the table - the copy, its ghost table, and the binary log the
+  # copy itself generates all land in the same volume. Raise SAKSAMA_SCALE_GB on a
+  # bigger machine; D13's 8 GiB threshold is covered by unit test, not here.
+  scale:
+    name: Production-shape copy (2 GiB, held cutover, live writes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Disk budget, said out loud
+        run: df -h / | tail -1
+
+      - name: Start MySQL with binary logging
+        run: |
+          docker run -d --name mysql-scale \
+            -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
+            -e MYSQL_DATABASE=shop \
+            -p 127.0.0.1::3306 mysql:8.4 \
+            --log-bin=mysql-bin --server-id=1 --binlog-format=ROW \
+            --binlog-row-image=FULL \
+            --innodb-buffer-pool-size=512M
+          for i in $(seq 1 90); do
+            if docker exec mysql-scale mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
+              port=$(docker port mysql-scale 3306/tcp | head -1 | sed 's/.*://')
+              echo "ready on host port ${port}"
+              echo "SAKSAMA_TEST_DSN=root:@tcp(127.0.0.1:${port})/" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready"; exit 1
+
+      - name: Download gh-ost 1.1.11
+        run: |
+          curl -fsSL -o /tmp/gh-ost.tgz \
+            https://github.com/github/gh-ost/releases/download/v1.1.11/gh-ost-linux-amd64.tar.gz
+          mkdir -p /tmp/ghost && tar xzf /tmp/gh-ost.tgz -C /tmp/ghost
+          chmod +x /tmp/ghost/gh-ost
+          /tmp/ghost/gh-ost --version
+
+      - name: A 2 GiB copy, held at the gate, under live writes
+        env:
+          SAKSAMA_SCALE_TESTS: "1"
+          SAKSAMA_SCALE_GB: "2"
+          PATH: /tmp/ghost:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+        run: go test -tags=integration -count=1 -timeout 40m -v -run TestProductionShapeCopy ./test/integration/
+
+      - name: Disk after the run
+        if: always()
+        run: df -h / | tail -1
+
+      - name: Container logs when it fails
+        if: failure()
+        run: docker logs mysql-scale --tail 100 || true

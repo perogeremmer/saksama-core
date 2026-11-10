@@ -438,6 +438,10 @@ func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate
 	}
 
 	note := singleObservationNote(in.History, engine)
+	// The count is reported even when it is not enough to build a range: a plan that
+	// quotes one measurement and says nothing about it in JSON would be hiding the
+	// only evidence it has.
+	available := usableObservations(in.History, engine)
 	var est DurationEstimate
 	switch engine {
 	case EngineNative:
@@ -482,6 +486,7 @@ func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate
 			Basis: "row-by-row copy driven by triggers; throughput assumed between 2 and 15 MB/s and actual speed depends on load and throttling",
 		}
 	}
+	est.Observations = available
 	if note != "" {
 		est.Basis += "; " + note
 	}
@@ -541,6 +546,18 @@ func measuredDuration(history []Observation, engine Engine, size int64) (Duratio
 		FromSeconds: from, ToSeconds: to, Confidence: "medium", Basis: basis,
 		Observations: used,
 	}, true
+}
+
+// usableObservations counts the earlier runs this estimate could have used: same
+// engine, a size, and a duration. It is what the plan reports as its evidence.
+func usableObservations(history []Observation, engine Engine) int {
+	n := 0
+	for _, o := range history {
+		if o.Engine == engine && o.DataBytes > 0 && o.Seconds > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // singleObservationNote is what a lone earlier run is worth: a data point, not a
