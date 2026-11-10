@@ -1959,3 +1959,51 @@ func requireCheckConstraints(t *testing.T, db *sql.DB) {
 		t.Skipf("this server has no CHECK_CONSTRAINTS catalogue: %v", err)
 	}
 }
+
+// D16 and E8 read facts only a live server has: the next id from the catalogue, and
+// whether a replica is configured. Both are informational, and both are the kind of
+// claim that is worthless if it is invented - so they are asserted against a real
+// server rather than a fixture.
+func TestLiveFactsForAutoIncrementAndReplica(t *testing.T) {
+	db := adminDB(t)
+	schema, db := fixtureSchema(t)
+	mustExec(t, db, "CREATE TABLE `t` (`id` int unsigned NOT NULL AUTO_INCREMENT, `status` varchar(32) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB")
+	// Ten ids handed out, two rows kept: a gap, but not yet 4x.
+	mustExec(t, db, "INSERT INTO `t` (`status`) VALUES ('a'),('b'),('c'),('d'),('e'),('f'),('g'),('h'),('i'),('j')")
+	mustExec(t, db, "DELETE FROM `t` WHERE `id` > 2")
+
+	c := introspect.NewCollector(db, schema, "t")
+	snap, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if snap.Table.AutoIncrement != 11 {
+		t.Fatalf("AutoIncrement = %d, want 11 after ten inserts", snap.Table.AutoIncrement)
+	}
+	if snap.Table.Rows == 0 {
+		t.Logf("TABLE_ROWS is an estimate and read 0; D16 stays quiet rather than dividing by it")
+	}
+
+	// E8: this server has no replica, and the plan must not claim one.
+	runner, _ := newRunner(t)
+	runner.DB = db
+	prep, err := runner.Analyze(context.Background(), core.Request{
+		Conn: testConn(), Database: schema, Table: "t",
+		Alter: "MODIFY COLUMN `status` varchar(64) NOT NULL", Actor: "integration-test",
+	})
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	for _, chk := range prep.Plan.Checks {
+		if chk.ID == "E8" {
+			t.Fatalf("E8 fired on a server with no replica: %+v", chk)
+		}
+	}
+	// D16 does not fire at 11 ids against 2 rows, because the threshold is 10,000 as
+	// well as 4x: a small table has a gap for boring reasons.
+	for _, chk := range prep.Plan.Checks {
+		if chk.ID == "D16" {
+			t.Fatalf("D16 fired on an 11-id table: %+v", chk)
+		}
+	}
+}

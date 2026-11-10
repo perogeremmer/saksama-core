@@ -19,8 +19,8 @@ contract, so they are never renumbered or reused for something else.
 | `planned` | specified here, not implemented yet |
 | `moved` | superseded by the engine matrix (`saksama advise`), which reports it as a per-engine requirement instead of a check |
 
-Counts today: **46 implemented check IDs** out of **54 catalogued** (46 `done`,
-4 `planned`, 4 `moved`), plus **12 server settings** in the doctor (section S).
+Counts today: **48 implemented check IDs** out of **54 catalogued** (48 `done`,
+2 `planned`, 4 `moved`), plus **12 server settings** in the doctor (section S).
 The `done` column is the number to trust: it is the one this file cannot inflate
 without the analyzer contradicting it.
 
@@ -92,7 +92,7 @@ without the analyzer contradicting it.
 | D13 | `innodb_online_alter_log_max_size` is small for a large rebuild | `WARN` | done | raised only when the chosen engine is a native in-place rebuild and the table is 8 GiB or more: the log collects every concurrent write, and a full one fails with `1799` and rolls the whole statement back. Reads a variable collected with the doctor's settings; unreadable is reported, never passed |
 | D14 | `sql_log_bin` cannot be set, as on RDS without the right role | `WARN` | planned | the copy lands in the binlog |
 | D15 | the account lacks `SUPER` or `SESSION_VARIABLES_ADMIN` | `WARN` | done | `1227`, and `lock_wait_timeout` cannot be shortened |
-| D16 | `AUTO_INCREMENT` has a large gap | `INFO` | planned | informational only |
+| D16 | `AUTO_INCREMENT` has a large gap | `INFO` | done | fires when the next id is at least four times the row count: ids handed out and not kept mean deletions or upsert churn, and the remediation says what that does to the id space and to the duration estimate |
 | D17 | the table is larger than 100 GB | `WARN` | done | any rebuild takes a long time |
 
 ---
@@ -110,7 +110,7 @@ without the analyzer contradicting it.
 | E5b | the metadata lock queue cannot be observed (MySQL 5.6) | `WARN`, `BLOCKER` in production | done | performance_schema.metadata_locks arrived in 5.7; a queue that cannot be read is not an empty queue |
 | E6 | gh-ost is not installed | `BLOCKER` | moved | now `R3`, per engine |
 | E7 | gh-ost is selected for a composite primary key | `BLOCKER` | moved | now a gh-ost requirement in the engine matrix |
-| E8 | a donor or replica exists | `INFO` | planned | relevant to a future multi-instance profile |
+| E8 | a donor or replica exists | `INFO` | done | reports a configured replica, whether it runs, and how far behind it is: the copy reads from the primary unless an operator points it at the replica |
 | E9 | the InnoDB row format caps key length | `INFO` | moved | now A5 and A6 |
 
 ---
