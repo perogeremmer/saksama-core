@@ -186,23 +186,28 @@ jobs:
           sudo chmod +x /usr/local/bin/pt-online-schema-change
           pt-online-schema-change --version
 
+      # The host port is assigned by docker, not chosen by us. A fixed 33306 had
+      # this job fail once with "address already in use" - nothing in the workflow
+      # was wrong, something on the runner already held the port - and a port
+      # collision should never be able to turn into a red build.
       - name: Start MySQL
         run: |
           docker run -d --name mysql-ptosc \
             -e MYSQL_ALLOW_EMPTY_PASSWORD=1 \
             -e MYSQL_DATABASE=shop \
-            -p 33306:3306 mysql:8.4 --max-connections=200
+            -p 127.0.0.1::3306 mysql:8.4 --max-connections=200
           for i in $(seq 1 90); do
             if docker exec mysql-ptosc mysql -h127.0.0.1 -P3306 -uroot --silent -e "SELECT 1" >/dev/null 2>&1; then
-              echo ready; exit 0
+              port=$(docker port mysql-ptosc 3306/tcp | head -1 | sed 's/.*://')
+              echo "ready on host port ${port}"
+              echo "SAKSAMA_TEST_DSN=root:@tcp(127.0.0.1:${port})/" >> "$GITHUB_ENV"
+              exit 0
             fi
             sleep 2
           done
           echo "MySQL did not become ready"; exit 1
 
       - name: Integration tests, including the copy engines
-        env:
-          SAKSAMA_TEST_DSN: "root:@tcp(127.0.0.1:33306)/"
         run: go test -tags=integration -count=1 -v ./test/integration/
 
 

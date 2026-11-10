@@ -77,9 +77,22 @@ func slowCopyRequest(schema, engine string, hint analyzer.Engine) core.Request {
 }
 
 // startSlowCopy runs the application in the background and waits until the engine
-// has created its shadow objects, which is the point of no return for this test:
-// from here on there is debris whether or not the process survives.
+// has created its shadow objects, which is the point of no return for the kill
+// test: from here on there is debris whether or not the process survives.
+//
+// The cancel test asks for the earlier signal instead - see startCopy.
 func startSlowCopy(t *testing.T, db *sql.DB, store *state.Store, req core.Request, eng copyEngine, table string) (sessionID string, pid int, done <-chan error) {
+	return startCopy(t, db, store, req, eng, table, true)
+}
+
+// startCopy waits for the session to record an engine pid, and optionally for the
+// engine's shadow objects to appear.
+//
+// Waiting for the pid alone is what an interrupt wants: the engine is running from
+// the moment the pid is recorded, and every millisecond spent waiting for a shadow
+// table is a millisecond the copy may finish in. The kill test still waits for the
+// debris, because that is the subject of its assertion.
+func startCopy(t *testing.T, db *sql.DB, store *state.Store, req core.Request, eng copyEngine, table string, waitForArtifacts bool) (sessionID string, pid int, done <-chan error) {
 	t.Helper()
 
 	runner, _ := newRunner(t)
@@ -101,7 +114,7 @@ func startSlowCopy(t *testing.T, db *sql.DB, store *state.Store, req core.Reques
 			t.Fatalf("list sessions: %v", err)
 		}
 		if len(sessions) == 1 && sessions[0].EnginePID != 0 {
-			if artifactsPresent(db, table, eng.leaves) {
+			if !waitForArtifacts || artifactsPresent(db, table, eng.leaves) {
 				return sessions[0].ID, sessions[0].EnginePID, finished
 			}
 		}
@@ -300,57 +313,90 @@ func TestKilledCopyLeavesOnlyOwnedDebris(t *testing.T) {
 // TestCancelledCopyIsReportedHonestly is the same interruption done politely. A
 // graceful stop often lets the engine drop its own objects, so the assertion is
 // not "debris exists" but "whatever exists is owned and described".
+//
+// The interrupt races the copy, and the copy can win. pt-osc treats --chunk-size as
+// a starting point and then adapts the chunk to fit --chunk-time (0.5s), so on a
+// fast server it copies a quarter of a million rows before a cancel from the same
+// machine can land; "not-running" is then the honest answer, and asserting
+// "stopped" against it would be a test that lies about the product. What must never
+// happen is the opposite: a running engine reported as stopped. So each attempt
+// cancels as early as the session allows, and the test retries a bounded number of
+// times instead of failing on a race it cannot control.
 func TestCancelledCopyIsReportedHonestly(t *testing.T) {
 	for _, eng := range copyEngines(t) {
 		t.Run(eng.name, func(t *testing.T) {
 			schema, db := fixtureSchema(t)
-			createCopyFixture(t, db, 200000)
 
-			store, err := state.NewStore(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			id, _, finished := startSlowCopy(t, db, store, slowCopyRequest(schema, eng.name, eng.hint), eng, "t")
+			const attempts = 3
+			for attempt := 1; attempt <= attempts; attempt++ {
+				// A completed attempt leaves the table migrated, so every retry starts
+				// from a fresh copy of the fixture.
+				mustExec(t, db, "DROP TABLE IF EXISTS `t`")
+				mustExec(t, db, "DROP TABLE IF EXISTS `_t_new`")
+				createCopyFixture(t, db, 200000)
 
-			runner, _ := newRunner(t)
-			runner.DB = db
-			runner.Store = store
-			res, err := runner.Cancel(context.Background(), id, false)
-			if err != nil {
-				t.Fatalf("cancel: %v", err)
-			}
-			if res.Outcome != core.CancelStopped {
-				t.Fatalf("cancel outcome %q, want stopped", res.Outcome)
-			}
-			if !strings.Contains(res.Note, "not swapped") {
-				t.Errorf("the note must say the production table was not swapped: %q", res.Note)
-			}
-			select {
-			case <-finished:
-			case <-time.After(60 * time.Second):
-				t.Fatal("the wrapper did not notice the cancelled engine")
-			}
-
-			if col := columnType(t, db, schema, "t", "status"); !strings.HasPrefix(col, "varchar(32)") {
-				t.Fatalf("a cancelled copy swapped the table: status is %q", col)
-			}
-
-			// Whatever survives the graceful stop has to be owned, or the operator
-			// is told the incident is over while the disk usage is not.
-			sess, err := store.Load(id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			recorded := map[string]bool{}
-			for _, a := range sess.Artifacts {
-				recorded[a.Name] = true
-			}
-			for _, name := range realArtifacts(db, eng) {
-				if !recorded[name] {
-					t.Errorf("%s survived the cancel with %q, which the session does not own (recorded: %v)",
-						eng.name, name, keysOf(recorded))
+				store, err := state.NewStore(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
 				}
+				id, pid, finished := startCopy(t, db, store, slowCopyRequest(schema, eng.name, eng.hint), eng, "t", false)
+				t.Logf("attempt %d: engine pid %d, objects now: %v", attempt, pid, describeObjects(db))
+
+				runner, _ := newRunner(t)
+				runner.DB = db
+				runner.Store = store
+				res, err := runner.Cancel(context.Background(), id, false)
+				if err != nil {
+					t.Fatalf("cancel: %v", err)
+				}
+				if res.Outcome == core.CancelNotRunning {
+					// Let the apply goroutine settle before the next attempt.
+					select {
+					case <-finished:
+					case <-time.After(60 * time.Second):
+						t.Fatal("the wrapper never reported the copy that cancelled found finished")
+					}
+					t.Logf("attempt %d: %q - the copy finished before the cancel landed", attempt, res.Outcome)
+					continue
+				}
+
+				if res.Outcome != core.CancelStopped {
+					t.Fatalf("cancel outcome %q, want %q or %q", res.Outcome, core.CancelStopped, core.CancelNotRunning)
+				}
+				if !strings.Contains(res.Note, "not swapped") {
+					t.Errorf("the note must say the production table was not swapped: %q", res.Note)
+				}
+				select {
+				case <-finished:
+				case <-time.After(60 * time.Second):
+					t.Fatal("the wrapper did not notice the cancelled engine")
+				}
+
+				if col := columnType(t, db, schema, "t", "status"); !strings.HasPrefix(col, "varchar(32)") {
+					t.Fatalf("a cancelled copy swapped the table: status is %q", col)
+				}
+
+				// Whatever survives the graceful stop has to be owned, or the operator
+				// is told the incident is over while the disk usage is not.
+				sess, err := store.Load(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				recorded := map[string]bool{}
+				for _, a := range sess.Artifacts {
+					recorded[a.Name] = true
+				}
+				for _, name := range realArtifacts(db, eng) {
+					if !recorded[name] {
+						t.Errorf("%s survived the cancel with %q, which the session does not own (recorded: %v)",
+							eng.name, name, keysOf(recorded))
+					}
+				}
+				return
 			}
+
+			t.Fatalf("%s copied the table %d times before the cancel landed; the interrupt is never observed on this server",
+				eng.name, attempts)
 		})
 	}
 }
