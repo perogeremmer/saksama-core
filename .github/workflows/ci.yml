@@ -560,7 +560,18 @@ jobs:
         run: |
           ls -1 dist/*.tar.gz
           ls -1 dist/checksums.txt
-          test "$(ls -1 dist/*.tar.gz | wc -l)" -eq 4
+          # Exactly the two platforms we publish: linux/amd64 and linux/arm64.
+          # This number is the platform matrix, so it has to change with it - it
+          # was 4, and darwin is no longer built at all.
+          test "$(ls -1 dist/*.tar.gz | wc -l)" -eq 2
+          for arch in amd64 arm64; do
+            ls -1 dist/*_linux_${arch}.tar.gz >/dev/null 2>&1 \
+              || { echo "::error::no linux/${arch} archive"; exit 1; }
+          done
+          if ls -1 dist/*darwin* 2>/dev/null | grep -q .; then
+            echo "::error::a darwin artifact was built, but the release publishes Linux only"
+            exit 1
+          fi
           mkdir -p /tmp/relcheck
           tar xzf "$(ls -1 dist/*linux_amd64.tar.gz)" -C /tmp/relcheck
           /tmp/relcheck/saksama version
