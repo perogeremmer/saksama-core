@@ -70,7 +70,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ["fedora:latest", "archlinux:latest", "alpine:latest"]
+        # Ubuntu is the target, and ubuntu-latest runs every other job here - but
+        # that is one LTS. 20.04 and 22.04 are what a lot of production servers
+        # still are, and they are the two nobody was running.
+        image: ["ubuntu:20.04", "ubuntu:22.04", "fedora:latest", "archlinux:latest", "alpine:latest"]
     steps:
       - uses: actions/checkout@v7
 
@@ -92,19 +95,26 @@ jobs:
             out=$(/saksama engine doctor pt-osc 2>&1 || true)
             echo "$out"
             id=$(sed -n "s/^ID=//p" /etc/os-release | tr -d "\"\047")
-            # The verb differs too: dnf installs, pacman -S, apk add.
+            # The verb differs too: dnf installs, pacman -S, apk add, apt-get install.
+            #
+            # `bad` is the advice this distribution must NOT be given. "apt-get is
+            # wrong on Fedora" has been the assertion here since the job existed;
+            # now that Ubuntu is in the matrix the assertion has to be pointed the
+            # other way for it, or the job would pass by demanding apt-get on
+            # Fedora and rejecting it on Ubuntu.
             case "$id" in
-              fedora|rhel|centos) pm="dnf";  want="dnf install" ;;
-              arch)               pm="pacman"; want="pacman -S" ;;
-              alpine)             pm="apk";  want="apk add" ;;
+              ubuntu|debian)      pm="apt-get"; want="apt-get install"; bad="dnf install|pacman -S|apk add" ;;
+              fedora|rhel|centos) pm="dnf";     want="dnf install";     bad="apt-get|pacman|apk add" ;;
+              arch)               pm="pacman";  want="pacman -S";       bad="apt-get|dnf|apk add" ;;
+              alpine)             pm="apk";     want="apk add";         bad="apt-get|dnf|pacman" ;;
               *) echo "unexpected ID ${id} in this job"; exit 1 ;;
             esac
             if ! echo "$out" | grep -qF "$want"; then
               echo "expected \"${want}\" in the advice, got none"
               exit 1
             fi
-            if echo "$out" | grep -q "apt-get"; then
-              echo "apt-get advice on ${id}"
+            if echo "$out" | grep -qE "$bad"; then
+              echo "advice for another distribution on ${id}: $(echo "$out" | grep -E "$bad" | head -1)"
               exit 1
             fi
             echo "ok: ${pm} advice on ${id}"
@@ -390,6 +400,31 @@ jobs:
           set -e
           test "$code" -ne 0 || { echo "::error::install.sh installed without a checksum"; exit 1; }
           echo "$output" | grep -q "no checksums.txt" || { echo "::error::the refusal did not say why"; echo "$output"; exit 1; }
+
+      # Darwin is deliberately not published any more. The refusal has to be a
+      # sentence with a reason, not a 404 and not a silent install of a Linux
+      # binary on a Mac: a shim on PATH is enough to reach that branch.
+      - name: macOS is refused, with the reason
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/shim"
+          cat > "$RUNNER_TEMP/shim/uname" <<'SH'
+          #!/bin/sh
+          case "$1" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac
+          SH
+          chmod +x "$RUNNER_TEMP/shim/uname"
+          set +e
+          output=$(PATH="$RUNNER_TEMP/shim:$PATH" \
+            SAKSAMA_BASE_URL="file://$RUNNER_TEMP/mirror" SAKSAMA_VERSION="$SAKSAMA_TEST_VERSION" \
+            SAKSAMA_INSTALL_DIR="$RUNNER_TEMP/mac" sh install.sh 2>&1)
+          code=$?
+          set -e
+          test "$code" -ne 0 || { echo "::error::install.sh installed a Linux binary on macOS"; exit 1; }
+          echo "$output" | grep -q "macOS is not a supported platform" \
+            || { echo "::error::the refusal did not name the platform"; echo "$output"; exit 1; }
+          echo "$output" | grep -q "/proc" \
+            || { echo "::error::the refusal did not give the reason"; echo "$output"; exit 1; }
+          test ! -e "$RUNNER_TEMP/mac/saksama" || { echo "::error::something was installed on macOS"; exit 1; }
 
   # The INSTANT boundary. 8.0.28 and 8.0.29 do not agree about ADD COLUMN in the
   # middle of a row, or about DROP COLUMN, and the capability matrix has a row for

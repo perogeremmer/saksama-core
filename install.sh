@@ -45,8 +45,11 @@ fi
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$os" in
-linux | darwin) ;;
-*) die "unsupported operating system: $os (Saksama runs on Linux and macOS)" ;;
+linux) ;;
+darwin)
+	die "macOS is not a supported platform. Saksama runs the copy on the machine next to the database, and outside Linux the engine's identity cannot be confirmed through /proc - cancel and retire would have to trust a pid that may have been recycled. Run it on the database host, or build from source if you accept that."
+	;;
+*) die "unsupported operating system: $os (Saksama runs on Linux)" ;;
 esac
 
 arch=$(uname -m)

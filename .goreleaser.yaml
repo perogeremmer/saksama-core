@@ -18,7 +18,12 @@ builds:
       - -trimpath
     ldflags:
       - -s -w -X github.com/perogeremmer/saksama-core/internal/cli.Version={{ .Version }}
-    goos: [linux, darwin]
+    # Linux only. saksama runs the copy on the machine next to the database, and
+    # darwin was published for four releases without a single run: no CI runner
+    # ever executed it, and outside Linux the /proc pid-identity check behind
+    # cancel and retire does not exist. An artifact nobody has run is a claim, and
+    # this release page should only carry what the repository can defend.
+    goos: [linux]
     goarch: [amd64, arm64]
 
 archives:

@@ -83,7 +83,7 @@ one or two boxes you already have.
 
 | | |
 |---|---|
-| OS | Linux or macOS, amd64 or arm64. The binary is **statically linked** (`ldd` says *not a dynamic executable*), so there is no libc version to match and nothing to install first |
+| OS | Linux, amd64 or arm64. The binary is **statically linked** (`ldd` says *not a dynamic executable*), so there is no libc version to match and nothing to install first. Run it **on the machine next to the database** - that is where the copy happens - so there is no macOS build and nothing to install on a laptop |
 | Disk | A writable home directory: the state directory defaults to `~/.local/state/saksama` (`SAKSAMA_STATE_DIR` or `--state-dir`), and installed engines go to `~/.local/share/saksama/bin` |
 | Network | Outbound HTTPS **only** for `saksama engine install`. Every other command talks to your MySQL and nothing else |
 | Privileges on that machine | None beyond the user you already are. Installing goes to `~/.local/share/saksama/bin`, no sudo, no `/usr/local/bin` unless you pass `--system` |
@@ -201,7 +201,7 @@ install -m 0755 saksama ~/.local/bin/saksama   # no sudo, no system directories
 saksama version
 ```
 
-Use `darwin_arm64`, `linux_arm64`, or `darwin_amd64` as appropriate. The archive
+Use `linux_arm64` if the database host is not amd64. The archive
 holds the binary and its licence; the documents live in this repository at the tag
 you downloaded, so a corrected README never means downloading again:
 
@@ -310,7 +310,7 @@ go install github.com/perogeremmer/saksama-core/cmd/saksama@latest
 ```
 
 Or take a static binary from the [releases page](https://github.com/perogeremmer/saksama-core/releases):
-Linux and macOS, amd64 and arm64, with checksums and an SBOM.
+Linux, amd64 and arm64, with checksums and an SBOM.
 
 A copy engine is only needed when a change has to rebuild the table. Saksama
 installs the version it has actually verified, checks it against a published

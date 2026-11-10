@@ -541,9 +541,10 @@ no process to cancel. The tool says that instead of pretending.
 The other limit: before signalling, the command line at `/proc/<pid>/cmdline` is
 compared with the one recorded when the engine started, because Linux reuses pids
 and signalling a stranger is worse than doing nothing. Where there is no `/proc` -
-macOS, or a session recorded before the identity was captured - the comparison
-cannot run, and the pid is trusted as recorded. The guard is real on Linux and
-absent elsewhere, in that order.
+a build from source on some other platform, or a session recorded before the
+identity was captured - the comparison cannot run, and the pid is trusted as
+recorded. This is one of the reasons the published artefacts are Linux only: the
+guard is real there, and absent everywhere else.
 
 ---
 

@@ -139,12 +139,21 @@ type HostRow struct {
 	Detail string `json:"detail"`
 }
 
-// Hosts are the machines the shipped binary was run on. Every "verified" row was run
-// by the distro-smoke CI job, which also asserts the package manager named in the
-// advice matches the one installed there.
+// Hosts are the machines the shipped binary was run on. Every "verified" row was
+// run by CI: the distro-smoke job for anything that is not the runner's own Ubuntu,
+// which every other job runs on and which asserts the advice matches the package
+// manager installed there.
 var Hosts = []HostRow{
 	{
-		OS: "Debian, Ubuntu", Status: Verified,
+		OS: "Ubuntu 24.04 (the CI runner)", Status: Verified,
+		Detail: "every job runs here: the unit and integration suites, and engine doctor prints apt-get with the apt package names",
+	},
+	{
+		OS: "Ubuntu 20.04 and 22.04", Status: Verified,
+		Detail: "binary run in ubuntu:20.04 and ubuntu:22.04: glibc 2.31 and 2.35, and the advice is apt-get install with the Debian package names",
+	},
+	{
+		OS: "Debian", Status: Verified,
 		Detail: "the test suite runs on Debian-based CI runners; engine doctor prints apt-get and the apt package names",
 	},
 	{
@@ -160,8 +169,8 @@ var Hosts = []HostRow{
 		Detail: "binary run in alpine:latest: static linking is what makes this work, and the binary asserts it; advice is apk add",
 	},
 	{
-		OS: "macOS", Status: Claimed,
-		Detail: "the release builds and the static link is asserted, but no CI runner has executed the binary or checked the advice there",
+		OS: "macOS", Status: Unsupported,
+		Detail: "not published and not supported: saksama runs the copy where the database is, and outside Linux the engine's identity cannot be confirmed through /proc, so cancel and retire could trust a recycled pid",
 	},
 	{
 		OS: "openSUSE, RHEL clones, anything else", Status: Unverified,
