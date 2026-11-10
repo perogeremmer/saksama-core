@@ -551,3 +551,50 @@ func TestSessionShowsStoredBlockersWithTheirRemedies(t *testing.T) {
 		t.Fatalf("only blockers belong in that section:\n%s", out)
 	}
 }
+
+// The basis used to be computed and thrown away: the card said "35s - 1h00m |
+// confidence low" and left the reader to guess it was a throughput assumption
+// spanning a factor of ten. It is printed now, wrapped under the number, and this
+// pins both the text and the fact that it goes on its own line.
+func TestPlanCardPrintsTheDurationBasis(t *testing.T) {
+	plan := samplePlan()
+	plan.Duration = analyzer.DurationEstimate{
+		FromSeconds: 61, ToSeconds: 201, Confidence: "medium", Observations: 2,
+		Basis: "measured on this machine from 2 earlier pt-osc run(s): 10.2 MB/s to 34.1 MB/s, so this table is 1m01s to 3m21s",
+	}
+
+	var buf bytes.Buffer
+	if err := PlanCard(&buf, plan); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "1m01s - 3m21s | confidence medium") {
+		t.Fatalf("the range is missing:\n%s", out)
+	}
+	if !strings.Contains(out, "measured on this machine from 2 earlier pt-osc run(s)") {
+		t.Fatalf("the basis must be on the card, not only in --json:\n%s", out)
+	}
+	// The basis belongs under the number, not inside it: a reader scanning the left
+	// column must still find one line per label.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "DURATION") && strings.Contains(line, "measured on") {
+			t.Fatalf("the basis was folded into the label line: %q", line)
+		}
+	}
+}
+
+// An estimate with no basis must not leave a blank line behind it. The empty case
+// is a plan whose engine does nothing.
+func TestPlanCardOmitsAnEmptyBasis(t *testing.T) {
+	plan := samplePlan()
+	plan.Duration = analyzer.DurationEstimate{FromSeconds: 209, ToSeconds: 1049, Confidence: "medium"}
+
+	var buf bytes.Buffer
+	if err := PlanCard(&buf, plan); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "DURATION   209s - 17m29s | confidence medium\n\n") {
+		t.Fatalf("an empty basis left a blank line:\n%s", buf.String())
+	}
+}

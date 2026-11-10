@@ -423,14 +423,24 @@ func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate
 		}
 	}
 
+	if engine == EngineNative && allInstant(in.Ops) {
+		return DurationEstimate{
+			FromSeconds: 1, ToSeconds: 2, Confidence: "high",
+			Basis: "INSTANT operations only modify metadata; the table is not scanned or rebuilt",
+		}
+	}
+
+	// Measured beats assumed. This machine has run migrations before, and what it
+	// actually achieved is a better input than a throughput picked out of the air -
+	// especially because the assumption below spans a factor of ten.
+	if measured, ok := measuredDuration(in.History, engine, size); ok {
+		return measured
+	}
+
+	note := singleObservationNote(in.History, engine)
+	var est DurationEstimate
 	switch engine {
 	case EngineNative:
-		if allInstant(in.Ops) {
-			return DurationEstimate{
-				FromSeconds: 1, ToSeconds: 2, Confidence: "high",
-				Basis: "INSTANT operations only modify metadata; the table is not scanned or rebuilt",
-			}
-		}
 		from := int(size / (100 << 20))
 		to := int(size / (20 << 20))
 		if from < 2 {
@@ -439,9 +449,9 @@ func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate
 		if to < from {
 			to = from
 		}
-		return DurationEstimate{
+		est = DurationEstimate{
 			FromSeconds: from, ToSeconds: to, Confidence: "medium",
-			Basis: "in-place index build scans and sorts the table; throughput assumed between 20 and 100 MB/s with no local history",
+			Basis: "in-place index build scans and sorts the table; throughput assumed between 20 and 100 MB/s",
 		}
 
 	case EngineGhOst:
@@ -453,7 +463,7 @@ func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate
 		if to < from {
 			to = from
 		}
-		return DurationEstimate{
+		est = DurationEstimate{
 			FromSeconds: from, ToSeconds: to, Confidence: "low",
 			Basis: "row-by-row copy plus trigger overhead; throughput assumed between 2 and 20 MB/s and actual speed depends on load and throttling",
 		}
@@ -467,16 +477,118 @@ func estimateDuration(in Input, tbl model.Table, engine Engine) DurationEstimate
 		if to < from {
 			to = from
 		}
-		return DurationEstimate{
+		est = DurationEstimate{
 			FromSeconds: from, ToSeconds: to, Confidence: "low",
 			Basis: "row-by-row copy driven by triggers; throughput assumed between 2 and 15 MB/s and actual speed depends on load and throttling",
 		}
 	}
+	if note != "" {
+		est.Basis += "; " + note
+	}
+	if est.FromSeconds == 0 && est.ToSeconds == 0 {
+		return DurationEstimate{
+			FromSeconds: 0, ToSeconds: 0, Confidence: "high",
+			Basis: "no execution is planned",
+		}
+	}
+	return est
+}
+
+// measuredDuration turns earlier runs on this machine into a range.
+//
+// Two runs is the floor: one number is a point, not a range, and a range invented
+// around a single sample would be an assumption wearing a measurement's clothes.
+// The throughput is the transferable quantity - the same machine copying 40 GB and
+// 400 GB does not scale by table size alone, but bytes per second does.
+func measuredDuration(history []Observation, engine Engine, size int64) (DurationEstimate, bool) {
+	var slowest, fastest int64 // bytes per second, slowest first
+	used := 0
+	for _, o := range history {
+		if o.Engine != engine || o.DataBytes <= 0 || o.Seconds <= 0 {
+			continue
+		}
+		tp := o.DataBytes / int64(o.Seconds)
+		if tp <= 0 {
+			continue
+		}
+		if used == 0 || tp < slowest {
+			slowest = tp
+		}
+		if tp > fastest {
+			fastest = tp
+		}
+		used++
+	}
+	if used < 2 || slowest <= 0 || fastest <= 0 {
+		return DurationEstimate{}, false
+	}
+
+	from := secondsAt(size, fastest)
+	to := secondsAt(size, slowest)
+	if to <= from {
+		to = from + 1
+	}
+
+	basis := fmt.Sprintf(
+		"measured on this machine from %d earlier %s run(s): %s/s to %s/s, so this table is %s to %s",
+		used, engine, humanBytes(slowest), humanBytes(fastest),
+		HumanDuration(from), HumanDuration(to))
+	if spread := fastest / slowest; spread >= 4 {
+		basis += fmt.Sprintf("; the spread is wide (%dx), so treat it as a hint rather than a schedule", spread)
+	}
 
 	return DurationEstimate{
-		FromSeconds: 0, ToSeconds: 0, Confidence: "high",
-		Basis: "no execution is planned",
+		FromSeconds: from, ToSeconds: to, Confidence: "medium", Basis: basis,
+		Observations: used,
+	}, true
+}
+
+// singleObservationNote is what a lone earlier run is worth: a data point, not a
+// range. It goes into the assumed basis so the number on screen has a measurement
+// next to it without pretending to be one.
+func singleObservationNote(history []Observation, engine Engine) string {
+	used, best := 0, int64(0)
+	for _, o := range history {
+		if o.Engine != engine || o.DataBytes <= 0 || o.Seconds <= 0 {
+			continue
+		}
+		tp := o.DataBytes / int64(o.Seconds)
+		if tp > 0 {
+			used++
+			best = tp
+		}
 	}
+	if used != 1 {
+		return ""
+	}
+	return fmt.Sprintf("%s/s was measured once on this machine; one run is a point, not a range", humanBytes(best))
+}
+
+func secondsAt(size, bytesPerSecond int64) int {
+	if bytesPerSecond <= 0 {
+		return 0
+	}
+	sec := size / bytesPerSecond
+	if rem := size % bytesPerSecond; rem != 0 {
+		sec++
+	}
+	if sec < 1 {
+		sec = 1
+	}
+	return int(sec)
+}
+
+// HumanDuration is how long a range endpoint reads on screen. It is exported so
+// the renderer can use it too: the basis line and the DURATION line describe the
+// same range, and describing it two ways invites a reader to distrust both.
+func HumanDuration(sec int) string {
+	if sec < 60 {
+		return fmt.Sprintf("%ds", sec)
+	}
+	if sec < 3600 {
+		return fmt.Sprintf("%dm%02ds", sec/60, sec%60)
+	}
+	return fmt.Sprintf("%dh%02dm", sec/3600, (sec%3600)/60)
 }
 
 func estimateDisk(tbl model.Table, engine Engine) DiskEstimate {

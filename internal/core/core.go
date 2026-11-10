@@ -228,6 +228,9 @@ func (r *Runner) Analyze(ctx context.Context, req Request) (*Prepared, error) {
 		Disk:               diskFacts(snap, req),
 		Force:              req.Force,
 		ForExecution:       req.ForExecution,
+		// What this machine has actually achieved beats a throughput picked out of
+		// the air. Nothing is recorded here; the state directory already has it.
+		History: Observations(r.Store),
 	}
 
 	return &Prepared{Snapshot: snap, Plan: analyzer.Analyze(input), Alter: alter}, nil

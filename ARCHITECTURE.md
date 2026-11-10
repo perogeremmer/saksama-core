@@ -207,9 +207,21 @@ Every check has a stable ID, a severity, the MySQL error it prevents, and an act
 
 A single number is a lie. Every estimate is a range, a confidence label, and the basis:
 
-- historical profile from local sessions (planned, not built),
-- a bounded read-only benchmark (planned),
-- a heuristic fallback, labelled as such.
+- **local history, first.** Every finished session already records the table size it
+  faced and an append-only event log whose `ddl` phase brackets the work. Throughput
+  from those runs is the estimate: two or more runs of the same engine produce a
+  range, confidence `medium`, and a basis that names the sample ("measured on this
+  machine from 3 earlier gh-ost runs: 4.2 MB/s to 11.0 MB/s"). Nothing new is
+  recorded for this, so a state directory that has been in use for months answers
+  immediately, and the range narrows with use.
+- **one run is a point, not a range.** It is quoted in the basis as a single
+  measurement and the range stays a heuristic; inventing a spread around one sample
+  would be an assumption wearing a measurement's clothes.
+- a heuristic fallback for a table this machine has never migrated, labelled as such,
+- a bounded read-only benchmark (planned).
+
+Cancelled and failed runs never feed the estimate: they measured the copy up to the
+point it stopped, which is a different number wearing the same name.
 
 ### 7.5 The server-settings doctor
 

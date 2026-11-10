@@ -286,6 +286,35 @@ saksama plan --ddl orders.sql --alter "<ALTER>" --mysql-version 8.0.36 --json
 | `--accept-unknown-mdl` | accept the one risk that cannot be fixed: on MySQL 5.6 the metadata lock queue cannot be read |
 | `--allow-native-rebuild` | accept that a small table will be rebuilt in place: no throttle, no pause, no resume |
 
+### Where the duration comes from
+
+The estimate is a range, a confidence label, and the basis - never a single number,
+and never a number without its provenance on screen:
+
+```
+DURATION    1m01s - 3m21s | confidence medium
+            measured on this machine from 2 earlier pt-osc run(s): 10.2 MB/s to
+            34.1 MB/s, so this table is 1m01s to 3m21s
+```
+
+That line is built from this machine's own history: every finished session records
+the table size it faced, and every run writes an event log whose `ddl` phase
+brackets the work. Two or more finished runs of the same engine produce a measured
+range, so the estimate narrows the more you use it.
+
+Three things it deliberately does not do:
+
+- **A single earlier run is quoted, not extrapolated.** It appears in the basis as
+  "34.1 MB/s was measured once on this machine; one run is a point, not a range",
+  and the range stays a heuristic.
+- **Cancelled and failed runs are ignored.** They measured the copy up to the point
+  it stopped, which is a different number wearing the same name.
+- **Engines are not mixed.** gh-ost and pt-osc copy at very different speeds, so
+  gh-ost history never speaks for pt-osc.
+
+An INSTANT operation stays INSTANT (`1s - 2s | confidence high`) no matter what the
+history says: metadata-only changes do not copy anything.
+
 Exit code `1` means the plan exists and contains blockers. That is the intended
 CI gate, so a pipeline fails on a change the tool refuses.
 

@@ -114,12 +114,30 @@ type Recommendation struct {
 	ExecutableReason string `json:"executable_reason,omitempty"`
 }
 
+// Observation is one migration this machine actually ran, reduced to the two
+// numbers a duration estimate needs: how much data, and how long it took.
+//
+// It is injected into Input rather than read from disk, so the analyzer stays free
+// of IO and every rule that can change a verdict remains testable offline. The
+// state directory is the source (core.Observations), but the analyzer never knows
+// that, and a caller with no state directory simply passes nothing.
+type Observation struct {
+	Engine    Engine `json:"engine"`
+	DataBytes int64  `json:"data_bytes"`
+	Seconds   int    `json:"seconds"`
+	// At is when the run happened, for a caller that wants to weight recency.
+	At string `json:"at,omitempty"`
+}
+
 // DurationEstimate is deliberately a range with a confidence label.
 type DurationEstimate struct {
 	FromSeconds int    `json:"from_seconds"`
 	ToSeconds   int    `json:"to_seconds"`
 	Confidence  string `json:"confidence"` // low | medium | high
 	Basis       string `json:"basis"`
+	// Observations is how many earlier runs on this machine the range came from.
+	// Zero means the numbers are an assumption, and the basis says so.
+	Observations int `json:"observations,omitempty"`
 }
 
 // DiskEstimate describes additional bytes the plan will need.
@@ -210,6 +228,10 @@ type Input struct {
 	Settings ServerSettings
 	MaxLoad  int   // optional: current Threads_running observation
 	FreeDisk int64 // optional: bytes free on the data volume, from the operator
+	// History is what earlier runs on this machine measured. Empty means there is
+	// no local evidence, and the estimate says so instead of presenting an assumed
+	// throughput as if it were one.
+	History []Observation
 	// Disk is what could be measured or supplied about the data volume. When it is
 	// unmeasured, D6 refuses instead of assuming there is room.
 	Disk DiskFacts

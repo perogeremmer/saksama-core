@@ -1729,3 +1729,144 @@ func TestDiskBlockerNamesEveryWayOut(t *testing.T) {
 		t.Fatalf("expected a D6 blocker: %+v", checksOf(p, "D6"))
 	}
 }
+
+// A duration derived from real runs has to say where it came from, and it must
+// never claim a measurement it does not have. Both directions are asserted here,
+// because the failure that matters is not a wrong number - it is a confident one.
+func TestMeasuredDurationReplacesTheAssumption(t *testing.T) {
+	tbl := model.Table{Name: "orders", Rows: 10_000_000, DataLength: 40 << 30}
+	in := Input{
+		Table: tbl,
+		Ops:   []model.Op{{Kind: model.OpAddIndex, Parts: []model.IndexPart{{Column: "spot_id"}}}},
+		// Two runs of a much smaller table: 200 MB in 20s (10 MB/s) and 200 MB in
+		// 5s (40 MB/s). Throughput is what transfers, not the size.
+		History: []Observation{
+			{Engine: EnginePtOSC, DataBytes: 200 << 20, Seconds: 20},
+			{Engine: EnginePtOSC, DataBytes: 200 << 20, Seconds: 5},
+		},
+	}
+	est := estimateDuration(in, tbl, EnginePtOSC)
+
+	if est.Observations != 2 {
+		t.Fatalf("observations = %d, want 2", est.Observations)
+	}
+	if est.Confidence != "medium" {
+		t.Fatalf("confidence = %q, want medium for two measured runs", est.Confidence)
+	}
+	// 40 GB at 40 MB/s is ~1024s; at 10 MB/s it is ~4096s.
+	if est.FromSeconds != 1024 || est.ToSeconds != 4096 {
+		t.Fatalf("range = %ds-%ds, want 1024s-4096s", est.FromSeconds, est.ToSeconds)
+	}
+	if !strings.Contains(est.Basis, "measured on this machine") {
+		t.Fatalf("the basis must say it was measured: %q", est.Basis)
+	}
+	if !strings.Contains(est.Basis, "2 earlier pt-osc run") {
+		t.Fatalf("the basis must name the sample size and engine: %q", est.Basis)
+	}
+	if strings.Contains(est.Basis, "assumed") {
+		t.Fatalf("a measured estimate must not also claim an assumption: %q", est.Basis)
+	}
+}
+
+// One run is a point, not a range: the estimate stays an assumption and the single
+// measurement is mentioned as exactly that.
+func TestOneObservationIsNotARange(t *testing.T) {
+	tbl := model.Table{Name: "orders", Rows: 1_000_000, DataLength: 20 << 30}
+	in := Input{
+		Table:   tbl,
+		Ops:     []model.Op{{Kind: model.OpAddIndex, Parts: []model.IndexPart{{Column: "id"}}}},
+		History: []Observation{{Engine: EngineGhOst, DataBytes: 100 << 20, Seconds: 10}},
+	}
+	est := estimateDuration(in, tbl, EngineGhOst)
+
+	if est.Observations != 0 {
+		t.Fatalf("observations = %d, want 0: one run is not a range", est.Observations)
+	}
+	if est.Confidence == "high" {
+		t.Fatalf("confidence = %q; a single run cannot be trusted that far", est.Confidence)
+	}
+	if !strings.Contains(est.Basis, "assumed") {
+		t.Fatalf("the range must still be described as an assumption: %q", est.Basis)
+	}
+	if !strings.Contains(est.Basis, "measured once") {
+		t.Fatalf("the single measurement must be mentioned: %q", est.Basis)
+	}
+}
+
+// History collected for one engine must not be applied to another: gh-ost and
+// pt-osc move data at very different speeds, and mixing them would be worse than
+// having no history at all.
+func TestHistoryIsPerEngine(t *testing.T) {
+	tbl := model.Table{Name: "orders", Rows: 1_000_000, DataLength: 20 << 30}
+	in := Input{
+		Table: tbl,
+		Ops:   []model.Op{{Kind: model.OpAddIndex, Parts: []model.IndexPart{{Column: "id"}}}},
+		History: []Observation{
+			{Engine: EngineGhOst, DataBytes: 200 << 20, Seconds: 20},
+			{Engine: EngineGhOst, DataBytes: 200 << 20, Seconds: 5},
+		},
+	}
+	est := estimateDuration(in, tbl, EnginePtOSC)
+	if est.Observations != 0 {
+		t.Fatalf("gh-ost history leaked into a pt-osc estimate (observations = %d)", est.Observations)
+	}
+	if !strings.Contains(est.Basis, "assumed") {
+		t.Fatalf("without its own history the estimate is an assumption: %q", est.Basis)
+	}
+}
+
+// INSTANT stays INSTANT: a metadata-only change takes the same moment whether or
+// not this machine has copied tables before.
+func TestMeasuredHistoryDoesNotOverrideInstant(t *testing.T) {
+	tbl := model.Table{Name: "t", Rows: 100, DataLength: 1 << 20}
+	in := Input{
+		Table:   tbl,
+		Ops:     []model.Op{{Kind: model.OpSetDefault, Column: &model.Column{Name: "status", Type: "varchar(32)", DataType: "varchar"}}},
+		History: []Observation{{Engine: EngineNative, DataBytes: 200 << 20, Seconds: 40}},
+	}
+	est := estimateDuration(in, tbl, EngineNative)
+	if est.Confidence != "high" || est.ToSeconds > 2 {
+		t.Fatalf("INSTANT must keep its own answer: %+v", est)
+	}
+}
+
+// A wide spread is said out loud: two runs that differ by 8x do not justify a
+// precise-looking range.
+func TestWideSpreadIsCalledOut(t *testing.T) {
+	tbl := model.Table{Name: "orders", Rows: 1_000_000, DataLength: 8 << 30}
+	in := Input{
+		Table: tbl,
+		Ops:   []model.Op{{Kind: model.OpAddIndex, Parts: []model.IndexPart{{Column: "id"}}}},
+		History: []Observation{
+			{Engine: EngineGhOst, DataBytes: 200 << 20, Seconds: 2},   // 100 MB/s
+			{Engine: EngineGhOst, DataBytes: 200 << 20, Seconds: 200}, // 1 MB/s
+		},
+	}
+	est := estimateDuration(in, tbl, EngineGhOst)
+	if !strings.Contains(est.Basis, "spread is wide") {
+		t.Fatalf("an 8x spread must be named: %q", est.Basis)
+	}
+}
+
+// Zero and negative observations are not measurements. A state directory can hold
+// a session written by an older format, and the estimator must skip it rather than
+// divide by zero and print an infinity.
+func TestUnusableObservationsAreSkipped(t *testing.T) {
+	tbl := model.Table{Name: "orders", Rows: 1_000_000, DataLength: 4 << 30}
+	in := Input{
+		Table: tbl,
+		Ops:   []model.Op{{Kind: model.OpAddIndex, Parts: []model.IndexPart{{Column: "id"}}}},
+		History: []Observation{
+			{Engine: EnginePtOSC, DataBytes: 0, Seconds: 10},
+			{Engine: EnginePtOSC, DataBytes: 100 << 20, Seconds: 0},
+			{Engine: EnginePtOSC, DataBytes: 100 << 20, Seconds: 10},
+		},
+	}
+	est := estimateDuration(in, tbl, EnginePtOSC)
+	if est.FromSeconds <= 0 || est.ToSeconds <= 0 {
+		t.Fatalf("unusable observations produced a broken range: %+v", est)
+	}
+	if est.Observations != 0 {
+		t.Fatalf("only one observation was usable, so nothing should be claimed: %+v", est)
+	}
+}
