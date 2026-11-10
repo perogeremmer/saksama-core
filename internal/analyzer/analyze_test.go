@@ -1999,3 +1999,96 @@ func TestSmallOnlineAlterLogIsReportedForALargeRebuild(t *testing.T) {
 		t.Fatalf("a 2 GiB table is not worth this warning: %+v", got)
 	}
 }
+
+// D9: CHECK constraints are copied into the shadow table, so a row that violates one
+// fails the copy with 3819 - at the swap, after minutes of work.
+func TestCheckConstraintIsReported(t *testing.T) {
+	tbl := baseTable()
+	tbl.Checks = []model.Check{
+		{Name: "status_known", Expression: "`status` in ('pending','paid')", Enforced: true},
+	}
+
+	// A rebuild copies the rows, so the constraint can stop the copy mid-flight.
+	rebuild := plan(t, tbl, "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL")
+	if !hasCheck(rebuild, "D9", SeverityWarn) {
+		t.Fatalf("a copy of a table with CHECK constraints must warn: %+v", checksOf(rebuild, "D9"))
+	}
+	got := checksOf(rebuild, "D9")[0]
+	if got.MySQLError != 3819 {
+		t.Fatalf("the check must name the error it predicts: %+v", got)
+	}
+	if !strings.Contains(got.Detail, "status_known") {
+		t.Fatalf("the constraint must be named: %q", got.Detail)
+	}
+	// The remediation has to be runnable, not a description of one.
+	if !strings.Contains(got.Remediation, "WHERE NOT (`status` in ('pending','paid'))") {
+		t.Fatalf("the remediation must carry the probe query: %q", got.Remediation)
+	}
+
+	// An INSTANT change does not copy rows and cannot trip a constraint.
+	instant := plan(t, tbl, "8.0.36", "ALTER COLUMN status SET DEFAULT 'pending'")
+	if hasCheck(instant, "D9", SeverityWarn) {
+		t.Fatalf("an INSTANT change must not warn about a copy: %+v", checksOf(instant, "D9"))
+	}
+	if !hasCheck(instant, "D9", SeverityInfo) {
+		t.Fatalf("the constraint still travels with any rebuild and belongs on the plan: %+v", checksOf(instant, "D9"))
+	}
+}
+
+// A NOT ENFORCED constraint is the one case a modern server can hold dirty rows in,
+// and the probe's answer is what turns "there is a constraint" into "these rows
+// violate it".
+func TestCheckViolationsFromTheProbeAreNamed(t *testing.T) {
+	tbl := baseTable()
+	tbl.Checks = []model.Check{
+		{Name: "status_known", Expression: "`status` in ('pending','paid')", Enforced: false},
+	}
+	in := Input{
+		Server:       model.Server{Version: "8.0.36", Vendor: "mysql"},
+		Table:        tbl,
+		Ops:          mustOps(t, "MODIFY COLUMN status varchar(64) NOT NULL"),
+		RawAlter:     "MODIFY COLUMN status varchar(64) NOT NULL",
+		Host:         "db.prod",
+		SchemaSource: "live",
+		Live: &LiveState{
+			CheckViolations: map[string]int64{"status_known": 42},
+		},
+	}
+	p := Analyze(in)
+	got := checksOf(p, "D9")
+	if len(got) == 0 {
+		t.Fatal("D9 did not fire")
+	}
+	if !strings.Contains(got[0].Detail, "NOT ENFORCED") {
+		t.Fatalf("the detail must say the constraint is not enforced: %q", got[0].Detail)
+	}
+	if !strings.Contains(got[0].Detail, "42 row(s)") {
+		t.Fatalf("the detail must name the violating rows: %q", got[0].Detail)
+	}
+	if got[0].Severity != SeverityWarn {
+		t.Fatalf("a violated constraint on a rebuild is a warning: %+v", got[0])
+	}
+}
+
+// A table too large to scan says so instead of quietly reporting nothing.
+func TestCheckProbeSkippedSaysWhy(t *testing.T) {
+	tbl := baseTable()
+	tbl.Checks = []model.Check{{Name: "c", Expression: "`status` <> ''", Enforced: true}}
+	in := Input{
+		Server:       model.Server{Version: "8.0.36", Vendor: "mysql"},
+		Table:        tbl,
+		Ops:          mustOps(t, "MODIFY COLUMN status varchar(64) NOT NULL"),
+		RawAlter:     "MODIFY COLUMN status varchar(64) NOT NULL",
+		Host:         "db.prod",
+		SchemaSource: "live",
+		Live:         &LiveState{CheckProbeSkipped: "the table is 59000000 rows and 23000000000 bytes"},
+	}
+	p := Analyze(in)
+	got := checksOf(p, "D9")
+	if len(got) == 0 {
+		t.Fatal("D9 did not fire")
+	}
+	if !strings.Contains(got[0].Detail, "not probed") {
+		t.Fatalf("an unprobed constraint must say so: %q", got[0].Detail)
+	}
+}

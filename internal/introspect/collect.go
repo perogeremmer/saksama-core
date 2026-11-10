@@ -172,6 +172,11 @@ func (c *Collector) Table(ctx context.Context) (model.Table, error) {
 	if tbl.Triggers, err = c.triggers(ctx); err != nil {
 		return tbl, err
 	}
+	// CHECK constraints exist only from 8.0.16, and the catalogue is what says
+	// whether the server enforces them. Absent catalogue is not an error: on 5.7 and
+	// early 8.0 the constraint is parsed and ignored, which is exactly the state that
+	// lets dirty rows exist.
+	tbl.Checks = c.checkConstraints(ctx)
 
 	// Fill in the effective charset for textual columns that inherit the table
 	// default, so byte-width estimation works.
@@ -905,4 +910,78 @@ func (c *Collector) diskSpace(ctx context.Context) DiskSpace {
 	space := ReadDiskSpace(c.DataDir)
 	space.ServerHost = serverHost.String
 	return space
+}
+
+// checkConstraints reads the CHECK constraints of the current table.
+//
+// Two catalogues, because one does not carry the other's answer: CHECK_CONSTRAINTS
+// has the expression, TABLE_CONSTRAINTS has ENFORCED. Both arrived in 8.0.16, so a
+// missing catalogue means the server does not enforce CHECK at all and there is
+// nothing to report.
+func (c *Collector) checkConstraints(ctx context.Context) []model.Check {
+	rows, err := c.Q.QueryContext(ctx, `
+		SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE, tc.ENFORCED
+		FROM information_schema.CHECK_CONSTRAINTS cc
+		JOIN information_schema.TABLE_CONSTRAINTS tc
+		  ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
+		 AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+		WHERE cc.CONSTRAINT_SCHEMA = ? AND tc.TABLE_NAME = ?
+		ORDER BY cc.CONSTRAINT_NAME`,
+		c.Schema, c.TableName)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []model.Check
+	for rows.Next() {
+		var name, clause, enforced sql.NullString
+		if err := rows.Scan(&name, &clause, &enforced); err != nil {
+			return out
+		}
+		expression := stripCheckWrapper(clause.String)
+		if expression == "" {
+			continue
+		}
+		out = append(out, model.Check{
+			Name:       name.String,
+			Expression: expression,
+			Enforced:   !strings.EqualFold(enforced.String, "NO"),
+		})
+	}
+	return out
+}
+
+// stripCheckWrapper removes the parentheses MySQL wraps around a stored clause, so
+// the expression can be put straight into `WHERE NOT (<expression>)`: the catalogue
+// returns "(`x` > 0)", the parser returns "`x` > 0", and one spelling keeps the
+// probe and the offline plan saying the same thing.
+func stripCheckWrapper(clause string) string {
+	s := strings.TrimSpace(clause)
+	for {
+		if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+			return s
+		}
+		// The closing paren must match the opening one, or this is not a wrapper.
+		depth := 0
+		matched := true
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 && i != len(s)-1 {
+					matched = false
+				}
+			}
+			if !matched {
+				break
+			}
+		}
+		if !matched || depth != 0 {
+			return s
+		}
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
 }

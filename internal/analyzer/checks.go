@@ -42,6 +42,7 @@ const (
 	chkLockWaitTimeout  = "D2"
 	chkDiskHeadroom     = "D6"
 	chkExistingTrigger  = "D7"
+	chkCheckConstraint  = "D9"
 	chkGeneratedColumn  = "D11"
 	chkProductionTarget = "D12"
 	chkOnlineAlterLog   = "D13"
@@ -549,6 +550,45 @@ func checksOperational(in Input, anyRebuild bool) []Check {
 		}
 	}
 
+	// D9: CHECK constraints travel with the copy, and a row that violates one fails
+	// the copy with 3819 - after minutes of work, at the swap, on a table that had
+	// been fine until then. Since 8.0.16 the server enforces them, so a table carried
+	// over from an older one can hold exactly those rows without anyone noticing.
+	if len(in.Table.Checks) > 0 {
+		var names, unenforced []string
+		for _, chk := range in.Table.Checks {
+			label := chk.Name
+			if label == "" {
+				label = chk.Expression
+			}
+			names = append(names, label)
+			if !chk.Enforced {
+				unenforced = append(unenforced, label)
+			}
+		}
+		detail := fmt.Sprintf("%d constraint(s) copied into the shadow table: %s", len(names), strings.Join(names, ", "))
+		if len(unenforced) > 0 {
+			detail += fmt.Sprintf(" (%d NOT ENFORCED, so the current rows are allowed to violate them)", len(unenforced))
+		}
+		violated := violatedChecks(in)
+		if len(violated) > 0 {
+			detail += "; rows already violate " + strings.Join(violated, ", ")
+		} else if in.Live != nil && in.Live.CheckProbeSkipped != "" {
+			detail += "; not probed: " + in.Live.CheckProbeSkipped
+		} else if in.Live != nil && in.Live.CheckViolations != nil {
+			detail += "; no violating rows found"
+		}
+		out = append(out, Check{
+			ID: chkCheckConstraint, Severity: severityFor(in, anyRebuild, len(violated) > 0),
+			Title:  "table has CHECK constraints",
+			Detail: detail,
+			Remediation: "find the rows that would break the copy before it starts, one query per constraint: " +
+				checkProbeQuery(in.Table.Name, in.Table.Checks) +
+				". Rows the constraint cannot accept fail the copy with 3819 part-way through; fix the data, or drop the constraint deliberately first",
+			MySQLError: 3819,
+		})
+	}
+
 	if size := in.Table.SizeBytes(); size > 100<<30 {
 		out = append(out, Check{
 			ID: chkHugeTable, Severity: SeverityWarn,
@@ -608,4 +648,49 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%d %s", n, units[i])
 	}
 	return fmt.Sprintf("%.1f %s", f, units[i])
+}
+
+// severityFor is D9's one judgement: a violation on a plan that copies the table is
+// a warning about a migration that will die half-way; on a plan that does not touch
+// the rows it is information.
+func severityFor(in Input, anyRebuild, violated bool) Severity {
+	if violated && (anyRebuild || in.ForExecution) {
+		return SeverityWarn
+	}
+	if anyRebuild {
+		return SeverityWarn
+	}
+	return SeverityInfo
+}
+
+// violatedChecks names the constraints the live probe found rows for.
+func violatedChecks(in Input) []string {
+	if in.Live == nil || in.Live.CheckViolations == nil {
+		return nil
+	}
+	var out []string
+	for _, chk := range in.Table.Checks {
+		label := chk.Name
+		if label == "" {
+			label = chk.Expression
+		}
+		if n := in.Live.CheckViolations[label]; n > 0 {
+			out = append(out, fmt.Sprintf("%s (%d row(s))", label, n))
+		}
+	}
+	return out
+}
+
+// checkProbeQuery is the query the operator can run, written out rather than
+// described, so the remediation is something to paste.
+func checkProbeQuery(table string, checks []model.Check) string {
+	var parts []string
+	for i, chk := range checks {
+		if i == 3 {
+			parts = append(parts, "...")
+			break
+		}
+		parts = append(parts, fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE NOT (%s)", table, chk.Expression))
+	}
+	return strings.Join(parts, "; ")
 }

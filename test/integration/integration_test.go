@@ -1863,3 +1863,99 @@ func TestCollectorCarriesTheOnlineAlterLogSize(t *testing.T) {
 	}
 	t.Logf("innodb_online_alter_log_max_size = %d bytes", n)
 }
+
+// D9's probe, against a server that enforces CHECK constraints.
+//
+// The one state a modern server can hold: a constraint that was added (or carried
+// over from a server that ignored CHECK) as NOT ENFORCED, with rows that violate it.
+// MySQL refuses to enforce such a constraint - 3819, verified here - which is exactly
+// why the copy is where it surfaces: the shadow table is created from SHOW CREATE
+// TABLE, so the constraint travels, and the copy's INSERT is the first statement that
+// has to satisfy it.
+func TestCheckConstraintProbeFindsViolations(t *testing.T) {
+	db := adminDB(t)
+	requireCheckConstraints(t, db)
+	schema, db := fixtureSchema(t)
+	mustExec(t, db, "CREATE TABLE `t` (`id` int NOT NULL, `x` int NOT NULL, PRIMARY KEY (`id`), "+
+		"CONSTRAINT `x_positive` CHECK ((`x` > 0)) /*!80016 NOT ENFORCED */) ENGINE=InnoDB")
+	mustExec(t, db, "INSERT INTO `t` (`id`, `x`) VALUES (1, 5), (2, -3), (3, -7)")
+
+	// Enforcing it now is impossible, and saying so is the whole point of the check.
+	if _, err := db.Exec("ALTER TABLE `t` ALTER CHECK `x_positive` ENFORCED"); err == nil {
+		t.Fatal("MySQL enforced a violated constraint; the fixture no longer describes the hazard")
+	} else if !strings.Contains(err.Error(), "3819") {
+		t.Fatalf("expected 3819, got %v", err)
+	}
+
+	runner, _ := newRunner(t)
+	runner.DB = db
+	in := core.Request{
+		Conn:     testConn(),
+		Database: schema,
+		Table:    "t",
+		Alter:    "MODIFY COLUMN `x` bigint NOT NULL",
+		Actor:    "integration-test",
+	}
+	prep, err := runner.Analyze(context.Background(), in)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	var d9 []analyzer.Check
+	for _, c := range prep.Plan.Checks {
+		if c.ID == "D9" {
+			d9 = append(d9, c)
+		}
+	}
+	if len(d9) == 0 {
+		t.Fatalf("D9 did not fire on a table with a violated CHECK constraint: %+v", prep.Plan.Checks)
+	}
+	got := d9[0]
+	if got.Severity != analyzer.SeverityWarn {
+		t.Fatalf("severity = %s, want a warning for a rebuild", got.Severity)
+	}
+	if !strings.Contains(got.Detail, "NOT ENFORCED") {
+		t.Fatalf("the detail must say the constraint is not enforced: %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "2 row(s)") {
+		t.Fatalf("the probe must count the violating rows: %q", got.Detail)
+	}
+	if got.MySQLError != 3819 {
+		t.Fatalf("the check must name 3819: %+v", got)
+	}
+
+	// A clean table is not a finding of the alarming kind: same constraint, no
+	// violating rows, still reported, and now with the count at zero.
+	mustExec(t, db, "DELETE FROM `t` WHERE `x` < 0")
+	prep, err = runner.Analyze(context.Background(), in)
+	if err != nil {
+		t.Fatalf("analyze after cleaning: %v", err)
+	}
+	for _, c := range prep.Plan.Checks {
+		if c.ID == "D9" && strings.Contains(c.Detail, "row(s)") {
+			t.Fatalf("the probe still reports violations on a clean table: %q", c.Detail)
+		}
+	}
+}
+
+// requireCheckConstraints skips a test on a server that does not enforce CHECK
+// constraints. Before 8.0.16 the clause is parsed and ignored, so the hazard this
+// test describes cannot exist there - and `ALTER TABLE ... ALTER CHECK` is a syntax
+// error, which is a skip rather than a failure.
+func requireCheckConstraints(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var version string
+	if err := db.QueryRow("SELECT VERSION()").Scan(&version); err != nil {
+		t.Skipf("cannot read the server version: %v", err)
+	}
+	v, err := model.ParseVersion(version)
+	if err != nil {
+		t.Skipf("cannot parse the server version %q: %v", version, err)
+	}
+	if !v.AtLeast(8, 0, 16) {
+		t.Skipf("CHECK constraints are enforced from 8.0.16; this server is %s", version)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.CHECK_CONSTRAINTS LIMIT 1`).Scan(&n); err != nil {
+		t.Skipf("this server has no CHECK_CONSTRAINTS catalogue: %v", err)
+	}
+}

@@ -19,8 +19,8 @@ contract, so they are never renumbered or reused for something else.
 | `planned` | specified here, not implemented yet |
 | `moved` | superseded by the engine matrix (`saksama advise`), which reports it as a per-engine requirement instead of a check |
 
-Counts today: **45 implemented check IDs** out of **54 catalogued** (45 `done`,
-5 `planned`, 4 `moved`), plus **12 server settings** in the doctor (section S).
+Counts today: **46 implemented check IDs** out of **54 catalogued** (46 `done`,
+4 `planned`, 4 `moved`), plus **12 server settings** in the doctor (section S).
 The `done` column is the number to trust: it is the one this file cannot inflate
 without the analyzer contradicting it.
 
@@ -85,7 +85,7 @@ without the analyzer contradicting it.
 | D6 | disk space: below 10 percent free is refused, below 25 percent warns, and a copy needs twice the table size. An unmeasured disk refuses `apply` and only warns `plan` - but only for a change that copies or rebuilds the table, or when a copy engine was chosen; `ADD INDEX` and other metadata changes are never blocked for it | `BLOCKER` or `WARN` | done | `1021: Disk full`. A change that copies nothing is never blocked for the missing figure, and when the copy only happens because a copy engine was chosen, the remedy says so and names `saksama engine clear` |
 | D7 | the table already has triggers | `WARN` | done | both engines create their own |
 | D8 | leftover artifacts from a previous migration | `BLOCKER` | done | a new run would collide with them |
-| D9 | a `CHECK` constraint would be violated by the copy | `WARN` | planned | enforced from 8.0.16 |
+| D9 | a `CHECK` constraint would be violated by the copy | `WARN` | done | the constraints are parsed from `SHOW CREATE TABLE` (including `NOT ENFORCED`, which MySQL writes inside a version comment) and the rows are probed when the table is under 2M rows / 1 GiB; above that the plan says it did not look and hands over the query. `3819` is what a violated constraint answers, mid-copy |
 | D10 | the table is partitioned | `WARN` | done | gh-ost does not support it |
 | D11 | the table has generated columns | `INFO` | done | names the generated columns and points at pt-osc: a copy engine recreates the table from its own definition, so the expression has to survive unchanged |
 | D12 | the target is marked as production | `WARN` | done | requires a hostname confirmation |
