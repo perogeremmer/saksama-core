@@ -202,6 +202,9 @@ func adviseOffline(o adviseOpts, binaries map[string]analyzer.EngineBinary, stdo
 		Ignored:      ignored,
 		Binaries:     binaries,
 	}
+	if store, err := newStore(); err == nil {
+		in.History = core.Observations(store)
+	}
 	if code := applyEngineHint(o, &in); code != 0 {
 		fmt.Fprintf(stderr, "saksama advise: unknown engine %q\n", o.engine)
 		return code

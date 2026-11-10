@@ -123,6 +123,13 @@ func PlanCard(w io.Writer, p analyzer.Plan) error {
 	label("TARGET", targetLine(p))
 	label("ENGINE", engineLine(p))
 	label("DURATION", durationLine(p.Duration))
+	// Where the number came from, on the line under it. The basis was computed and
+	// then never shown: the plan screen said "30s - 4h | confidence low" and left
+	// the reader to guess that this was a throughput assumption spanning a factor
+	// of ten. A duration an operator cannot interrogate is a number to ignore.
+	if p.Duration.Basis != "" {
+		writeWrapped(&b, 0, strings.Repeat(" ", labelWidth+1), strings.Repeat(" ", labelWidth+1), p.Duration.Basis, width)
+	}
 	if p.Schema.EstimatedRows > 0 || p.Schema.DataBytes > 0 {
 		label("TABLE", tableLine(p))
 	}
@@ -345,7 +352,7 @@ func durationLine(d analyzer.DurationEstimate) string {
 	if d.FromSeconds == 0 && d.ToSeconds == 0 {
 		return "n/a"
 	}
-	return fmt.Sprintf("%s - %s | confidence %s", humanDuration(d.FromSeconds), humanDuration(d.ToSeconds), d.Confidence)
+	return fmt.Sprintf("%s - %s | confidence %s", analyzer.HumanDuration(d.FromSeconds), analyzer.HumanDuration(d.ToSeconds), d.Confidence)
 }
 
 // enginesLine is the one-line summary of the engine matrix. The full breakdown
@@ -416,16 +423,6 @@ func dedupe(in []string) []string {
 		out = append(out, s)
 	}
 	return out
-}
-
-func humanDuration(sec int) string {
-	if sec < 60 {
-		return fmt.Sprintf("%ds", sec)
-	}
-	if sec < 3600 {
-		return fmt.Sprintf("%dm%02ds", sec/60, sec%60)
-	}
-	return fmt.Sprintf("%dh%02dm", sec/3600, (sec%3600)/60)
 }
 
 func humanBytes(n int64) string {

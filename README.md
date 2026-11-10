@@ -425,7 +425,8 @@ A safety tool that overpromises is worse than no tool, so this is explicit:
 5. **Progress is polled from the database**, never parsed from engine output,
    because output formats change between versions.
 6. **No single duration number.** Always a range, a confidence label, and the
-   basis.
+   basis - and once this machine has run two migrations, the range comes from what
+   they measured rather than from a throughput picked out of the air.
 7. **Secrets never become events.** Redaction runs in the event layer, not at each
    call site.
 8. **Fail closed on every path.** A refusal is a feature.

@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/perogeremmer/saksama-core/internal/analyzer"
+	"github.com/perogeremmer/saksama-core/internal/core"
 	"github.com/perogeremmer/saksama-core/internal/model"
 	"github.com/perogeremmer/saksama-core/internal/parser"
 	"github.com/perogeremmer/saksama-core/internal/render"
@@ -438,6 +439,11 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		Ignored:            ignored,
 		FreeDisk:           o.freeDisk,
 		Disk:               analyzer.DiskFacts{Free: o.freeDisk, Total: o.diskTotal, Measured: o.freeDisk > 0, Source: "operator"},
+	}
+	// Estimates narrow with use: what this state directory has measured is the
+	// best input the plan has, and it costs one read of a small directory.
+	if store, err := newStore(); err == nil {
+		in.History = core.Observations(store)
 	}
 	// Engine precedence: flag, then the choice recorded for this table, then the
 	// analyzer's recommendation.
