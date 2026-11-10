@@ -35,6 +35,9 @@ var relevantVariables = []string{
 	"max_connections",
 	"wait_timeout",
 	"innodb_lock_wait_timeout",
+	// D13: the ceiling on concurrent DML an in-place rebuild can absorb before it
+	// fails with 1799 and rolls back.
+	"innodb_online_alter_log_max_size",
 }
 
 // Settings reads the server variables the engines depend on.

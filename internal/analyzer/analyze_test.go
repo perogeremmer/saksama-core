@@ -1870,3 +1870,127 @@ func TestUnusableObservationsAreSkipped(t *testing.T) {
 		t.Fatalf("only one observation was usable, so nothing should be claimed: %+v", est)
 	}
 }
+
+// --- the four checks that landed in v0.7.2 ---------------------------------
+
+// C7: a nullable foreign key column is where ON DELETE SET NULL does its work,
+// and no constraint stops a NULL from meaning nothing.
+func TestNullableForeignKeyColumnIsReported(t *testing.T) {
+	tbl := withFK(baseTable())
+	for i, c := range tbl.Columns {
+		if c.Name == "spot_id" {
+			tbl.Columns[i].Nullable = true
+		}
+	}
+	tbl.ForeignKeys[0].OnDelete = model.ActionSetNull
+
+	p := plan(t, tbl, "8.0.36", "ADD INDEX ix_created (created_at)")
+	if !hasCheck(p, "C7", SeverityInfo) {
+		t.Fatalf("a nullable FK column must be reported: %+v", checksOf(p, "C7"))
+	}
+	var detail string
+	for _, c := range checksOf(p, "C7") {
+		detail += c.Detail + " "
+	}
+	if !strings.Contains(detail, "ON DELETE SET NULL") {
+		t.Fatalf("the detail must connect NULL to the action: %q", detail)
+	}
+
+	// A NOT NULL column is the ordinary case and must stay quiet.
+	if got := checksOf(plan(t, withFK(baseTable()), "8.0.36", "ADD INDEX ix_created (created_at)"), "C7"); len(got) != 0 {
+		t.Fatalf("a NOT NULL FK column is not a finding: %+v", got)
+	}
+}
+
+// D11: generated columns survive a copy only if the expression survives it.
+func TestGeneratedColumnIsReported(t *testing.T) {
+	tbl := baseTable()
+	tbl.Columns = append(tbl.Columns, model.Column{
+		Name: "status_upper", Type: "varchar(32)", DataType: "varchar",
+		Generated: true, Extra: "GENERATED ALWAYS AS (upper(`status`)) STORED",
+	})
+	p := plan(t, tbl, "8.0.36", "ADD INDEX ix_created (created_at)")
+	if !hasCheck(p, "D11", SeverityInfo) {
+		t.Fatalf("a generated column must be reported: %+v", checksOf(p, "D11"))
+	}
+	if !strings.Contains(checksOf(p, "D11")[0].Detail, "status_upper") {
+		t.Fatalf("the check must name the column: %+v", checksOf(p, "D11"))
+	}
+}
+
+// E4: Percona Toolkit 2.x has no --resume, so an interrupted copy starts over.
+func TestOldPerconaToolkitIsReported(t *testing.T) {
+	withPtOSC := func(version string) func(*Input) {
+		return func(in *Input) {
+			in.Binaries = map[string]EngineBinary{
+				"pt-online-schema-change": {Name: "pt-online-schema-change", Path: "/usr/bin/pt-online-schema-change", Version: version, Available: true},
+			}
+		}
+	}
+	p := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", withPtOSC("2.2.20"))
+	if !hasCheck(p, "E4", SeverityWarn) {
+		t.Fatalf("2.x must be reported: %+v", checksOf(p, "E4"))
+	}
+	// 3.x is what this build verifies against; reporting it would be noise.
+	if got := checksOf(plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", withPtOSC("3.7.2")), "E4"); len(got) != 0 {
+		t.Fatalf("3.x is not a finding: %+v", got)
+	}
+}
+
+// D13: an in-place rebuild collects concurrent DML in the online alter log, and a
+// full log means 1799 and a rollback of everything done so far.
+func TestSmallOnlineAlterLogIsReportedForALargeRebuild(t *testing.T) {
+	withLog := func(value string) func(*Input) {
+		return func(in *Input) {
+			in.Settings = SettingsFromMap(map[string]string{
+				"performance_schema":               "ON",
+				"innodb_online_alter_log_max_size": value,
+			})
+		}
+	}
+	// An index build on the 22 GiB fixture is an in-place rebuild.
+	p := plan(t, baseTable(), "8.0.36", "ADD INDEX ix_status (status)", withLog("134217728"))
+	if !hasCheck(p, "D13", SeverityWarn) {
+		t.Fatalf("a 128 MB log on a 22 GiB rebuild must be reported: %+v", checksOf(p, "D13"))
+	}
+	if got := checksOf(p, "D13")[0]; got.MySQLError != 1799 {
+		t.Fatalf("the check must name the error it predicts: %+v", got)
+	}
+
+	// A raised log is the fix, so the finding must disappear.
+	if got := checksOf(plan(t, baseTable(), "8.0.36", "ADD INDEX ix_status (status)", withLog("1073741824")), "D13"); len(got) != 0 {
+		t.Fatalf("a 1 GiB log is enough for this rebuild: %+v", got)
+	}
+
+	// INSTANT touches no rows, so there is nothing to accumulate.
+	instant := plan(t, baseTable(), "8.0.36", "ADD COLUMN flag tinyint NOT NULL DEFAULT 0", withLog("134217728"))
+	if got := checksOf(instant, "D13"); len(got) != 0 {
+		t.Fatalf("INSTANT must not be warned about the online alter log: %+v", got)
+	}
+
+	// A copy engine keeps its own table and never uses this log.
+	copyEngine := plan(t, baseTable(), "8.0.36", "MODIFY COLUMN status varchar(64) NOT NULL", withLog("134217728"))
+	if copyEngine.Recommendation.Engine == EngineNative {
+		t.Fatalf("fixture was expected to route to a copy engine, got %q", copyEngine.Recommendation.Engine)
+	}
+	if got := checksOf(copyEngine, "D13"); len(got) != 0 {
+		t.Fatalf("a copy engine does not need the online alter log: %+v", got)
+	}
+
+	// An unreadable setting is reported as unknown, never as a pass - but only on
+	// a run where it would have mattered.
+	unknown := plan(t, baseTable(), "8.0.36", "ADD INDEX ix_status (status)",
+		func(in *Input) {
+			in.Settings = SettingsFromMap(map[string]string{"performance_schema": "ON"})
+		})
+	if !hasCheck(unknown, "D13", SeverityInfo) {
+		t.Fatalf("an unreadable setting must be named on a large rebuild: %+v", checksOf(unknown, "D13"))
+	}
+
+	// A small table cannot overflow a 128 MB log in the time it takes to rebuild.
+	small := baseTable()
+	small.DataLength, small.IndexLength, small.Rows = 2<<30, 0, 500_000
+	if got := checksOf(plan(t, small, "8.0.36", "ADD INDEX ix_status (status)", withLog("134217728")), "D13"); len(got) != 0 {
+		t.Fatalf("a 2 GiB table is not worth this warning: %+v", got)
+	}
+}

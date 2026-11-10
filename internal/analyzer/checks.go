@@ -36,12 +36,15 @@ const (
 	chkCopyEngineWithFK    = "C4"
 	chkManyForeignKeys     = "C5"
 	chkAuroraNoFKChecks    = "C6"
+	chkFKColumnNullable    = "C7"
 
 	// Operational.
 	chkLockWaitTimeout  = "D2"
 	chkDiskHeadroom     = "D6"
 	chkExistingTrigger  = "D7"
+	chkGeneratedColumn  = "D11"
 	chkProductionTarget = "D12"
+	chkOnlineAlterLog   = "D13"
 	chkHugeTable        = "D17"
 
 	// Capability.
@@ -49,6 +52,7 @@ const (
 	chkMariaDB            = "E1"
 	chkEngineNotInnoDB    = "E2"
 	chkVersionUnparseable = "E3"
+	chkOldPtOSC           = "E4"
 	chkOldServer          = "E5"
 
 	// Engine routing.
@@ -399,10 +403,11 @@ func checksIndexes(in Input, projected model.Table) []Check {
 func checksForeignKeys(in Input, projected model.Table) []Check {
 	var out []Check
 
+	// The touched-column map drives C1 and C2 only. Everything else in this
+	// function is a fact about the table that a reader needs before any change,
+	// and it used to sit behind this guard - so `ADD INDEX`, which touches no
+	// column, silently reported no referential actions and no constraint count.
 	touched := touchedColumns(in.Ops)
-	if len(touched) == 0 {
-		return nil
-	}
 
 	// C1: outgoing FK columns being changed.
 	for _, fk := range in.Table.ForeignKeys {
@@ -446,6 +451,30 @@ func checksForeignKeys(in Input, projected model.Table) []Check {
 		}
 	}
 
+	// C7: a nullable foreign key column is a legal value that no constraint
+	// checks, and it decides what a parent delete actually does.
+	for _, fk := range in.Table.ForeignKeys {
+		var nullable []string
+		for _, col := range fk.Columns {
+			if c, ok := in.Table.Column(col); ok && c.Nullable {
+				nullable = append(nullable, col)
+			}
+		}
+		if len(nullable) == 0 {
+			continue
+		}
+		detail := fmt.Sprintf("FK %q covers nullable column(s) %s", fk.Name, strings.Join(nullable, ", "))
+		if fk.OnDelete == model.ActionSetNull {
+			detail += ", and it is ON DELETE SET NULL: deleting a parent writes NULL here through the constraint"
+		}
+		out = append(out, Check{
+			ID: chkFKColumnNullable, Severity: SeverityInfo,
+			Title:       "foreign key column is nullable",
+			Detail:      detail,
+			Remediation: "find the rows that rely on it first: SELECT COUNT(*) FROM <child> WHERE <col> IS NULL; then decide. If a dangling child must be impossible, make the column NOT NULL and recreate the constraint as ON DELETE RESTRICT in the same window: ALTER TABLE <child> MODIFY <col> <type> NOT NULL, DROP FOREIGN KEY <fk>, ADD CONSTRAINT <fk> FOREIGN KEY (<col>) REFERENCES <parent> (<id>) ON DELETE RESTRICT. If SET NULL is intended, the application must already read NULL as 'no parent'",
+		})
+	}
+
 	// C5: many constraints.
 	if n := len(in.Table.AllForeignKeys()); n > 10 {
 		out = append(out, Check{
@@ -487,6 +516,37 @@ func checksOperational(in Input, anyRebuild bool) []Check {
 			Detail:      "apply requires typing the hostname to confirm",
 			Remediation: "apply this plan yourself, typing the hostname when asked: --production --confirm <host>. The friction is the point - it is the difference between reading a plan and running it on the wrong server",
 		})
+	}
+
+	// D11: generated columns are computed by the server, so a table rebuilt by
+	// anything else has to recreate them exactly.
+	var generated []string
+	for _, c := range in.Table.Columns {
+		if c.Generated {
+			generated = append(generated, c.Name)
+		}
+	}
+	if len(generated) > 0 {
+		out = append(out, Check{
+			ID: chkGeneratedColumn, Severity: SeverityInfo,
+			Title:       "table has generated columns",
+			Detail:      fmt.Sprintf("%d generated column(s): %s", len(generated), strings.Join(generated, ", ")),
+			Remediation: "read the expressions before choosing an engine: SHOW CREATE TABLE <table>. A copy engine recreates the table from its own definition, so an expression that does not survive unchanged means the copy silently holds different values. pt-osc has preserved generated columns the longest: if a rebuild is needed and both engines fit, pass --engine pt-osc, and check the version first with saksama engine doctor pt-osc",
+		})
+	}
+
+	// E4: the installed toolkit is older than what this build verifies against.
+	// 2.x has a narrower ALTER grammar and no --resume, so a stopped copy restarts
+	// from nothing - a difference an operator finds out about at the worst moment.
+	if bin, ok := in.Binaries["pt-online-schema-change"]; ok && bin.Available {
+		if v, err := model.ParseVersion(bin.Version); err == nil && !v.AtLeast(3, 0, 0) {
+			out = append(out, Check{
+				ID: chkOldPtOSC, Severity: SeverityWarn,
+				Title:       "Percona Toolkit is older than 3.0",
+				Detail:      fmt.Sprintf("pt-online-schema-change is %s", bin.Version),
+				Remediation: "3.x is what this build verifies against, and the difference shows up mid-migration: 2.x has no --resume, so an interrupted copy starts over. Install the verified build with: saksama engine install pt-osc",
+			})
+		}
 	}
 
 	if size := in.Table.SizeBytes(); size > 100<<30 {
