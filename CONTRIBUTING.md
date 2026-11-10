@@ -45,10 +45,19 @@ Two things that surprise people the first time:
   it never ran, so install both before you trust a local run:
   `saksama engine doctor` says what is missing, `saksama engine install gh-ost`
   and `… pt-osc` put the verified builds in place.
-- **The slow tests are opt-in.** `SAKSAMA_VOLUME_TESTS=1 go test -tags=integration
-  -run TestCopyWithConcurrentWrites ./test/integration/` builds 131k rows and writes
-  to them while the copy runs. It takes minutes and runs nightly in CI, not per
-  pull request.
+- **The slow tests are opt-in.** Two of them, both nightly rather than per pull
+  request:
+  - `SAKSAMA_VOLUME_TESTS=1 go test -tags=integration -run TestCopyWithConcurrentWrites ./test/integration/`
+    builds 131k rows and writes to them while the copy runs. Its subject is lost
+    writes.
+  - `SAKSAMA_SCALE_TESTS=1 go test -tags=integration -run TestProductionShapeCopy ./test/integration/`
+    builds 2 GiB (`SAKSAMA_SCALE_GB=0.1` for a 50-second version), holds the cutover,
+    writes throughout, releases, and then asserts the things that only exist at that
+    size: the swap really waits for the gate, cleanup returns the disk (`_t_del`,
+    measured before and after), the next plan quotes the measured throughput, the
+    event log stays in kilobytes, and `reconcile` comes back empty. Budget roughly
+    three times the table on disk: the copy and the binary log it generates land in
+    the same volume.
 
 ## Adding a check
 

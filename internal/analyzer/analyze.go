@@ -135,8 +135,11 @@ type DurationEstimate struct {
 	ToSeconds   int    `json:"to_seconds"`
 	Confidence  string `json:"confidence"` // low | medium | high
 	Basis       string `json:"basis"`
-	// Observations is how many earlier runs on this machine the range came from.
-	// Zero means the numbers are an assumption, and the basis says so.
+	// Observations is how many earlier runs on this machine the estimate had to work
+	// with. Zero means the numbers are a pure assumption and the basis says so; one
+	// means a single measurement is quoted but not trusted as a range; two or more
+	// means the range itself is measured. Reading it together with Confidence is the
+	// point: the count says what exists, the label says how far it is trusted.
 	Observations int `json:"observations,omitempty"`
 }
 
