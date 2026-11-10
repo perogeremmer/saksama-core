@@ -197,6 +197,24 @@ type Table struct {
 	ForeignKeys  []ForeignKey `json:"foreign_keys"`  // outgoing FKs on this table
 	ReferencedBy []ForeignKey `json:"referenced_by"` // incoming FKs from other tables
 	Triggers     []string     `json:"triggers"`
+	Checks       []Check      `json:"checks,omitempty"`
+}
+
+// Check is one CHECK constraint.
+//
+// It is modelled rather than ignored because MySQL 8.0.16 started enforcing these:
+// a copy engine builds its shadow table from SHOW CREATE TABLE, so the constraint
+// travels with the copy, and a row that violates it fails the copy with 3819 - after
+// the copy has been running for a while. A table carried over from a server that
+// ignored CHECK constraints can hold exactly those rows.
+type Check struct {
+	Name string `json:"name,omitempty"`
+	// Expression is the constraint as the server writes it, in backticks, so it can
+	// be run back as `SELECT 1 FROM t WHERE NOT (<expression>) LIMIT 1`.
+	Expression string `json:"expression"`
+	// Enforced is false for `NOT ENFORCED` (8.0.16+), where rows are allowed to
+	// violate the constraint and only new writes are checked.
+	Enforced bool `json:"enforced"`
 }
 
 // Column returns the named column.

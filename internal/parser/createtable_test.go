@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/perogeremmer/saksama-core/internal/model"
@@ -130,5 +131,58 @@ func TestParseCreateTableQuotedDefaultsAndComments(t *testing.T) {
 func TestParseCreateTableRejectsGarbage(t *testing.T) {
 	if _, _, err := ParseCreateTable("SELECT 1"); err == nil {
 		t.Fatal("expected error for non-CREATE statement")
+	}
+}
+
+// CHECK constraints are modelled, not discarded: since 8.0.16 the server enforces
+// them, and a copy engine carries them into the shadow table.
+func TestParseCreateTableCheckConstraints(t *testing.T) {
+	sql := "CREATE TABLE `orders` (\n" +
+		"  `id` int NOT NULL,\n" +
+		"  `x` int NOT NULL,\n" +
+		"  `j` json DEFAULT NULL,\n" +
+		"  PRIMARY KEY (`id`),\n" +
+		"  CONSTRAINT `x_positive` CHECK ((`x` > 0)),\n" +
+		"  CONSTRAINT `j_valid` CHECK (json_valid(`j`)) /*!80016 NOT ENFORCED */\n" +
+		") ENGINE=InnoDB"
+	tbl, ignored, err := ParseCreateTable(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tbl.Checks) != 2 {
+		t.Fatalf("checks = %+v, want 2", tbl.Checks)
+	}
+	byName := map[string]model.Check{}
+	for _, c := range tbl.Checks {
+		byName[c.Name] = c
+	}
+	if got := byName["x_positive"]; got.Expression != "`x` > 0" || !got.Enforced {
+		t.Fatalf("x_positive = %+v; the expression must be runnable SQL and enforced by default", got)
+	}
+	// The enforcement marker lives inside a version comment in SHOW CREATE TABLE,
+	// which the tokenizer drops. Reading it is the difference between "this copy
+	// carries dirty rows" and "this copy will fail on them".
+	if got := byName["j_valid"]; got.Enforced {
+		t.Fatalf("j_valid = %+v; NOT ENFORCED must survive the version comment", got)
+	}
+	for _, fragment := range ignored {
+		if strings.Contains(fragment, "CHECK") {
+			t.Fatalf("a modelled constraint must not be reported as ignored: %q", fragment)
+		}
+	}
+}
+
+// An unnamed CHECK is legal and MySQL names it on creation (t_chk_1), but a
+// hand-written dump can carry it unnamed.
+func TestParseCreateTableUnnamedCheck(t *testing.T) {
+	tbl, _, err := ParseCreateTable("CREATE TABLE `t` (`x` int NOT NULL, CHECK (`x` > 0)) ENGINE=InnoDB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tbl.Checks) != 1 || tbl.Checks[0].Name != "" || !tbl.Checks[0].Enforced {
+		t.Fatalf("checks = %+v", tbl.Checks)
+	}
+	if tbl.Checks[0].Expression != "`x` > 0" {
+		t.Fatalf("expression = %q", tbl.Checks[0].Expression)
 	}
 }

@@ -198,6 +198,11 @@ func (r *Runner) Analyze(ctx context.Context, req Request) (*Prepared, error) {
 		}
 	}
 
+	// CHECK constraints are copied into the shadow table, so a row that violates one
+	// fails the copy at the swap. Ask before the copy runs, on tables small enough
+	// for the answer to be worth the scan.
+	checkViolations, checkSkipped := probeChecks(ctx, r.DB, snap.Table)
+
 	var ignored []string
 	ops := alter.Ops
 	if alterErr != nil {
@@ -222,7 +227,7 @@ func (r *Runner) Analyze(ctx context.Context, req Request) (*Prepared, error) {
 		Ignored:            ignored,
 		EngineHint:         req.EngineHint,
 		EngineHintSource:   req.EngineHintSource,
-		Live:               liveStateFrom(snap, duplicates),
+		Live:               markCheckProbes(liveStateFrom(snap, duplicates), checkViolations, checkSkipped),
 		Binaries:           req.Binaries,
 		Settings:           analyzer.SettingsFromMap(settings),
 		Disk:               diskFacts(snap, req),
@@ -932,4 +937,14 @@ func actorOrUnknown(sess *state.Session) string {
 		return sess.Actor
 	}
 	return "an operator"
+}
+
+// markCheckProbes attaches the CHECK probe's answer to the live state.
+func markCheckProbes(state *analyzer.LiveState, violations map[string]int64, skipped string) *analyzer.LiveState {
+	if state == nil {
+		return nil
+	}
+	state.CheckViolations = violations
+	state.CheckProbeSkipped = skipped
+	return state
 }

@@ -37,6 +37,13 @@ type LiveState struct {
 	// Duplicates maps an index name to the number of duplicate groups found.
 	// Absent keys mean "not checked".
 	Duplicates map[string]int64
+
+	// CheckViolations maps a CHECK constraint name to the rows that violate it.
+	// Absent keys mean "not probed", which is different from zero.
+	CheckViolations map[string]int64
+	// CheckProbeSkipped explains why the constraints were not probed, when they
+	// were not: a table too large to scan at plan time is a real answer.
+	CheckProbeSkipped string
 }
 
 // mdlUnavailableByDesign reports whether this server version simply has no

@@ -17,6 +17,13 @@ func ParseCreateTable(sql string) (model.Table, []string, error) {
 	var tbl model.Table
 	var ignored []string
 
+	// SHOW CREATE TABLE writes constraint enforcement inside a version comment:
+	// `CONSTRAINT c CHECK ((x > 0)) /*!80016 NOT ENFORCED */`. Comments are dropped
+	// by the tokenizer, so the marker is unfenced first - only this exact marker, so
+	// no other comment in a dump changes meaning. It matters: NOT ENFORCED is the
+	// difference between a copy that carries dirty rows and one that fails on them.
+	sql = strings.ReplaceAll(sql, "/*!80016 NOT ENFORCED */", " NOT ENFORCED ")
+
 	tokens, err := Tokenize(sql)
 	if err != nil {
 		return tbl, nil, err
@@ -140,13 +147,20 @@ func ParseCreateTable(sql string) (model.Table, []string, error) {
 				name = tail[0].Value
 				tail = tail[1:]
 			}
-			if len(tail) > 0 && tail[0].IsWord("FOREIGN") {
+			switch {
+			case len(tail) > 0 && tail[0].IsWord("FOREIGN"):
 				fk, err := parseForeignKey(name, tail)
 				if err != nil {
 					return tbl, nil, fmt.Errorf("foreign key %q: %w", name, err)
 				}
 				tbl.ForeignKeys = append(tbl.ForeignKeys, *fk)
-			} else {
+			case len(tail) > 0 && tail[0].IsWord("CHECK"):
+				chk, err := parseCheck(name, tail)
+				if err != nil {
+					return tbl, nil, fmt.Errorf("check constraint %q: %w", name, err)
+				}
+				tbl.Checks = append(tbl.Checks, chk)
+			default:
 				ignored = append(ignored, "CONSTRAINT "+name)
 			}
 
@@ -158,7 +172,11 @@ func ParseCreateTable(sql string) (model.Table, []string, error) {
 			tbl.ForeignKeys = append(tbl.ForeignKeys, *fk)
 
 		case first.IsWord("CHECK"):
-			ignored = append(ignored, "CHECK constraint")
+			chk, err := parseCheck("", def)
+			if err != nil {
+				return tbl, nil, fmt.Errorf("check constraint: %w", err)
+			}
+			tbl.Checks = append(tbl.Checks, chk)
 
 		default:
 			col, _, err := parseColumnDef(def)
@@ -280,4 +298,42 @@ func parseIndexLine(tokens []Token) (string, []model.IndexPart, error) {
 		name = parts[0].Column // MySQL names the index after the first column
 	}
 	return name, parts, nil
+}
+
+// parseCheck reads a CHECK constraint from the tokens that start at CHECK.
+//
+// The expression is kept as the server wrote it, joined back into one string: it is
+// what gets run as `SELECT 1 FROM t WHERE NOT (<expression>) LIMIT 1` to find rows
+// that would break a copy, so it has to be valid SQL of its own.
+func parseCheck(name string, tail []Token) (model.Check, error) {
+	if len(tail) < 2 || !tail[0].IsWord("CHECK") || !tail[1].IsPunct("(") {
+		return model.Check{}, fmt.Errorf("expected CHECK (expression)")
+	}
+	inner, next, err := consumeParen(tail, 1)
+	if err != nil {
+		return model.Check{}, err
+	}
+	if len(strings.TrimSpace(JoinTokens(inner))) == 0 {
+		return model.Check{}, fmt.Errorf("CHECK has an empty expression")
+	}
+	// MySQL stores the expression with its own parentheses: CHECK ((`x` > 0)). One
+	// layer is redundant for the probe query, which wraps the expression in NOT (...)
+	// anyway, so unwrap while the whole expression is parenthesised.
+	for {
+		if len(inner) < 2 || !inner[0].IsPunct("(") || !inner[len(inner)-1].IsPunct(")") {
+			break
+		}
+		sub, next, err := consumeParen(inner, 0)
+		if err != nil || next != len(inner) {
+			break
+		}
+		inner = sub
+	}
+	chk := model.Check{Name: name, Expression: JoinTokens(inner), Enforced: true}
+	// 8.0.16 writes `NOT ENFORCED` after the expression; `ENFORCED` may appear too.
+	rest := tail[next:]
+	if len(rest) >= 2 && rest[0].IsWord("NOT") && rest[1].IsWord("ENFORCED") {
+		chk.Enforced = false
+	}
+	return chk, nil
 }
