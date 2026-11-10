@@ -405,6 +405,11 @@ func Analyze(in Input) Plan {
 	}
 	p.Recommendation = rec
 
+	// Checks that need the chosen engine come after routing: D13 asks whether the
+	// engine that will actually run has room to finish, which is not answerable
+	// until the engine is known.
+	p.Checks = append(p.Checks, checksExecution(in, rec.Engine)...)
+
 	p.Duration = estimateDuration(in, projected, rec.Engine)
 	p.Disk = estimateDisk(projected, rec.Engine)
 	p.Recovery = recoveryFor(rec.Engine)

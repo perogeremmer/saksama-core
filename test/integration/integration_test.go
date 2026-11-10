@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1836,4 +1837,29 @@ func TestReconcileIsQuietWhenEverythingFinished(t *testing.T) {
 	if len(findings) != 0 {
 		t.Fatalf("expected nothing to reconcile, got %+v", findings)
 	}
+}
+
+// D13 asks the server for innodb_online_alter_log_max_size, so the collector has to
+// actually carry it. Without this, the check would be a rule that can never fire on
+// a real server: it would see an unknown value, report "could not be read", and
+// look like a cautious pass forever.
+func TestCollectorCarriesTheOnlineAlterLogSize(t *testing.T) {
+	db := adminDB(t)
+	c := introspect.NewCollector(db, "", "")
+	settings, err := c.Settings(context.Background())
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	raw, ok := settings["innodb_online_alter_log_max_size"]
+	if !ok {
+		t.Fatalf("innodb_online_alter_log_max_size was not collected; got %d settings: %v", len(settings), settings)
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		t.Fatalf("the value is not a byte count: %q", raw)
+	}
+	if n <= 0 {
+		t.Fatalf("innodb_online_alter_log_max_size = %d", n)
+	}
+	t.Logf("innodb_online_alter_log_max_size = %d bytes", n)
 }

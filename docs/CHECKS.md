@@ -19,8 +19,8 @@ contract, so they are never renumbered or reused for something else.
 | `planned` | specified here, not implemented yet |
 | `moved` | superseded by the engine matrix (`saksama advise`), which reports it as a per-engine requirement instead of a check |
 
-Counts today: **41 implemented check IDs** out of **54 catalogued** (41 `done`,
-9 `planned`, 4 `moved`), plus **12 server settings** in the doctor (section S).
+Counts today: **45 implemented check IDs** out of **54 catalogued** (45 `done`,
+5 `planned`, 4 `moved`), plus **12 server settings** in the doctor (section S).
 The `done` column is the number to trust: it is the one this file cannot inflate
 without the analyzer contradicting it.
 
@@ -66,7 +66,7 @@ without the analyzer contradicting it.
 | C4 | a copy engine is used on a table with foreign keys | `BLOCKER` | moved | gh-ost's version of this is a hard requirement in the engine matrix; pt-osc handles it |
 | C5 | the table is involved in more than ten foreign keys | `WARN` | done | each is a potential integrity window |
 | C6 | Aurora, where `foreign_key_checks=0` is unavailable | `WARN` | planned | reported today as a managed-service note, not a distinct ID |
-| C7 | a foreign key column is nullable or not | `INFO` | planned | affects `ON DELETE SET NULL` behaviour |
+| C7 | a foreign key column is nullable or not | `INFO` | done | names the nullable FK columns, and connects NULL to `ON DELETE SET NULL` when that is the action: a dangling child is a legal row that no constraint checks |
 | C8 | the ALTER itself changes a foreign key | `BLOCKER` | done | foreign key DDL is out of scope in v1 |
 
 ---
@@ -87,9 +87,9 @@ without the analyzer contradicting it.
 | D8 | leftover artifacts from a previous migration | `BLOCKER` | done | a new run would collide with them |
 | D9 | a `CHECK` constraint would be violated by the copy | `WARN` | planned | enforced from 8.0.16 |
 | D10 | the table is partitioned | `WARN` | done | gh-ost does not support it |
-| D11 | the table has generated columns | `INFO` | planned | pt-osc is the safer engine there |
+| D11 | the table has generated columns | `INFO` | done | names the generated columns and points at pt-osc: a copy engine recreates the table from its own definition, so the expression has to survive unchanged |
 | D12 | the target is marked as production | `WARN` | done | requires a hostname confirmation |
-| D13 | `innodb_online_alter_log_max_size` is small for a large rebuild | `WARN` | planned | `1799: Creating temporary table exceeded max size` |
+| D13 | `innodb_online_alter_log_max_size` is small for a large rebuild | `WARN` | done | raised only when the chosen engine is a native in-place rebuild and the table is 8 GiB or more: the log collects every concurrent write, and a full one fails with `1799` and rolls the whole statement back. Reads a variable collected with the doctor's settings; unreadable is reported, never passed |
 | D14 | `sql_log_bin` cannot be set, as on RDS without the right role | `WARN` | planned | the copy lands in the binlog |
 | D15 | the account lacks `SUPER` or `SESSION_VARIABLES_ADMIN` | `WARN` | done | `1227`, and `lock_wait_timeout` cannot be shortened |
 | D16 | `AUTO_INCREMENT` has a large gap | `INFO` | planned | informational only |
@@ -105,7 +105,7 @@ without the analyzer contradicting it.
 | E1 | the server is MariaDB | `BLOCKER` | done | the capability matrix is not verified for MariaDB |
 | E2 | the storage engine is not InnoDB | `BLOCKER` | done | the online DDL rules do not apply |
 | E3 | the server version cannot be parsed | `BLOCKER` | done | without a version, no capability can be claimed |
-| E4 | Percona Toolkit is older than 3.0 | `WARN` | planned | no `--resume`, narrower ALTER grammar |
+| E4 | Percona Toolkit is older than 3.0 | `WARN` | done | parsed from the installed binary's own `--version`: 2.x has no `--resume`, so an interrupted copy starts over, which an operator finds out mid-migration |
 | E5 | MySQL is older than 5.6 | `BLOCKER` | done | gh-ost requires 5.6 or newer, and 5.5 reached end of life in 2018 |
 | E5b | the metadata lock queue cannot be observed (MySQL 5.6) | `WARN`, `BLOCKER` in production | done | performance_schema.metadata_locks arrived in 5.7; a queue that cannot be read is not an empty queue |
 | E6 | gh-ost is not installed | `BLOCKER` | moved | now `R3`, per engine |
