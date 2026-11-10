@@ -64,6 +64,15 @@ func ParseAlter(sql string) (Alter, error) {
 		a.Table = tokens[i+1].Value
 		i += 2
 	}
+	// An empty quoted identifier is a token, but not a table: MySQL rejects ``
+	// outright, and a plan for a nameless table is a plan for nothing. The fuzzer
+	// found this one.
+	if strings.TrimSpace(a.Table) == "" {
+		return a, fmt.Errorf("empty table name")
+	}
+	if a.Schema != "" && strings.TrimSpace(a.Schema) == "" {
+		return a, fmt.Errorf("empty schema name")
+	}
 
 	rest := tokens[i:]
 	if len(rest) == 0 {
@@ -316,6 +325,11 @@ func parseIndexParts(tokens []Token) ([]model.IndexPart, []Token, error) {
 		p := model.IndexPart{}
 		if !chunk[0].IsIdentifier() {
 			return nil, tokens, fmt.Errorf("index column must be an identifier")
+		}
+		// An empty quoted identifier is a token but not a column: `(``)` parses to
+		// nothing, and MySQL rejects it. The fuzzer found an index "over" it.
+		if strings.TrimSpace(chunk[0].Value) == "" {
+			return nil, tokens, fmt.Errorf("index column has an empty name")
 		}
 		p.Column = chunk[0].Value
 		rest := chunk[1:]

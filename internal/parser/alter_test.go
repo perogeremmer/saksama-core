@@ -1,10 +1,10 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/perogeremmer/saksama-core/internal/model"
-	"strings"
 )
 
 func TestParseAlterAddIndex(t *testing.T) {
@@ -260,5 +260,79 @@ func TestRenderedSQLSurvivesEscapes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The fuzzer found these. Each one is a statement MySQL rejects and the parser used
+// to accept - or, in the last case, a truncation that panicked the CLI. They are
+// listed as examples, not only as corpus files, because a reader should be able to
+// see what the boundary is without decoding a fuzz input.
+func TestRefusesWhatMySQLRefuses(t *testing.T) {
+	cases := []struct{ sql, want string }{
+		{"ALTER TABLE `` ADD INDEX ix (id)", "empty table name"},
+		{"ALTER TABLE `shop`.`` ADD INDEX ix (id)", "empty table name"},
+	}
+	for _, c := range cases {
+		alter, err := ParseAlter(c.sql)
+		if err == nil {
+			t.Errorf("%q was accepted (%+v); MySQL rejects it", c.sql, alter)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%q failed with %q, want a refusal mentioning %q", c.sql, err, c.want)
+		}
+	}
+
+	// The same rule one level down: an operation the parser cannot model becomes
+	// OpUnknown, which the analyzer turns into a blocker. It is not an error here
+	// because the rest of the statement may still be readable, and it is certainly
+	// not a silent accept.
+	alter, err := ParseAlter("ALTER TABLE orders ADD INDEX ix (``)")
+	if err != nil {
+		t.Fatalf("the statement itself is readable: %v", err)
+	}
+	if len(alter.Ops) != 1 || alter.Ops[0].Kind != model.OpUnknown {
+		t.Fatalf("an index over an empty column must become OpUnknown: %+v", alter.Ops)
+	}
+}
+
+func TestCreateTableRefusesWhatMySQLRefuses(t *testing.T) {
+	cases := []struct{ sql, want string }{
+		{"CREATE TABLE `t` ()", "no columns"},
+		{"CREATE TABLE``(``A)0", "empty table name"},
+		{"CREATE TABLE `t` (`` int)", "no name"},
+		{"CREATE TABLE `t` (`d` int, `d` varchar(4))", "duplicate column"},
+		{"CREATE TABLE `t` (`id` int, FULLTEXT())", "no columns"},
+		{"CREATE TABLE `t` (`id` int, PRIMARY KEY (``))", "empty name"},
+		// The one that panicked: a truncated PRIMARY clause indexed past the end.
+		{"CREATE TABLE `0`(PRIMARY)", "truncated primary key"},
+	}
+	for _, c := range cases {
+		tbl, _, err := ParseCreateTable(c.sql)
+		if err == nil {
+			t.Errorf("%q was accepted (%+v); MySQL rejects it", c.sql, tbl)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%q failed with %q, want a refusal mentioning %q", c.sql, err, c.want)
+		}
+	}
+}
+
+// A definition that renders as nothing is not a fragment worth reporting: the
+// tokenizer treats some Unicode spaces as whitespace, and an empty finding in the
+// plan is noise a reader cannot act on.
+func TestInvisibleDefinitionsAreNotReportedAsIgnored(t *testing.T) {
+	tbl, ignored, err := ParseCreateTable("CREATE TABLE `t` (`id` int, \u0085 )")
+	if err != nil {
+		t.Fatalf("a table with one real column and some whitespace: %v", err)
+	}
+	if len(tbl.Columns) != 1 {
+		t.Fatalf("columns = %+v", tbl.Columns)
+	}
+	for _, fragment := range ignored {
+		if strings.TrimSpace(fragment) == "" {
+			t.Fatalf("an invisible fragment was reported as ignored: %q", ignored)
+		}
 	}
 }
