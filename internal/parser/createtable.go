@@ -55,6 +55,15 @@ func ParseCreateTable(sql string) (model.Table, []string, error) {
 		tbl.Name = tokens[i+1].Value
 		i += 2
 	}
+	// An empty quoted identifier is a token, but not a table. The fuzzer found
+	// `CREATE TABLE``(``A)0` parsing into a nameless table with a nameless column,
+	// which MySQL rejects and which the analyzer would happily plan a change for.
+	if strings.TrimSpace(tbl.Name) == "" {
+		return tbl, nil, fmt.Errorf("empty table name")
+	}
+	if tbl.Schema != "" && strings.TrimSpace(tbl.Schema) == "" {
+		return tbl, nil, fmt.Errorf("empty schema name")
+	}
 
 	if i >= len(tokens) || !tokens[i].IsPunct("(") {
 		return tbl, nil, fmt.Errorf("expected column definitions")
@@ -73,6 +82,11 @@ func ParseCreateTable(sql string) (model.Table, []string, error) {
 
 		switch {
 		case first.IsWord("PRIMARY"):
+			if len(def) < 2 {
+				// `PRIMARY` on its own is a truncated definition, not a key. The
+				// fuzzer reached def[2:] on a one-token slice and panicked.
+				return tbl, nil, fmt.Errorf("truncated primary key definition: %q", JoinTokens(def))
+			}
 			parts, _, err := parseIndexParts(def[2:]) // PRIMARY KEY (...)
 			if err != nil {
 				return tbl, nil, fmt.Errorf("primary key: %w", err)
@@ -149,10 +163,40 @@ func ParseCreateTable(sql string) (model.Table, []string, error) {
 		default:
 			col, _, err := parseColumnDef(def)
 			if err != nil {
-				ignored = append(ignored, JoinTokens(def))
+				// A fragment the reader cannot see is not a finding. The tokenizer
+				// treats some Unicode spaces as whitespace, and the fuzzer produced a
+				// definition that rendered as "" and was reported as ignored.
+				if text := strings.TrimSpace(JoinTokens(def)); text != "" {
+					ignored = append(ignored, text)
+				}
 				continue
 			}
+			if strings.TrimSpace(col.Name) == "" {
+				return tbl, nil, fmt.Errorf("column definition with no name: %q", JoinTokens(def))
+			}
 			tbl.Columns = append(tbl.Columns, col)
+		}
+	}
+
+	// Two columns with one name is error 1060, so a definition that contains them
+	// is not a table. Refusing here also keeps the analyzer honest: a model with a
+	// duplicated name makes every column lookup ambiguous, and the reply would
+	// depend on which entry the scan reached first.
+	seenColumns := make(map[string]bool, len(tbl.Columns))
+	for _, col := range tbl.Columns {
+		key := strings.ToLower(col.Name)
+		if seenColumns[key] {
+			return tbl, nil, fmt.Errorf("duplicate column %q", col.Name)
+		}
+		seenColumns[key] = true
+	}
+
+	// An index with no parts is not an index. `FULLTEXT()` used to arrive here as a
+	// real index over nothing, and the analyzer would then reason about a key that
+	// does not exist. MySQL rejects the definition, so this does too.
+	for _, idx := range tbl.Indexes {
+		if len(idx.Parts) == 0 {
+			return tbl, nil, fmt.Errorf("index %q has no columns", idx.Name)
 		}
 	}
 
@@ -198,6 +242,13 @@ func ParseCreateTable(sql string) (model.Table, []string, error) {
 				c.Collation = tbl.Collation
 			}
 		}
+	}
+
+	// A table with no columns is not a table: MySQL rejects `CREATE TABLE t ()`,
+	// so accepting it here would let the analyzer plan a change against nothing.
+	// The fuzzer found this one too.
+	if len(tbl.Columns) == 0 {
+		return tbl, ignored, fmt.Errorf("table %q has no columns", tbl.Name)
 	}
 
 	return tbl, ignored, nil

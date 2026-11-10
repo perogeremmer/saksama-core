@@ -65,3 +65,38 @@ jobs:
       - name: Container logs when it fails
         if: failure()
         run: docker logs mysql-volume --tail 100 || true
+
+  # The parser is the gate the analyzer trusts: whatever it returns becomes a rule
+  # verdict, and a verdict becomes an ALTER on a production table. Examples cover
+  # the inputs we thought of; this looks for the ones we did not. It found nine
+  # boundary bugs on the first run, including a panic on a truncated PRIMARY clause.
+  #
+  # Bounded on purpose: a fuzzer with no time limit is a job that either never ends
+  # or ends whenever the scheduler says. Both targets get the same window, and a
+  # failure here mails the crasher, which is committed to testdata/fuzz so the next
+  # run starts from it.
+  fuzz-parser:
+    name: Fuzz the SQL parser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fuzz ParseAlter
+        run: go test ./internal/parser/ -run=XXX -fuzz=FuzzParseAlter -fuzztime=90s
+
+      - name: Fuzz ParseCreateTable
+        run: go test ./internal/parser/ -run=XXX -fuzz=FuzzParseCreateTable -fuzztime=90s
+
+      - name: Upload anything the fuzzer found
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-corpus
+          path: internal/parser/testdata/fuzz/**
+          retention-days: 7
